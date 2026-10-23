@@ -35,6 +35,9 @@ type Substrate interface {
 	FleetStats() instrumentation.FleetNATStats
 	NATReport() *nat.NATReport
 
+	GetConnectedPeers() []string
+	GetFleetNodes(ctx context.Context) ([]string, error)
+
 	Close() error
 }
 
@@ -309,6 +312,27 @@ func (s *StubNode) FleetStats() instrumentation.FleetNATStats {
 
 func (s *StubNode) NATReport() *nat.NATReport {
 	return s.NATInfo
+}
+
+func (s *StubNode) GetConnectedPeers() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	peers := make([]string, 0, len(s.Peers))
+	for p := range s.Peers {
+		peers = append(peers, p)
+	}
+	return peers
+}
+
+func (s *StubNode) GetFleetNodes(ctx context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	nodes := make([]string, 0, len(s.Peers)+1)
+	nodes = append(nodes, s.NodeID)
+	for p := range s.Peers {
+		nodes = append(nodes, p)
+	}
+	return nodes, nil
 }
 
 func (s *StubNode) Close() error {

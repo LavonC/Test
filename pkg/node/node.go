@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,10 @@ type Node struct {
 	onPeerConn  func(peerID string)
 	onPeerDisc  func(peerID string)
 
+	fleetNodes      map[string]bool
+	onFleetPeerJoin func(peerID string)
+	onFleetPeerLeft func(peerID string)
+
 	started bool
 	closed  bool
 }
@@ -83,6 +88,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		tracker:     tracker,
 		classifier:  classifier,
 		relayClient: &relay.RelayClient{},
+		fleetNodes:  make(map[string]bool),
 	}
 
 	return n, nil
@@ -145,6 +151,49 @@ func (n *Node) Start(ctx context.Context) error {
 }
 
 func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
+	if env.Type == protocol.MsgPeerJoined {
+		var p protocol.PeerEventPayload
+		_ = json.Unmarshal(env.Payload, &p)
+		if p.NodeID != "" && p.NodeID != n.cfg.NodeID {
+			n.mu.Lock()
+			n.fleetNodes[p.NodeID] = true
+			cb := n.onFleetPeerJoin
+			n.mu.Unlock()
+			if cb != nil {
+				cb(p.NodeID)
+			}
+		}
+		return
+	}
+
+	if env.Type == protocol.MsgPeerLeft {
+		var p protocol.PeerEventPayload
+		_ = json.Unmarshal(env.Payload, &p)
+		if p.NodeID != "" {
+			n.mu.Lock()
+			delete(n.fleetNodes, p.NodeID)
+			cb := n.onFleetPeerLeft
+			n.mu.Unlock()
+			if cb != nil {
+				cb(p.NodeID)
+			}
+		}
+		return
+	}
+
+	if env.Type == protocol.MsgPeerListResponse {
+		var list protocol.PeerListPayload
+		_ = json.Unmarshal(env.Payload, &list)
+		n.mu.Lock()
+		for _, id := range list.Nodes {
+			if id != n.cfg.NodeID {
+				n.fleetNodes[id] = true
+			}
+		}
+		n.mu.Unlock()
+		return
+	}
+
 	n.mu.RLock()
 	tm := n.transport
 	n.mu.RUnlock()
@@ -370,6 +419,72 @@ func (n *Node) SetOnPeerConnected(fn func(peerID string)) {
 func (n *Node) SetOnPeerDisconnected(fn func(peerID string)) {
 	n.mu.Lock()
 	n.onPeerDisc = fn
+	n.mu.Unlock()
+}
+
+// GetConnectedPeers returns a list of peer IDs with active WebRTC connections.
+func (n *Node) GetConnectedPeers() []string {
+	n.mu.RLock()
+	tm := n.transport
+	n.mu.RUnlock()
+
+	if tm == nil {
+		return nil
+	}
+	return tm.ActivePeers()
+}
+
+// GetFleetNodes returns all online nodes currently registered with the coordinator.
+func (n *Node) GetFleetNodes(ctx context.Context) ([]string, error) {
+	n.mu.RLock()
+	sig := n.signaling
+	n.mu.RUnlock()
+
+	if sig != nil {
+		nodes, err := sig.QueryPeers(ctx)
+		if err == nil && len(nodes) > 0 {
+			n.mu.Lock()
+			for _, id := range nodes {
+				if id != n.cfg.NodeID {
+					n.fleetNodes[id] = true
+				}
+			}
+			n.mu.Unlock()
+		}
+	}
+
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	res := make([]string, 0, len(n.fleetNodes))
+	for id := range n.fleetNodes {
+		res = append(res, id)
+	}
+	return res, nil
+}
+
+// DisconnectPeer cleanly disconnects an active WebRTC peer.
+func (n *Node) DisconnectPeer(peerID string) error {
+	n.mu.RLock()
+	tm := n.transport
+	n.mu.RUnlock()
+
+	if tm == nil {
+		return errors.New("node transport not started")
+	}
+	return tm.DisconnectPeer(peerID)
+}
+
+// SetOnFleetPeerJoined sets callback when a new node joins the coordinator fleet.
+func (n *Node) SetOnFleetPeerJoined(fn func(string)) {
+	n.mu.Lock()
+	n.onFleetPeerJoin = fn
+	n.mu.Unlock()
+}
+
+// SetOnFleetPeerLeft sets callback when a node disconnects from the coordinator fleet.
+func (n *Node) SetOnFleetPeerLeft(fn func(string)) {
+	n.mu.Lock()
+	n.onFleetPeerLeft = fn
 	n.mu.Unlock()
 }
 

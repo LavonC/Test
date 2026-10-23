@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,6 +138,19 @@ func (c *clientConn) readPump() {
 		if c.nodeID != "" {
 			c.hub.mu.Lock()
 			delete(c.hub.clients, c.nodeID)
+			// Broadcast peer left notification to all remaining nodes
+			leftPayload, _ := json.Marshal(protocol.PeerEventPayload{NodeID: c.nodeID})
+			leftEnv, _ := json.Marshal(protocol.Envelope{
+				Type:     protocol.MsgPeerLeft,
+				SenderID: "coordinator",
+				Payload:  leftPayload,
+			})
+			for _, other := range c.hub.clients {
+				select {
+				case other.sendChan <- leftEnv:
+				default:
+				}
+			}
 			c.hub.mu.Unlock()
 		}
 		_ = c.conn.Close()
@@ -169,6 +183,22 @@ func (c *clientConn) readPump() {
 			}
 			c.hub.mu.Lock()
 			c.hub.clients[c.nodeID] = c
+
+			// Broadcast peer joined notification to all OTHER nodes
+			joinPayload, _ := json.Marshal(protocol.PeerEventPayload{NodeID: c.nodeID})
+			joinEnv, _ := json.Marshal(protocol.Envelope{
+				Type:     protocol.MsgPeerJoined,
+				SenderID: "coordinator",
+				Payload:  joinPayload,
+			})
+			for id, other := range c.hub.clients {
+				if id != c.nodeID {
+					select {
+					case other.sendChan <- joinEnv:
+					default:
+					}
+				}
+			}
 			c.hub.mu.Unlock()
 
 			ackEnv := protocol.Envelope{
@@ -178,6 +208,29 @@ func (c *clientConn) readPump() {
 			}
 			data, _ := json.Marshal(ackEnv)
 			c.sendChan <- data
+			continue
+		}
+
+		if env.Type == protocol.MsgPeerListRequest {
+			c.hub.mu.RLock()
+			nodes := make([]string, 0, len(c.hub.clients))
+			for id := range c.hub.clients {
+				nodes = append(nodes, id)
+			}
+			c.hub.mu.RUnlock()
+
+			respPayload, _ := json.Marshal(protocol.PeerListPayload{Nodes: nodes})
+			respEnv := protocol.Envelope{
+				Type:     protocol.MsgPeerListResponse,
+				SenderID: "coordinator",
+				TargetID: c.nodeID,
+				Payload:  respPayload,
+			}
+			data, _ := json.Marshal(respEnv)
+			select {
+			case c.sendChan <- data:
+			default:
+			}
 			continue
 		}
 
@@ -438,4 +491,46 @@ func (c *Client) Close() error {
 		c.writeMu.Unlock()
 	}
 	return nil
+}
+
+// URL returns the WebSocket URL the client connects to.
+func (c *Client) URL() string {
+	return c.url
+}
+
+// QueryPeers requests the current list of online node IDs from the coordinator.
+func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
+	// First attempt via HTTP /api/nodes if reachable
+	httpURL := c.url
+	if strings.HasPrefix(httpURL, "ws://") {
+		httpURL = "http://" + strings.TrimPrefix(httpURL, "ws://")
+	} else if strings.HasPrefix(httpURL, "wss://") {
+		httpURL = "https://" + strings.TrimPrefix(httpURL, "wss://")
+	}
+	httpURL = strings.TrimSuffix(httpURL, "/ws")
+
+	req, err := http.NewRequestWithContext(ctx, "GET", httpURL+"/api/nodes", nil)
+	if err == nil {
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			var result struct {
+				Count int      `json:"count"`
+				Nodes []string `json:"nodes"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+				return result.Nodes, nil
+			}
+		}
+	}
+
+	// Also request via WebSocket peer_list_req
+	_ = c.Send(protocol.Envelope{
+		Type:     protocol.MsgPeerListRequest,
+		SenderID: c.nodeID,
+		TargetID: "coordinator",
+	})
+
+	return nil, nil
 }

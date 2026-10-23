@@ -396,6 +396,37 @@ func (m *Manager) GetConnection(peerID string) (*PeerConnection, bool) {
 	return conn, ok
 }
 
+// ActivePeers returns a slice of remote peer IDs that currently have a peer session.
+func (m *Manager) ActivePeers() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	peers := make([]string, 0, len(m.peerSessions))
+	for peerID := range m.peerSessions {
+		peers = append(peers, peerID)
+	}
+	return peers
+}
+
+// DisconnectPeer terminates the WebRTC connection to a specific peer.
+func (m *Manager) DisconnectPeer(peerID string) error {
+	m.mu.Lock()
+	sessionID, ok := m.peerSessions[peerID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("no connection to peer %s", peerID)
+	}
+	conn, hasConn := m.connections[sessionID]
+	delete(m.peerSessions, peerID)
+	delete(m.connections, sessionID)
+	m.mu.Unlock()
+
+	if hasConn && conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
 // Close closes all peer connections and shuts down the transport manager.
 func (m *Manager) Close() error {
 	m.mu.Lock()

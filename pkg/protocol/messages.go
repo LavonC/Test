@@ -7,14 +7,18 @@ type MessageType string
 
 const (
 	// Signaling messages
-	MsgRegister     MessageType = "register"
-	MsgRegisterAck  MessageType = "register_ack"
-	MsgSDPOffer     MessageType = "sdp_offer"
-	MsgSDPAnswer    MessageType = "sdp_answer"
-	MsgICECandidate MessageType = "ice_candidate"
-	MsgRelayInvite  MessageType = "relay_invite"
-	MsgPing         MessageType = "ping"
-	MsgPong         MessageType = "pong"
+	MsgRegister         MessageType = "register"
+	MsgRegisterAck      MessageType = "register_ack"
+	MsgSDPOffer         MessageType = "sdp_offer"
+	MsgSDPAnswer        MessageType = "sdp_answer"
+	MsgICECandidate     MessageType = "ice_candidate"
+	MsgRelayInvite      MessageType = "relay_invite"
+	MsgPing             MessageType = "ping"
+	MsgPong             MessageType = "pong"
+	MsgPeerListRequest  MessageType = "peer_list_req"
+	MsgPeerListResponse MessageType = "peer_list_resp"
+	MsgPeerJoined       MessageType = "peer_joined"
+	MsgPeerLeft         MessageType = "peer_left"
 
 	// DataChannel protocol messages
 	DataMsgChunkRequest  byte = 0x10
@@ -64,6 +68,16 @@ type RegisterPayload struct {
 	IPv6Supported bool   `json:"ipv6_supported"`
 	PublicIPv4    string `json:"public_ipv4,omitempty"`
 	PublicIPv6    string `json:"public_ipv6,omitempty"`
+}
+
+// PeerListPayload contains a list of online nodes on the network.
+type PeerListPayload struct {
+	Nodes []string `json:"nodes"`
+}
+
+// PeerEventPayload contains a node ID for join/leave events.
+type PeerEventPayload struct {
+	NodeID string `json:"node_id"`
 }
 
 // ChunkRequestFrame models a request for a specific chunk or byte range.
