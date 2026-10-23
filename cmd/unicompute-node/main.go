@@ -1,0 +1,316 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/unicompute/obj1/pkg/node"
+	"github.com/unicompute/obj1/pkg/relay"
+)
+
+func main() {
+	nodeID := flag.String("id", "", "Unique node identifier (default: generated UUID)")
+	poolID := flag.String("pool", "default-pool", "Storage pool identifier")
+	storageDir := flag.String("storage", "", "Storage directory for chunk blobs (default: ./unicompute_data)")
+	quotaGB := flag.Int64("quota-gb", 10, "Contributed storage quota in GiB")
+	signalingURL := flag.String("signaling", "ws://127.0.0.1:8080/ws", "Coordinator signaling WebSocket URL")
+	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address")
+	relayAddr := flag.String("relay", "", "Contributor relay address (optional)")
+	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (runs local contributor relay)")
+	relayListen := flag.String("relay-listen", "0.0.0.0:22067", "Relay listen address if run-relay is enabled")
+
+	flag.Parse()
+
+	if *nodeID == "" {
+		*nodeID = "node-" + uuid.New().String()[:8]
+	}
+
+	if *storageDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "."
+		}
+		*storageDir = filepath.Join(home, ".unicompute", "storage", *nodeID)
+	}
+
+	fmt.Println("===================================================================")
+	fmt.Println(" UniCompute Objective 1: Peer-to-Peer Storage Substrate")
+	fmt.Printf(" Node ID:        %s\n", *nodeID)
+	fmt.Printf(" Pool ID:        %s\n", *poolID)
+	fmt.Printf(" Storage Quota:  %d GiB\n", *quotaGB)
+	fmt.Printf(" Storage Path:   %s\n", *storageDir)
+	fmt.Printf(" Signaling URL:  %s\n", *signalingURL)
+	fmt.Println("===================================================================")
+
+	// If runRelay is enabled, start contributor relay
+	var contributorRelay *relay.ContributorRelay
+	if *runRelay {
+		var err error
+		contributorRelay, err = relay.NewContributorRelay(relay.ServerConfig{
+			ListenAddr:     *relayListen,
+			SessionTimeout: 30 * time.Second,
+		})
+		if err != nil {
+			log.Printf("[WARN] Failed to start contributor relay: %v\n", err)
+		} else {
+			defer contributorRelay.Close()
+			log.Printf("[INFO] Contributor relay running on %s\n", contributorRelay.Addr().String())
+		}
+	}
+
+	quotaBytes := *quotaGB * 1024 * 1024 * 1024
+	n, err := node.NewNode(node.NodeConfig{
+		NodeID:          *nodeID,
+		PoolID:          *poolID,
+		StorageDir:      *storageDir,
+		StorageQuota:    quotaBytes,
+		SignalingURL:    *signalingURL,
+		STUNServersV4:   []string{*stunServer},
+		RelayAddr:       *relayAddr,
+		FallbackTimeout: 2000 * time.Millisecond,
+	})
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to initialize node: %v\n", err)
+	}
+	defer n.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log.Println("[INFO] Starting node and classifying network topology...")
+	if err := n.Start(ctx); err != nil {
+		log.Printf("[WARN] Node startup note: %v (running in offline/direct mode)\n", err)
+	}
+
+	// Print NAT & Network diagnostics
+	natRep := n.NATReport()
+	if natRep != nil {
+		fmt.Println("\n--- Network Diagnostics ---")
+		fmt.Printf(" NAT Classification: %s\n", natRep.NATType)
+		fmt.Printf(" Behind CGNAT:        %v (RFC 6598 100.64.0.0/10)\n", natRep.IsBehindCGNAT)
+		fmt.Printf(" IPv4 Available:      %v (Public: %s)\n", natRep.IPv4Supported, natRep.PublicIPv4)
+		fmt.Printf(" IPv6 Available:      %v (Public: %s)\n", natRep.IPv6Supported, natRep.PublicIPv6)
+		fmt.Printf(" Hole-Punch Feasible: %v\n", natRep.HolePunchFeasible)
+		fmt.Printf(" Requires Relay:      %v\n", natRep.RequiresRelay)
+		if len(natRep.FilteredInterfaces) > 0 {
+			fmt.Printf(" Pruned Virtual Adapters: %v\n", natRep.FilteredInterfaces)
+		}
+		fmt.Println("---------------------------")
+	}
+
+	// Event hooks
+	n.SetOnChunkReceived(func(peerID, chunkID string, size int64) {
+		fmt.Printf("\n[EVENT] Chunk %s (%d bytes) received from peer %s and stored\n> ", chunkID, size, peerID)
+	})
+
+	n.SetOnStreamMessage(func(peerID string, data []byte) {
+		fmt.Printf("\n[STREAM] Message from %s: %s\n> ", peerID, string(data))
+	})
+
+	n.SetOnPeerConnected(func(peerID string) {
+		fmt.Printf("\n[EVENT] Peer %s connected via WebRTC DataChannel\n> ", peerID)
+		if m, ok := n.GetPathMetrics(peerID); ok {
+			fmt.Printf("[METRICS] Peer %s path: direct=%v, pair=%s, local=%s, remote=%s\n> ",
+				peerID, m.IsDirect, m.PairType, m.LocalCandidate, m.RemoteCandidate)
+		}
+	})
+
+	// Periodic telemetry reporting
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				usage := n.StorageUsage()
+				log.Printf("[STATUS] Storage: %d / %d MB used (%.1f%%) | Blobs: %d\n",
+					usage.UsedBytes/(1024*1024), usage.QuotaBytes/(1024*1024),
+					(float64(usage.UsedBytes)/float64(usage.QuotaBytes))*100, usage.BlobCount)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Interactive Console Loop
+	fmt.Println("\nInteractive Mode Active!")
+	fmt.Println("Type 'help' to see commands, or Ctrl+C to exit.")
+	fmt.Print("> ")
+
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				fmt.Print("> ")
+				continue
+			}
+			parts := strings.Fields(line)
+			cmd := strings.ToLower(parts[0])
+
+			switch cmd {
+			case "help":
+				fmt.Println("Available Commands:")
+				fmt.Println("  put <filePath>                 - Store a local file into the disk vault")
+				fmt.Println("  list                           - List all stored blobs in the vault")
+				fmt.Println("  stat <blobID>                  - Show metadata for a stored blob")
+				fmt.Println("  del <blobID>                   - Delete a stored blob")
+				fmt.Println("  scrub                          - Scrub blob store for bitrot")
+				fmt.Println("  connect <peerID>               - Establish P2P WebRTC link with peer")
+				fmt.Println("  transfer <peerID> <blobID>     - Transfer a blob to peer over WebRTC")
+				fmt.Println("  stream <peerID> <message>      - Send live stream message to peer")
+				fmt.Println("  metrics                        - Display live path metrics")
+				fmt.Println("  nat                            - Show local NAT diagnostics")
+				fmt.Println("  quit, exit                     - Terminate the node")
+			case "put":
+				if len(parts) < 2 {
+					fmt.Println("Usage: put <filePath>")
+					break
+				}
+				filePath := parts[1]
+				f, err := os.Open(filePath)
+				if err != nil {
+					fmt.Printf("Error opening file: %v\n", err)
+					break
+				}
+				hasher := sha256.New()
+				if _, err := io.Copy(hasher, f); err != nil {
+					f.Close()
+					fmt.Printf("Error hashing file: %v\n", err)
+					break
+				}
+				blobID := hex.EncodeToString(hasher.Sum(nil))
+				if _, err := f.Seek(0, io.SeekStart); err != nil {
+					f.Close()
+					fmt.Printf("Error rewinding file: %v\n", err)
+					break
+				}
+				written, err := n.PutBlob(blobID, f)
+				f.Close()
+				if err != nil {
+					fmt.Printf("PutBlob failed: %v\n", err)
+				} else {
+					fmt.Printf("Successfully stored blob: %s (%d bytes)\n", blobID, written)
+				}
+			case "list":
+				blobs, err := n.ListBlobs()
+				if err != nil {
+					fmt.Printf("Error listing blobs: %v\n", err)
+					break
+				}
+				fmt.Printf("Stored Blobs (%d total):\n", len(blobs))
+				for i, b := range blobs {
+					fmt.Printf(" [%d] ID: %s | Size: %d bytes | Mod: %s\n", i+1, b.ID, b.Size, b.ModTime.Format(time.RFC3339))
+				}
+			case "stat":
+				if len(parts) < 2 {
+					fmt.Println("Usage: stat <blobID>")
+					break
+				}
+				info, err := n.StatBlob(parts[1])
+				if err != nil {
+					fmt.Printf("Stat error: %v\n", err)
+				} else {
+					fmt.Printf("Blob: %s | Size: %d bytes | Mod: %s | SHA256: %s\n", info.ID, info.Size, info.ModTime.Format(time.RFC3339), info.SHA256)
+				}
+			case "del":
+				if len(parts) < 2 {
+					fmt.Println("Usage: del <blobID>")
+					break
+				}
+				if err := n.DeleteBlob(parts[1]); err != nil {
+					fmt.Printf("Delete error: %v\n", err)
+				} else {
+					fmt.Printf("Blob %s deleted successfully\n", parts[1])
+				}
+			case "scrub":
+				corrupted, err := n.Scrub()
+				if err != nil {
+					fmt.Printf("Scrub error: %v\n", err)
+				} else if len(corrupted) == 0 {
+					fmt.Println("Scrub complete: all stored blobs passed cryptographic SHA-256 verification.")
+				} else {
+					fmt.Printf("WARNING: Found %d corrupt blobs: %v\n", len(corrupted), corrupted)
+				}
+			case "connect":
+				if len(parts) < 2 {
+					fmt.Println("Usage: connect <peerID>")
+					break
+				}
+				peerID := parts[1]
+				fmt.Printf("Establishing WebRTC P2P link with %s...\n", peerID)
+				connCtx, cancelConn := context.WithTimeout(context.Background(), 15*time.Second)
+				_, err := n.ConnectPeer(connCtx, peerID)
+				cancelConn()
+				if err != nil {
+					fmt.Printf("Connection to %s failed: %v\n", peerID, err)
+				} else {
+					fmt.Printf("WebRTC DataChannel connected to %s!\n", peerID)
+				}
+			case "transfer":
+				if len(parts) < 3 {
+					fmt.Println("Usage: transfer <peerID> <blobID>")
+					break
+				}
+				peerID, blobID := parts[1], parts[2]
+				start := time.Now()
+				txCtx, cancelTx := context.WithTimeout(context.Background(), 30*time.Second)
+				err := n.TransferChunk(txCtx, peerID, blobID)
+				cancelTx()
+				if err != nil {
+					fmt.Printf("Transfer failed: %v\n", err)
+				} else {
+					fmt.Printf("Transferred blob %s to %s in %v\n", blobID, peerID, time.Since(start))
+				}
+			case "stream":
+				if len(parts) < 3 {
+					fmt.Println("Usage: stream <peerID> <message...>")
+					break
+				}
+				peerID := parts[1]
+				msg := strings.Join(parts[2:], " ")
+				if err := n.SendStream(peerID, []byte(msg)); err != nil {
+					fmt.Printf("Stream error: %v\n", err)
+				} else {
+					fmt.Printf("Stream message sent to %s\n", peerID)
+				}
+			case "metrics":
+				stats := n.FleetStats()
+				fmt.Printf("Fleet Metrics: Total=%d | Direct=%d | Relayed=%d | Direct%%=%.1f%% | CGNAT%%=%.1f%%\n",
+					stats.TotalConnections, stats.DirectConnections, stats.RelayedConnections, stats.DirectConnectionPct, stats.CGNATPrevalencePct)
+			case "nat":
+				rep := n.NATReport()
+				if rep != nil {
+					fmt.Printf("NAT: %s | CGNAT: %v | HolePunchFeasible: %v | IPv4: %s | IPv6: %s\n",
+						rep.NATType, rep.IsBehindCGNAT, rep.HolePunchFeasible, rep.PublicIPv4, rep.PublicIPv6)
+				}
+			case "quit", "exit":
+				fmt.Println("Exiting node...")
+				os.Exit(0)
+			default:
+				fmt.Printf("Unknown command: %s. Type 'help' for command list.\n", cmd)
+			}
+			fmt.Print("> ")
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("[INFO] Shutting down UniCompute node gracefully...")
+}
+

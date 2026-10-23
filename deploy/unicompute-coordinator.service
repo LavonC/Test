@@ -1,0 +1,29 @@
+[Unit]
+Description=UniCompute Central Coordinator & Signaling Hub
+After=network.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unicompute
+Group=unicompute
+WorkingDirectory=/opt/unicompute
+ExecStart=/opt/unicompute/unicompute-coordinator \
+    -listen 0.0.0.0:8080 \
+    -public-ip ${PUBLIC_IP} \
+    -realm unicompute.edu \
+    -turn true \
+    -turn-port 3478
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+EnvironmentFile=-/etc/default/unicompute-coordinator
+
+[Install]
+WantedBy=multi-user.target

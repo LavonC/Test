@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      - UNICOMPUTE_LISTEN=0.0.0.0:8080
+      - UNICOMPUTE_PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - UNICOMPUTE_REALM=${REALM:-unicompute.edu}
+      - UNICOMPUTE_TURN_SECRET=${TURN_SECRET:-campus-volunteer-secret-2026}
+    ports:
+      - "8080:8080"      # Internal / Direct WebSocket signaling
+      - "3478:3478/udp"  # STUN / Embedded TURN UDP port
+    depends_on:
+      - postgres
+    networks:
+      - unicompute-net
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"    # HTTP (redirects to HTTPS / ACME challenges)
+      - "443:443"  # HTTPS & WSS (Secure WebSocket Signaling)
+    environment:
+      - COORDINATOR_DOMAIN=${DOMAIN:-coordinator.unicompute.edu}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - coordinator
+    networks:
+      - unicompute-net
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-unicompute}
+      POSTGRES_USER: ${POSTGRES_USER:-unicompute}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unicompute_secure_pass}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"  # Local access only
+    networks:
+      - unicompute-net
+
+networks:
+  unicompute-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

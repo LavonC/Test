@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: unicompute-coordinator
+    runtime: go
+    plan: free
+    region: oregon
+    buildCommand: go build -o unicompute-coordinator ./cmd/unicompute-coordinator
+    startCommand: ./unicompute-coordinator
+    healthCheckPath: /health
+    envVars:
+      - key: UNICOMPUTE_TURN
+        value: "false"
+      - key: UNICOMPUTE_REALM
+        value: "unicompute.edu"

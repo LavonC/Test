@@ -1,0 +1,36 @@
+# Caddyfile: Automated Let's Encrypt TLS (WSS port 443) for UniCompute Coordinator
+# Replace {$COORDINATOR_DOMAIN:coordinator.unicompute.edu} with your public domain name or VM IP
+
+{$COORDINATOR_DOMAIN:coordinator.unicompute.edu} {
+    # WebSocket Signaling Proxy (WSS)
+    handle /ws* {
+        reverse_proxy coordinator:8080
+    }
+
+    # Health Check Endpoint
+    handle /health* {
+        reverse_proxy coordinator:8080
+    }
+
+    # Fleet Node Telemetry API
+    handle /api/* {
+        reverse_proxy coordinator:8080
+    }
+
+    # Fallback to coordinator
+    handle {
+        reverse_proxy coordinator:8080
+    }
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
