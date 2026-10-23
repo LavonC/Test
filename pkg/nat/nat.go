@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,68 @@ type Classifier struct {
 	stunServers6 []string
 }
 
+// cleanSTUNAddr normalizes a STUN host:port address by removing URL schemes and defaulting the port if omitted.
+func cleanSTUNAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(addr)
+	switch {
+	case strings.HasPrefix(lower, "stun://") || strings.HasPrefix(lower, "stuns://") ||
+		strings.HasPrefix(lower, "turn://") || strings.HasPrefix(lower, "turns://"):
+		idx := strings.Index(addr, "://")
+		addr = addr[idx+3:]
+	case strings.HasPrefix(lower, "stun:") || strings.HasPrefix(lower, "stuns:") ||
+		strings.HasPrefix(lower, "turn:") || strings.HasPrefix(lower, "turns:"):
+		idx := strings.Index(addr, ":")
+		addr = addr[idx+1:]
+	}
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+
+	// Strip query parameters if present (e.g., ?transport=udp)
+	if idx := strings.Index(addr, "?"); idx != -1 {
+		addr = strings.TrimSpace(addr[:idx])
+		if addr == "" {
+			return ""
+		}
+	}
+
+	// 1. Check if already valid host:port
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		return net.JoinHostPort(host, port)
+	}
+
+	// 2. Bracketed IPv6 without port: [2001:db8::1] or [::1]
+	if strings.HasPrefix(addr, "[") && strings.HasSuffix(addr, "]") {
+		inner := addr[1 : len(addr)-1]
+		return net.JoinHostPort(inner, "3478")
+	}
+
+	// 3. Unbracketed IPv6 without port: 2001:db8::1 or ::1
+	if ip := net.ParseIP(addr); ip != nil {
+		return net.JoinHostPort(addr, "3478")
+	}
+
+	// 4. Unbracketed IPv6 with port: 2001:db8::1:19302
+	if lastColon := strings.LastIndex(addr, ":"); lastColon != -1 {
+		possibleIP := addr[:lastColon]
+		possiblePort := addr[lastColon+1:]
+		if ip := net.ParseIP(possibleIP); ip != nil && strings.Contains(possibleIP, ":") {
+			if _, err := strconv.Atoi(possiblePort); err == nil {
+				return net.JoinHostPort(possibleIP, possiblePort)
+			}
+		}
+	}
+
+	// 5. Hostname or IPv4 without port: stun.l.google.com or 127.0.0.1
+	return net.JoinHostPort(addr, "3478")
+}
+
 // NewClassifier creates a new NAT classifier.
 func NewClassifier(stunServers4 []string, stunServers6 []string) *Classifier {
 	if len(stunServers4) == 0 {
@@ -162,15 +225,33 @@ func NewClassifier(stunServers4 []string, stunServers6 []string) *Classifier {
 			"stun1.l.google.com:19302",
 		}
 	}
+	var cleanV4, cleanV6 []string
+	for _, s := range stunServers4 {
+		for _, part := range strings.Split(s, ",") {
+			c := cleanSTUNAddr(part)
+			if c != "" {
+				cleanV4 = append(cleanV4, c)
+			}
+		}
+	}
+	for _, s := range stunServers6 {
+		for _, part := range strings.Split(s, ",") {
+			c := cleanSTUNAddr(part)
+			if c != "" {
+				cleanV6 = append(cleanV6, c)
+			}
+		}
+	}
 	return &Classifier{
-		stunServers4: stunServers4,
-		stunServers6: stunServers6,
+		stunServers4: cleanV4,
+		stunServers6: cleanV6,
 	}
 }
 
 // ProbeSTUNWithConn sends a STUN binding request over an existing PacketConn to test mapping.
 func ProbeSTUNWithConn(ctx context.Context, conn net.PacketConn, serverAddr string) (*stun.XORMappedAddress, error) {
-	rAddr, err := net.ResolveUDPAddr("udp", serverAddr)
+	cleanedAddr := cleanSTUNAddr(serverAddr)
+	rAddr, err := net.ResolveUDPAddr("udp", cleanedAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve STUN server %s: %w", serverAddr, err)
 	}

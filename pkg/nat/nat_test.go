@@ -236,3 +236,62 @@ func TestSTUNClassifier_ConeVsSymmetric(t *testing.T) {
 	}
 	t.Logf("Cone classifier report: NATType=%s, HolePunchFeasible=%v", reportCone.NATType, reportCone.HolePunchFeasible)
 }
+
+func TestCleanSTUNAddr(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"stun.l.google.com:19302", "stun.l.google.com:19302"},
+		{"stun:stun.l.google.com:19302", "stun.l.google.com:19302"},
+		{"stun://stun.l.google.com:19302", "stun.l.google.com:19302"},
+		{"stuns:stun.l.google.com:5349", "stun.l.google.com:5349"},
+		{"stuns://stun.l.google.com:5349", "stun.l.google.com:5349"},
+		{"STUN:stun.l.google.com:19302", "stun.l.google.com:19302"},
+		{"stun.l.google.com", "stun.l.google.com:3478"},
+		{"[::1]:19302", "[::1]:19302"},
+		{"stun:[::1]:19302", "[::1]:19302"},
+		{"[::1]", "[::1]:3478"},
+		{"stun:[::1]", "[::1]:3478"},
+		{"[2001:db8::1]", "[2001:db8::1]:3478"},
+		{"2001:db8::1", "[2001:db8::1]:3478"},
+		{"2001:db8::1:19302", "[2001:db8::1]:19302"},
+		{"turn:relay.example.com:3478?transport=udp", "relay.example.com:3478"},
+		{"", ""},
+		{"   ", ""},
+		{"stun:", ""},
+		{"stun://", ""},
+	}
+
+	for _, c := range cases {
+		got := cleanSTUNAddr(c.input)
+		if got != c.expected {
+			t.Errorf("cleanSTUNAddr(%q) = %q, want %q", c.input, got, c.expected)
+		}
+	}
+}
+
+func TestProbeSTUN_WithVariousAddressFormats(t *testing.T) {
+	srv, cleanup := startMockSTUNServer(t, 0)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	formats := []string{
+		srv,
+		"stun:" + srv,
+		"stun://" + srv,
+		"STUN:" + srv,
+	}
+
+	for _, format := range formats {
+		mapped, err := ProbeSTUN(ctx, "udp4", format)
+		if err != nil {
+			t.Fatalf("ProbeSTUN failed for format %q: %v", format, err)
+		}
+		if mapped.IP.String() != "127.0.0.1" {
+			t.Errorf("expected IP 127.0.0.1 for %q, got %s", format, mapped.IP.String())
+		}
+	}
+}

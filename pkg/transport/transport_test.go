@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v3"
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/protocol"
 	"github.com/unicompute/obj1/pkg/signaling"
@@ -163,5 +165,189 @@ func TestTransport_WebRTCConnectionAndChunkTransfer(t *testing.T) {
 	}
 	if mA.BytesSent <= 0 {
 		t.Errorf("expected BytesSent > 0, got %d", mA.BytesSent)
+	}
+}
+
+func TestUnnormalizedSTUN_ThrowsSchemeError(t *testing.T) {
+	api := webrtc.NewAPI()
+	// Raw unnormalized URL without scheme reproduces pion's "InvalidAccessError: unknown scheme type"
+	rawCfg := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun.l.google.com:19302"}},
+		},
+	}
+	_, err := api.NewPeerConnection(rawCfg)
+	if err == nil {
+		t.Fatalf("expected NewPeerConnection to fail with raw host:port, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "unknown scheme type") {
+		t.Errorf("expected 'unknown scheme type' error, got %v", err)
+	}
+}
+
+func TestBuildICEServers_AndPeerConnectionCreation(t *testing.T) {
+	testCases := []struct {
+		name        string
+		stunServers []string
+		turnServers []TURNServerConfig
+		wantSTUN    []string
+		wantTURN    []string
+	}{
+		{
+			name:        "Bare host and port STUN",
+			stunServers: []string{"stun.l.google.com:19302"},
+			wantSTUN:    []string{"stun:stun.l.google.com:19302"},
+		},
+		{
+			name:        "Prefixed stun: host and port",
+			stunServers: []string{"stun:stun.l.google.com:19302"},
+			wantSTUN:    []string{"stun:stun.l.google.com:19302"},
+		},
+		{
+			name:        "Double slash stun:// syntax",
+			stunServers: []string{"stun://stun.l.google.com:19302"},
+			wantSTUN:    []string{"stun:stun.l.google.com:19302"},
+		},
+		{
+			name:        "Uppercase STUN: scheme",
+			stunServers: []string{"STUN:stun.l.google.com:19302"},
+			wantSTUN:    []string{"stun:stun.l.google.com:19302"},
+		},
+		{
+			name:        "STUNS secure scheme",
+			stunServers: []string{"stuns:stun.l.google.com:5349"},
+			wantSTUN:    []string{"stuns:stun.l.google.com:5349"},
+		},
+		{
+			name:        "Double slash stuns:// syntax",
+			stunServers: []string{"stuns://stun.l.google.com:5349"},
+			wantSTUN:    []string{"stuns:stun.l.google.com:5349"},
+		},
+		{
+			name:        "Comma-separated STUN entries",
+			stunServers: []string{"stun.l.google.com:19302, stun1.l.google.com:19302"},
+			wantSTUN:    []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
+		},
+		{
+			name: "Bare TURN URL",
+			turnServers: []TURNServerConfig{
+				{URL: "relay.unicompute.org:3478", Username: "user", Credential: "pwd"},
+			},
+			wantTURN: []string{"turn:relay.unicompute.org:3478"},
+		},
+		{
+			name: "Double slash turn:// URL",
+			turnServers: []TURNServerConfig{
+				{URL: "turn://relay.unicompute.org:3478", Username: "user", Credential: "pwd"},
+			},
+			wantTURN: []string{"turn:relay.unicompute.org:3478"},
+		},
+		{
+			name: "TURNS secure scheme",
+			turnServers: []TURNServerConfig{
+				{URL: "turns://relay.unicompute.org:5349", Username: "user", Credential: "pwd"},
+			},
+			wantTURN: []string{"turns:relay.unicompute.org:5349"},
+		},
+		{
+			name: "Whitespace after stun prefix",
+			stunServers: []string{"stun:   stun.l.google.com:19302"},
+			wantSTUN: []string{"stun:stun.l.google.com:19302"},
+		},
+		{
+			name: "Comma-separated TURN URLs",
+			turnServers: []TURNServerConfig{
+				{URL: "turn:relay1.unicompute.org:3478, turn:relay2.unicompute.org:3478", Username: "user", Credential: "pwd"},
+			},
+			wantTURN: []string{"turn:relay1.unicompute.org:3478", "turn:relay2.unicompute.org:3478"},
+		},
+		{
+			name: "Empty and malformed STUN strings",
+			stunServers: []string{"", "   ", "stun:", "stun://", " ,  "},
+			wantSTUN: nil,
+		},
+		{
+			name: "IPv6 STUN with brackets and port",
+			stunServers: []string{"[::1]:19302"},
+			wantSTUN: []string{"stun:[::1]:19302"},
+		},
+		{
+			name: "IPv6 STUN with brackets without port",
+			stunServers: []string{"[::1]"},
+			wantSTUN: []string{"stun:[::1]"},
+		},
+		{
+			name: "STUN without port",
+			stunServers: []string{"stun.l.google.com"},
+			wantSTUN: []string{"stun:stun.l.google.com"},
+		},
+		{
+			name: "IPv6 bare without brackets with port",
+			stunServers: []string{"2001:db8::1:19302"},
+			wantSTUN: []string{"stun:[2001:db8::1]:19302"},
+		},
+		{
+			name: "IPv6 bare without brackets without port",
+			stunServers: []string{"2001:db8::1"},
+			wantSTUN: []string{"stun:[2001:db8::1]"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, err := NewManager(Config{
+				NodeID:      "test-node",
+				STUNServers: tc.stunServers,
+				TURNServers: tc.turnServers,
+			}, nil, nil)
+			if err != nil {
+				t.Fatalf("NewManager failed: %v", err)
+			}
+			defer mgr.Close()
+
+			iceServers := mgr.buildICEServers()
+
+			// Verify that Pion NewPeerConnection succeeds without 'unknown scheme type' error
+			webrtcCfg := webrtc.Configuration{
+				ICEServers: iceServers,
+			}
+			pc, err := mgr.api.NewPeerConnection(webrtcCfg)
+			if err != nil {
+				t.Fatalf("NewPeerConnection failed with normalized ICEServers: %v", err)
+			}
+			_ = pc.Close()
+
+			if len(tc.wantSTUN) > 0 {
+				if len(iceServers) == 0 {
+					t.Fatalf("expected at least 1 ICEServer for STUN")
+				}
+				if len(iceServers[0].URLs) != len(tc.wantSTUN) {
+					t.Errorf("got %d STUN URLs, want %d", len(iceServers[0].URLs), len(tc.wantSTUN))
+				}
+				for i, u := range tc.wantSTUN {
+					if i < len(iceServers[0].URLs) && iceServers[0].URLs[i] != u {
+						t.Errorf("STUN URL[%d] = %q, want %q", i, iceServers[0].URLs[i], u)
+					}
+				}
+			}
+
+			if len(tc.wantTURN) > 0 {
+				turnIdx := 0
+				if len(tc.wantSTUN) > 0 {
+					turnIdx = 1
+				}
+				if len(iceServers) <= turnIdx {
+					t.Fatalf("expected ICEServer for TURN at index %d", turnIdx)
+				}
+				if len(iceServers[turnIdx].URLs) != len(tc.wantTURN) {
+					t.Errorf("got %d TURN URLs, want %d", len(iceServers[turnIdx].URLs), len(tc.wantTURN))
+				}
+				for i, u := range tc.wantTURN {
+					if i < len(iceServers[turnIdx].URLs) && iceServers[turnIdx].URLs[i] != u {
+						t.Errorf("TURN URL[%d] = %q, want %q", i, iceServers[turnIdx].URLs[i], u)
+					}
+				}
+			}
+		})
 	}
 }

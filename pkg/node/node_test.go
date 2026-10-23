@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/unicompute/obj1/pkg/signaling"
+	"github.com/unicompute/obj1/pkg/transport"
 )
 
 func TestStubNode_Substrate(t *testing.T) {
@@ -396,4 +397,127 @@ func TestNode_InvariantCP1_CoordinatorFailureResilience(t *testing.T) {
 	if !bytes.Equal(data, chunkPayload) {
 		t.Fatalf("data mismatch after coordinator death")
 	}
+}
+
+func TestNode_ConnectPeer_WithDefaultSTUN(t *testing.T) {
+	tmpDir := t.TempDir()
+	storeDir1 := filepath.Join(tmpDir, "node1_storage")
+	storeDir2 := filepath.Join(tmpDir, "node2_storage")
+
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	// Initialized with default unicompute-node STUN server format ("stun.l.google.com:19302")
+	n1, err := NewNode(NodeConfig{
+		NodeID:        "node-stun-1",
+		PoolID:        "pool-stun",
+		StorageDir:    storeDir1,
+		StorageQuota:  50 * 1024 * 1024,
+		SignalingURL:  sigURL,
+		STUNServersV4: []string{"stun.l.google.com:19302"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 1: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:        "node-stun-2",
+		PoolID:        "pool-stun",
+		StorageDir:    storeDir2,
+		StorageQuota:  50 * 1024 * 1024,
+		SignalingURL:  sigURL,
+		STUNServersV4: []string{"stun.l.google.com:19302"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 2: %v", err)
+	}
+	defer n2.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("node 1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("node 2 Start failed: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	// Attempt ConnectPeer - must NOT fail with "failed to create PeerConnection: InvalidAccessError: unknown scheme type"
+	conn1, err := n1.ConnectPeer(ctx, "node-stun-2")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer conn1.Close()
+}
+
+func TestNode_ConnectPeer_WithVariedSTUNAndTURN(t *testing.T) {
+	tmpDir := t.TempDir()
+	storeDir1 := filepath.Join(tmpDir, "node1_storage")
+	storeDir2 := filepath.Join(tmpDir, "node2_storage")
+
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	n1, err := NewNode(NodeConfig{
+		NodeID:        "node-varied-1",
+		PoolID:        "pool-varied",
+		StorageDir:    storeDir1,
+		StorageQuota:  50 * 1024 * 1024,
+		SignalingURL:  sigURL,
+		STUNServersV4: []string{"stun://stun.l.google.com:19302, stun1.l.google.com:19302"},
+		STUNServersV6: []string{"[::1]:19302", "2001:db8::1:19302"},
+		TURNServers: []transport.TURNServerConfig{
+			{URL: "turn://relay.unicompute.org:3478, turns://relay.unicompute.org:5349", Username: "user", Credential: "pwd"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 1: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:        "node-varied-2",
+		PoolID:        "pool-varied",
+		StorageDir:    storeDir2,
+		StorageQuota:  50 * 1024 * 1024,
+		SignalingURL:  sigURL,
+		STUNServersV4: []string{"stun:stun.l.google.com:19302"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 2: %v", err)
+	}
+	defer n2.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("node 1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("node 2 Start failed: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	// Attempt ConnectPeer with mixed/varied schemes
+	conn1, err := n1.ConnectPeer(ctx, "node-varied-2")
+	if err != nil {
+		t.Fatalf("ConnectPeer with varied STUN/TURN failed: %v", err)
+	}
+	defer conn1.Close()
 }

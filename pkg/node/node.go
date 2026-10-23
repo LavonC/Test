@@ -128,7 +128,7 @@ func (n *Node) Start(ctx context.Context) error {
 
 	// 3. Initialize WebRTC P2P Transport Manager
 	stunList := n.cfg.STUNServersV4
-	if report.IPv6Supported && len(n.cfg.STUNServersV6) > 0 {
+	if len(n.cfg.STUNServersV6) > 0 {
 		stunList = append(stunList, n.cfg.STUNServersV6...)
 	}
 

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/node"
 	"github.com/unicompute/obj1/pkg/relay"
+	"github.com/unicompute/obj1/pkg/transport"
 )
 
 func main() {
@@ -27,7 +28,11 @@ func main() {
 	storageDir := flag.String("storage", "", "Storage directory for chunk blobs (default: ./unicompute_data)")
 	quotaGB := flag.Int64("quota-gb", 10, "Contributed storage quota in GiB")
 	signalingURL := flag.String("signaling", "ws://127.0.0.1:8080/ws", "Coordinator signaling WebSocket URL")
-	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address")
+	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address (comma-separated for multiple)")
+	stunServer6 := flag.String("stun6", "", "IPv6 STUN server address (comma-separated for multiple)")
+	turnServer := flag.String("turn", "", "TURN server address (e.g., turn:relay.example.com:3478, comma-separated for multiple)")
+	turnUser := flag.String("turn-user", "", "TURN server username")
+	turnCred := flag.String("turn-cred", "", "TURN server credential / password")
 	relayAddr := flag.String("relay", "", "Contributor relay address (optional)")
 	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (runs local contributor relay)")
 	relayListen := flag.String("relay-listen", "0.0.0.0:22067", "Relay listen address if run-relay is enabled")
@@ -46,6 +51,40 @@ func main() {
 		*storageDir = filepath.Join(home, ".unicompute", "storage", *nodeID)
 	}
 
+	var stunListV4 []string
+	if *stunServer != "" {
+		for _, s := range strings.Split(*stunServer, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				stunListV4 = append(stunListV4, s)
+			}
+		}
+	}
+
+	var stunListV6 []string
+	if *stunServer6 != "" {
+		for _, s := range strings.Split(*stunServer6, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				stunListV6 = append(stunListV6, s)
+			}
+		}
+	}
+
+	var turnConfigs []transport.TURNServerConfig
+	if *turnServer != "" {
+		for _, s := range strings.Split(*turnServer, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				turnConfigs = append(turnConfigs, transport.TURNServerConfig{
+					URL:        s,
+					Username:   *turnUser,
+					Credential: *turnCred,
+				})
+			}
+		}
+	}
+
 	fmt.Println("===================================================================")
 	fmt.Println(" UniCompute Objective 1: Peer-to-Peer Storage Substrate")
 	fmt.Printf(" Node ID:        %s\n", *nodeID)
@@ -53,6 +92,15 @@ func main() {
 	fmt.Printf(" Storage Quota:  %d GiB\n", *quotaGB)
 	fmt.Printf(" Storage Path:   %s\n", *storageDir)
 	fmt.Printf(" Signaling URL:  %s\n", *signalingURL)
+	if len(stunListV4) > 0 {
+		fmt.Printf(" STUN Server(s): %s\n", strings.Join(stunListV4, ", "))
+	}
+	if len(stunListV6) > 0 {
+		fmt.Printf(" STUN IPv6:      %s\n", strings.Join(stunListV6, ", "))
+	}
+	if len(turnConfigs) > 0 {
+		fmt.Printf(" TURN Server(s): %s\n", *turnServer)
+	}
 	fmt.Println("===================================================================")
 
 	// If runRelay is enabled, start contributor relay
@@ -78,7 +126,9 @@ func main() {
 		StorageDir:      *storageDir,
 		StorageQuota:    quotaBytes,
 		SignalingURL:    *signalingURL,
-		STUNServersV4:   []string{*stunServer},
+		STUNServersV4:   stunListV4,
+		STUNServersV6:   stunListV6,
+		TURNServers:     turnConfigs,
 		RelayAddr:       *relayAddr,
 		FallbackTimeout: 2000 * time.Millisecond,
 	})

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,26 +84,121 @@ func (m *Manager) GetTracker() *instrumentation.Tracker {
 	return m.tracker
 }
 
+// formatICEURL formats and normalizes STUN/TURN URLs to standard RFC 7064/7065 URI schemes
+// (e.g., stun:host:port, turn:host:port), resolving missing schemes, trimming double-slash syntax,
+// bracketing IPv6 literals, and handling query parameters.
+func formatICEURL(rawURL string, defaultScheme string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+
+	scheme := strings.TrimSuffix(strings.ToLower(defaultScheme), ":")
+	rest := rawURL
+
+	lower := strings.ToLower(rawURL)
+	switch {
+	case strings.HasPrefix(lower, "stun://"):
+		scheme = "stun"
+		rest = rawURL[7:]
+	case strings.HasPrefix(lower, "stuns://"):
+		scheme = "stuns"
+		rest = rawURL[8:]
+	case strings.HasPrefix(lower, "turn://"):
+		scheme = "turn"
+		rest = rawURL[7:]
+	case strings.HasPrefix(lower, "turns://"):
+		scheme = "turns"
+		rest = rawURL[8:]
+	case strings.HasPrefix(lower, "stun:"):
+		scheme = "stun"
+		rest = rawURL[5:]
+	case strings.HasPrefix(lower, "stuns:"):
+		scheme = "stuns"
+		rest = rawURL[6:]
+	case strings.HasPrefix(lower, "turn:"):
+		scheme = "turn"
+		rest = rawURL[5:]
+	case strings.HasPrefix(lower, "turns:"):
+		scheme = "turns"
+		rest = rawURL[6:]
+	default:
+		if strings.HasPrefix(rawURL, "//") {
+			rest = rawURL[2:]
+		}
+	}
+
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return ""
+	}
+
+	// Extract query parameter if present (e.g., ?transport=tcp)
+	var query string
+	if qIdx := strings.Index(rest, "?"); qIdx != -1 {
+		query = rest[qIdx:]
+		rest = strings.TrimSpace(rest[:qIdx])
+		if rest == "" {
+			return ""
+		}
+	}
+
+	// Normalize IPv6 literals to ensure proper bracketing required by RFC 7064/7065 and Pion
+	if !strings.HasPrefix(rest, "[") {
+		if ip := net.ParseIP(rest); ip != nil && strings.Contains(rest, ":") {
+			// Unbracketed IPv6 without port (e.g., 2001:db8::1 or ::1)
+			rest = "[" + rest + "]"
+		} else if lastColon := strings.LastIndex(rest, ":"); lastColon != -1 {
+			// Check for unbracketed IPv6 with port (e.g., 2001:db8::1:19302)
+			possibleIP := rest[:lastColon]
+			possiblePort := rest[lastColon+1:]
+			if ip := net.ParseIP(possibleIP); ip != nil && strings.Contains(possibleIP, ":") {
+				if _, err := strconv.Atoi(possiblePort); err == nil {
+					rest = "[" + possibleIP + "]:" + possiblePort
+				}
+			}
+		}
+	}
+
+	return scheme + ":" + rest + query
+}
+
 // buildICEServers converts config STUN and TURN entries to Pion ICEServers.
 func (m *Manager) buildICEServers() []webrtc.ICEServer {
 	var servers []webrtc.ICEServer
 
 	if len(m.cfg.STUNServers) > 0 {
-		servers = append(servers, webrtc.ICEServer{
-			URLs: m.cfg.STUNServers,
-		})
+		var stunURLs []string
+		for _, s := range m.cfg.STUNServers {
+			for _, part := range strings.Split(s, ",") {
+				formatted := formatICEURL(part, "stun")
+				if formatted != "" {
+					stunURLs = append(stunURLs, formatted)
+				}
+			}
+		}
+		if len(stunURLs) > 0 {
+			servers = append(servers, webrtc.ICEServer{
+				URLs: stunURLs,
+			})
+		}
 	}
 
 	for _, turn := range m.cfg.TURNServers {
-		url := turn.URL
-		if !strings.HasPrefix(url, "turn:") && !strings.HasPrefix(url, "turns:") {
-			url = "turn:" + url
+		var turnURLs []string
+		for _, part := range strings.Split(turn.URL, ",") {
+			formatted := formatICEURL(part, "turn")
+			if formatted != "" {
+				turnURLs = append(turnURLs, formatted)
+			}
 		}
-		servers = append(servers, webrtc.ICEServer{
-			URLs:       []string{url},
-			Username:   turn.Username,
-			Credential: turn.Credential,
-		})
+		if len(turnURLs) > 0 {
+			servers = append(servers, webrtc.ICEServer{
+				URLs:       turnURLs,
+				Username:   turn.Username,
+				Credential: turn.Credential,
+			})
+		}
 	}
 
 	return servers
