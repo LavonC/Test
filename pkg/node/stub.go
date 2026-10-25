@@ -13,6 +13,7 @@ import (
 	"github.com/unicompute/obj1/pkg/blobstore"
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
+	"github.com/unicompute/obj1/pkg/remoteshell"
 )
 
 // Substrate defines the interface that Objectives 2, 3, 4, and 5 consume from Objective 1.
@@ -30,6 +31,10 @@ type Substrate interface {
 	TransferChunk(ctx context.Context, peerID string, chunkID string) error
 	FetchChunk(ctx context.Context, peerID string, chunkID string, expectedSize int64) error
 	SendStream(peerID string, data []byte) error
+
+	// Remote Shell Command Execution
+	ExecuteRemoteCommand(ctx context.Context, peerID string, req remoteshell.ShellRequest) (remoteshell.ShellResponse, error)
+	ExecuteRemoteCommandAll(ctx context.Context, req remoteshell.ShellRequest) map[string]remoteshell.ShellResponse
 
 	GetPathMetrics(peerID string) (instrumentation.PathMetrics, bool)
 	FleetStats() instrumentation.FleetNATStats
@@ -333,6 +338,41 @@ func (s *StubNode) GetFleetNodes(ctx context.Context) ([]string, error) {
 		nodes = append(nodes, p)
 	}
 	return nodes, nil
+}
+
+func (s *StubNode) ExecuteRemoteCommand(ctx context.Context, peerID string, req remoteshell.ShellRequest) (remoteshell.ShellResponse, error) {
+	s.mu.RLock()
+	target, ok := s.Peers[peerID]
+	s.mu.RUnlock()
+
+	if !ok {
+		return remoteshell.ShellResponse{
+			ExecID:   req.ExecID,
+			ExitCode: -1,
+			Error:    fmt.Sprintf("peer %s not connected", peerID),
+		}, fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	_ = target
+	exec := remoteshell.NewSystemExecutor()
+	resp := exec.Execute(ctx, req)
+	return resp, nil
+}
+
+func (s *StubNode) ExecuteRemoteCommandAll(ctx context.Context, req remoteshell.ShellRequest) map[string]remoteshell.ShellResponse {
+	s.mu.RLock()
+	peers := make([]string, 0, len(s.Peers))
+	for p := range s.Peers {
+		peers = append(peers, p)
+	}
+	s.mu.RUnlock()
+
+	res := make(map[string]remoteshell.ShellResponse)
+	for _, p := range peers {
+		resp, _ := s.ExecuteRemoteCommand(ctx, p, req)
+		res[p] = resp
+	}
+	return res
 }
 
 func (s *StubNode) Close() error {

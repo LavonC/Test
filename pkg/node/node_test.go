@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/signaling"
 	"github.com/unicompute/obj1/pkg/transport"
 )
@@ -520,4 +522,96 @@ func TestNode_ConnectPeer_WithVariedSTUNAndTURN(t *testing.T) {
 		t.Fatalf("ConnectPeer with varied STUN/TURN failed: %v", err)
 	}
 	defer conn1.Close()
+}
+
+func TestNode_RemoteCommandExecution(t *testing.T) {
+	tmpDir := t.TempDir()
+	storeDir1 := filepath.Join(tmpDir, "node1_exec_store")
+	storeDir2 := filepath.Join(tmpDir, "node2_exec_store")
+
+	// 1. Start Signaling Coordinator Hub
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	// 2. Initialize Node 1 and Node 2
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "exec-node-1",
+		PoolID:       "exec-pool",
+		StorageDir:   storeDir1,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 1: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "exec-node-2",
+		PoolID:       "exec-pool",
+		StorageDir:   storeDir2,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 2: %v", err)
+	}
+	defer n2.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("node 1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("node 2 Start failed: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	// Connect Node 1 -> Node 2 over WebRTC
+	conn1, err := n1.ConnectPeer(ctx, "exec-node-2")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer conn1.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// 3. Node 1 executes shell command on Node 2
+	req := remoteshell.ShellRequest{
+		Command:   "echo unicompute_remote_shell_ok",
+		ShellType: remoteshell.ShellAuto,
+		TimeoutMs: 10000,
+	}
+
+	resp, err := n1.ExecuteRemoteCommand(ctx, "exec-node-2", req)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCommand failed: %v", err)
+	}
+
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s, stderr: %s)", resp.ExitCode, resp.Error, resp.Stderr)
+	}
+
+	if !strings.Contains(strings.ToLower(resp.Stdout), "unicompute_remote_shell_ok") {
+		t.Fatalf("expected stdout to contain test string, got: %q", resp.Stdout)
+	}
+
+	// 4. Test ExecuteRemoteCommandAll
+	allResults := n1.ExecuteRemoteCommandAll(ctx, req)
+	if len(allResults) != 1 {
+		t.Fatalf("expected 1 result from ExecuteRemoteCommandAll, got %d", len(allResults))
+	}
+
+	res2, ok := allResults["exec-node-2"]
+	if !ok || res2.ExitCode != 0 || !strings.Contains(strings.ToLower(res2.Stdout), "unicompute_remote_shell_ok") {
+		t.Fatalf("unexpected broadcast result: %+v", res2)
+	}
 }

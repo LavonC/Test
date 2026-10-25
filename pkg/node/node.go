@@ -10,11 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/blobstore"
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
 	"github.com/unicompute/obj1/pkg/protocol"
 	"github.com/unicompute/obj1/pkg/relay"
+	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/signaling"
 	"github.com/unicompute/obj1/pkg/transport"
 )
@@ -57,6 +59,10 @@ type Node struct {
 	onFleetPeerJoin func(peerID string)
 	onFleetPeerLeft func(peerID string)
 
+	shellExecutor  remoteshell.Executor
+	pendingExecsMu sync.Mutex
+	pendingExecs   map[string]chan remoteshell.ShellResponse
+
 	started bool
 	closed  bool
 }
@@ -83,12 +89,14 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	classifier := nat.NewClassifier(cfg.STUNServersV4, cfg.STUNServersV6)
 
 	n := &Node{
-		cfg:         cfg,
-		store:       store,
-		tracker:     tracker,
-		classifier:  classifier,
-		relayClient: &relay.RelayClient{},
-		fleetNodes:  make(map[string]bool),
+		cfg:           cfg,
+		store:         store,
+		tracker:       tracker,
+		classifier:    classifier,
+		relayClient:   &relay.RelayClient{},
+		fleetNodes:    make(map[string]bool),
+		shellExecutor: remoteshell.NewSystemExecutor(),
+		pendingExecs:  make(map[string]chan remoteshell.ShellResponse),
 	}
 
 	return n, nil
@@ -218,6 +226,10 @@ func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 	})
 
 	pc.SetOnStreamMessage(func(data []byte) {
+		if n.handleInternalStreamMessage(peerID, data) {
+			return
+		}
+
 		n.mu.RLock()
 		cb := n.onStreamMsg
 		n.mu.RUnlock()
@@ -328,6 +340,163 @@ func (n *Node) SendStream(peerID string, data []byte) error {
 	}
 
 	return conn.SendStreamMessage(data)
+}
+
+// handleInternalStreamMessage dispatches protocol-level messages such as remote shell execution.
+func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
+	// 1. Remote Shell Request
+	if bytes.HasPrefix(data, []byte(remoteshell.PrefixShellReq)) {
+		req, err := remoteshell.DecodeRequest(data)
+		if err != nil {
+			return true
+		}
+
+		go func() {
+			n.mu.RLock()
+			exec := n.shellExecutor
+			n.mu.RUnlock()
+			if exec == nil {
+				exec = remoteshell.NewSystemExecutor()
+			}
+
+			resp := exec.Execute(context.Background(), req)
+			respBytes, err := remoteshell.EncodeResponse(resp)
+			if err == nil {
+				_ = n.SendStream(peerID, respBytes)
+			}
+		}()
+		return true
+	}
+
+	// 2. Remote Shell Response
+	if bytes.HasPrefix(data, []byte(remoteshell.PrefixShellResp)) {
+		resp, err := remoteshell.DecodeResponse(data)
+		if err != nil {
+			return true
+		}
+
+		n.pendingExecsMu.Lock()
+		ch, ok := n.pendingExecs[resp.ExecID]
+		if ok {
+			delete(n.pendingExecs, resp.ExecID)
+		}
+		n.pendingExecsMu.Unlock()
+
+		if ok && ch != nil {
+			select {
+			case ch <- resp:
+			default:
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+// SetShellExecutor configures a custom shell executor for handling remote command execution.
+func (n *Node) SetShellExecutor(exec remoteshell.Executor) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.shellExecutor = exec
+}
+
+// ExecuteRemoteCommand transmits a shell command execution request to a connected peer and awaits result.
+func (n *Node) ExecuteRemoteCommand(ctx context.Context, peerID string, req remoteshell.ShellRequest) (remoteshell.ShellResponse, error) {
+	if req.ExecID == "" {
+		req.ExecID = "exec-" + uuid.New().String()[:8]
+	}
+
+	n.mu.RLock()
+	tm := n.transport
+	n.mu.RUnlock()
+
+	if tm == nil {
+		return remoteshell.ShellResponse{}, errors.New("node transport not started")
+	}
+
+	_, ok := tm.GetConnection(peerID)
+	if !ok {
+		return remoteshell.ShellResponse{}, fmt.Errorf("no active connection to peer %s", peerID)
+	}
+
+	respCh := make(chan remoteshell.ShellResponse, 1)
+
+	n.pendingExecsMu.Lock()
+	n.pendingExecs[req.ExecID] = respCh
+	n.pendingExecsMu.Unlock()
+
+	defer func() {
+		n.pendingExecsMu.Lock()
+		delete(n.pendingExecs, req.ExecID)
+		n.pendingExecsMu.Unlock()
+	}()
+
+	wireBytes, err := remoteshell.EncodeRequest(req)
+	if err != nil {
+		return remoteshell.ShellResponse{}, fmt.Errorf("failed to encode shell request: %w", err)
+	}
+
+	if err := n.SendStream(peerID, wireBytes); err != nil {
+		return remoteshell.ShellResponse{}, fmt.Errorf("failed to send shell request to %s: %w", peerID, err)
+	}
+
+	timeout := 35 * time.Second
+	if req.TimeoutMs > 0 {
+		timeout = time.Duration(req.TimeoutMs)*time.Millisecond + 5*time.Second
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return remoteshell.ShellResponse{
+			ExecID:   req.ExecID,
+			ExitCode: -1,
+			Error:    ctx.Err().Error(),
+		}, ctx.Err()
+	case <-timer.C:
+		return remoteshell.ShellResponse{
+			ExecID:   req.ExecID,
+			ExitCode: -1,
+			Error:    "remote command execution response timed out",
+		}, errors.New("remote execution timed out waiting for peer response")
+	case resp := <-respCh:
+		return resp, nil
+	}
+}
+
+// ExecuteRemoteCommandAll executes the command across all active connected peers in parallel.
+func (n *Node) ExecuteRemoteCommandAll(ctx context.Context, req remoteshell.ShellRequest) map[string]remoteshell.ShellResponse {
+	peers := n.GetConnectedPeers()
+	results := make(map[string]remoteshell.ShellResponse)
+	if len(peers) == 0 {
+		return results
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, p := range peers {
+		wg.Add(1)
+		go func(peerID string) {
+			defer wg.Done()
+			pReq := req
+			pReq.ExecID = fmt.Sprintf("%s-%s", peerID, uuid.New().String()[:6])
+			resp, err := n.ExecuteRemoteCommand(ctx, peerID, pReq)
+			if err != nil && resp.Error == "" {
+				resp.Error = err.Error()
+				resp.ExitCode = -1
+			}
+			mu.Lock()
+			results[peerID] = resp
+			mu.Unlock()
+		}(p)
+	}
+
+	wg.Wait()
+	return results
 }
 
 // Store returns the underlying local blob store.

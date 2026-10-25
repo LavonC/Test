@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/node"
 	"github.com/unicompute/obj1/pkg/relay"
+	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/transport"
 )
 
@@ -262,6 +263,8 @@ func main() {
 				fmt.Println("  status, info                   - Display full local node and network status")
 				fmt.Println("  metrics                        - Display live path metrics")
 				fmt.Println("  nat                            - Show local NAT diagnostics")
+				fmt.Println("  exec <peerID|all> <command...> - Execute shell command on connected remote PC(s)")
+				fmt.Println("  shell <peerID|all> <cmd...>    - Alias for remote command execution")
 				fmt.Println("  quit, exit                     - Terminate the node")
 			case "peers", "users", "nodes":
 				fleetList, err := n.GetFleetNodes(context.Background())
@@ -530,6 +533,87 @@ func main() {
 				if rep != nil {
 					fmt.Printf("NAT: %s | CGNAT: %v | HolePunchFeasible: %v | IPv4: %s | IPv6: %s\n",
 						rep.NATType, rep.IsBehindCGNAT, rep.HolePunchFeasible, rep.PublicIPv4, rep.PublicIPv6)
+				}
+			case "exec", "shell":
+				if len(parts) < 3 {
+					fmt.Println("Usage: exec <peerID|all> <command...>")
+					fmt.Println("Example: exec node-a1b2 whoami")
+					fmt.Println("Example: exec all Get-Process")
+					break
+				}
+				targetPeer := parts[1]
+				commandStr := strings.Join(parts[2:], " ")
+
+				if targetPeer == "all" {
+					activePeers := n.GetConnectedPeers()
+					if len(activePeers) == 0 {
+						fmt.Println("[EXEC] No connected remote peers. Establish connection first via 'connect <peerID>'.")
+						break
+					}
+					fmt.Printf("[EXEC] Broadcasting '%s' to %d connected remote peer(s)...\n", commandStr, len(activePeers))
+					execCtx, cancelExec := context.WithTimeout(context.Background(), 45*time.Second)
+					results := n.ExecuteRemoteCommandAll(execCtx, remoteshell.ShellRequest{
+						Command:   commandStr,
+						ShellType: remoteshell.ShellAuto,
+					})
+					cancelExec()
+
+					for pid, res := range results {
+						fmt.Println("=================================================================")
+						fmt.Printf(" Remote Node: %s | Exit Code: %d | Duration: %d ms\n", pid, res.ExitCode, res.DurationMs)
+						if res.Error != "" {
+							fmt.Printf(" [!] Error: %s\n", res.Error)
+						}
+						if res.Stdout != "" {
+							fmt.Println(" --- STDOUT ---")
+							fmt.Print(res.Stdout)
+							if !strings.HasSuffix(res.Stdout, "\n") {
+								fmt.Println()
+							}
+						}
+						if res.Stderr != "" {
+							fmt.Println(" --- STDERR ---")
+							fmt.Print(res.Stderr)
+							if !strings.HasSuffix(res.Stderr, "\n") {
+								fmt.Println()
+							}
+						}
+						fmt.Println("=================================================================")
+					}
+				} else {
+					fmt.Printf("[EXEC] Executing '%s' on remote PC '%s'...\n", commandStr, targetPeer)
+					execCtx, cancelExec := context.WithTimeout(context.Background(), 45*time.Second)
+					res, err := n.ExecuteRemoteCommand(execCtx, targetPeer, remoteshell.ShellRequest{
+						Command:   commandStr,
+						ShellType: remoteshell.ShellAuto,
+					})
+					cancelExec()
+
+					if err != nil {
+						fmt.Printf("[EXEC] Remote execution failed: %v\n", err)
+						break
+					}
+
+					fmt.Println("=================================================================")
+					fmt.Printf(" Remote Node: %s | Exit Code: %d | Duration: %d ms\n", targetPeer, res.ExitCode, res.DurationMs)
+					if res.Error != "" {
+						fmt.Printf(" [!] Error: %s\n", res.Error)
+					}
+					if res.Stdout != "" {
+						fmt.Println(" --- STDOUT ---")
+						fmt.Print(res.Stdout)
+						if !strings.HasSuffix(res.Stdout, "\n") {
+							fmt.Println()
+						}
+					}
+					if res.Stderr != "" {
+						fmt.Println(" --- STDERR ---")
+						fmt.Print(res.Stderr)
+						if !strings.HasSuffix(res.Stderr, "\n") {
+							fmt.Println()
+						}
+					}
+					fmt.Println("=================================================================")
 				}
 			case "quit", "exit":
 				fmt.Println("Exiting node...")
