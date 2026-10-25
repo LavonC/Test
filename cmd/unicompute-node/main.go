@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/node"
+	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/relay"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/transport"
@@ -36,9 +37,15 @@ func main() {
 	turnCred := flag.String("turn-cred", "", "TURN server credential / password")
 	relayAddr := flag.String("relay", "", "Contributor relay address (optional)")
 	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (runs local contributor relay)")
+	enableCodeExecution := flag.Bool("enable-code-execution", false, "Enable Docker sandbox code execution on this worker")
+	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated node IDs allowed to submit code jobs")
+	codeTimeout := flag.Int("code-timeout", 10, "Code job timeout in seconds (1-30)")
 	relayListen := flag.String("relay-listen", "0.0.0.0:22067", "Relay listen address if run-relay is enabled")
 
 	flag.Parse()
+	if *codeTimeout < 1 || *codeTimeout > codeexec.MaxTimeoutSeconds {
+		log.Fatalf("-code-timeout must be between 1 and %d seconds", codeexec.MaxTimeoutSeconds)
+	}
 
 	if *nodeID == "" {
 		*nodeID = "node-" + uuid.New().String()[:8]
@@ -135,6 +142,29 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to initialize node: %v\n", err)
+	}
+	if *enableCodeExecution {
+		var allowedPeers []string
+		for _, peerID := range strings.Split(*codeAllowlist, ",") {
+			if peerID = strings.TrimSpace(peerID); peerID != "" {
+				allowedPeers = append(allowedPeers, peerID)
+			}
+		}
+		if len(allowedPeers) == 0 {
+			log.Fatalf("-enable-code-execution requires -code-allowlist with one or more trusted peer IDs")
+		}
+		dockerCtx, cancelDocker := context.WithTimeout(context.Background(), 5*time.Second)
+		dockerErr := codeexec.CheckDocker(dockerCtx)
+		cancelDocker()
+		if dockerErr != nil {
+			log.Fatalf("code execution requested but Docker is unavailable: %v", dockerErr)
+		}
+		n.SetCodeExecutor(codeexec.NewDockerExecutor(codeexec.Config{
+			DefaultTimeout: time.Duration(*codeTimeout) * time.Second,
+			MaxTimeout:     time.Duration(codeexec.MaxTimeoutSeconds) * time.Second,
+			MaxConcurrent:  2,
+		}), allowedPeers...)
+		log.Printf("[CODEEXEC] Docker sandbox enabled; allowed submitting peers: %s", strings.Join(allowedPeers, ", "))
 	}
 	defer n.Close()
 
@@ -241,7 +271,7 @@ func main() {
 				fmt.Print("> ")
 				continue
 			}
-			parts := strings.Fields(line)
+			parts := splitConsoleArgs(line)
 			cmd := strings.ToLower(parts[0])
 
 			switch cmd {
@@ -265,6 +295,7 @@ func main() {
 				fmt.Println("  nat                            - Show local NAT diagnostics")
 				fmt.Println("  exec <peerID|all> <command...> - Execute shell command on connected remote PC(s)")
 				fmt.Println("  shell <peerID|all> <cmd...>    - Alias for remote command execution")
+				fmt.Println("  run <peerID> <c|cpp|python> <source-file> [stdin-file] - Run source code in a Docker sandbox")
 				fmt.Println("  quit, exit                     - Terminate the node")
 			case "peers", "users", "nodes":
 				fleetList, err := n.GetFleetNodes(context.Background())
@@ -615,6 +646,86 @@ func main() {
 					}
 					fmt.Println("=================================================================")
 				}
+			case "run":
+				if len(parts) < 4 || len(parts) > 5 {
+					fmt.Println("Usage: run <peerID> <c|cpp|python> <source-file> [stdin-file]")
+					fmt.Println(`Example: run node-b python "./hello world.py"`)
+					break
+				}
+				peerID := parts[1]
+				language := strings.ToLower(parts[2])
+				if language != "c" && language != "cpp" && language != "python" {
+					fmt.Println("Supported languages: c, cpp, python")
+					break
+				}
+				fileInfo, statErr := os.Stat(parts[3])
+				if statErr != nil {
+					fmt.Printf("Cannot access source file: %v\n", statErr)
+					break
+				}
+				if !fileInfo.Mode().IsRegular() || fileInfo.Size() > int64(codeexec.MaxSourceBytes) {
+					fmt.Printf("Source file must be a regular file no larger than %d bytes.\n", codeexec.MaxSourceBytes)
+					break
+				}
+				sourceBytes, readErr := os.ReadFile(parts[3])
+				if readErr != nil {
+					fmt.Printf("Cannot read source file: %v\n", readErr)
+					break
+				}
+				stdin := ""
+				if len(parts) == 5 {
+					inputInfo, inputStatErr := os.Stat(parts[4])
+					if inputStatErr != nil {
+						fmt.Printf("Cannot access stdin file: %v\n", inputStatErr)
+						break
+					}
+					if !inputInfo.Mode().IsRegular() || inputInfo.Size() > int64(codeexec.MaxStdinBytes) {
+						fmt.Printf("Stdin file must be a regular file no larger than %d bytes.\n", codeexec.MaxStdinBytes)
+						break
+					}
+					inputBytes, inputReadErr := os.ReadFile(parts[4])
+					if inputReadErr != nil {
+						fmt.Printf("Cannot read stdin file: %v\n", inputReadErr)
+						break
+					}
+					stdin = string(inputBytes)
+				}
+				req := codeexec.Request{
+					JobID: "job-" + uuid.New().String(), Language: language,
+					Source: string(sourceBytes), Stdin: stdin, TimeoutSeconds: *codeTimeout,
+				}
+				fmt.Printf("[RUN] Submitting %s job %s to %s...\n", language, req.JobID, peerID)
+				jobStart := time.Now()
+				execCtx, cancelExec := context.WithTimeout(context.Background(), time.Duration(*codeTimeout+8)*time.Second)
+				resp, execErr := n.ExecuteRemoteCode(execCtx, peerID, req)
+				cancelExec()
+				if execErr != nil {
+					fmt.Printf("[RUN] Job failed: %v\n", execErr)
+					break
+				}
+				fmt.Println("=================================================================")
+				fmt.Printf(" Job ID: %s | Worker: %s | Language: %s\n", resp.JobID, peerID, resp.Language)
+				if resp.TimedOut {
+					fmt.Println(" Status: Timed out")
+				} else if resp.ExitCode == 0 && resp.Error == "" {
+					fmt.Println(" Status: Completed")
+				} else {
+					fmt.Println(" Status: Failed")
+				}
+				if resp.Error != "" { fmt.Printf(" Error: %s\n", resp.Error) }
+				if resp.Stdout != "" {
+					fmt.Println(" --- STDOUT ---")
+					fmt.Print(resp.Stdout)
+					if !strings.HasSuffix(resp.Stdout, "\n") { fmt.Println() }
+				}
+				if resp.Stderr != "" {
+					fmt.Println(" --- STDERR ---")
+					fmt.Print(resp.Stderr)
+					if !strings.HasSuffix(resp.Stderr, "\n") { fmt.Println() }
+				}
+				if resp.OutputTruncated { fmt.Println(" [!] Output was truncated by the worker's output limit.") }
+				fmt.Printf(" Exit code: %d | Worker execution: %d ms | Round trip: %d ms\n", resp.ExitCode, resp.DurationMs, time.Since(jobStart).Milliseconds())
+				fmt.Println("=================================================================")
 			case "quit", "exit":
 				fmt.Println("Exiting node...")
 				os.Exit(0)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/blobstore"
+	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
 	"github.com/unicompute/obj1/pkg/protocol"
@@ -60,6 +61,10 @@ type Node struct {
 	onFleetPeerLeft func(peerID string)
 
 	shellExecutor  remoteshell.Executor
+	codeExecutor      codeexec.Executor
+	codeAllowedPeers map[string]struct{}
+	pendingCodeMu    sync.Mutex
+	pendingCode      map[string]pendingCodeResult
 	pendingExecsMu sync.Mutex
 	pendingExecs   map[string]chan remoteshell.ShellResponse
 
@@ -95,7 +100,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		classifier:    classifier,
 		relayClient:   &relay.RelayClient{},
 		fleetNodes:    make(map[string]bool),
-		shellExecutor: remoteshell.NewSystemExecutor(),
+		shellExecutor:   remoteshell.NewSystemExecutor(),
+		codeAllowedPeers: make(map[string]struct{}),
+		pendingCode:      make(map[string]pendingCodeResult),
 		pendingExecs:  make(map[string]chan remoteshell.ShellResponse),
 	}
 
@@ -344,6 +351,9 @@ func (n *Node) SendStream(peerID string, data []byte) error {
 
 // handleInternalStreamMessage dispatches protocol-level messages such as remote shell execution.
 func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
+	if n.handleCodeStreamMessage(peerID, data) {
+		return true
+	}
 	// 1. Remote Shell Request
 	if bytes.HasPrefix(data, []byte(remoteshell.PrefixShellReq)) {
 		req, err := remoteshell.DecodeRequest(data)

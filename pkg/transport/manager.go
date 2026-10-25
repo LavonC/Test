@@ -252,11 +252,9 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	})
 
 	// Create Dual DataChannels:
-	// Channel A: "stream" (ordered, maxRetransmits=3)
-	maxRetransmits := uint16(3)
+	// Channel A: "stream" is reliable because it carries control and job messages.
 	streamDC, err := pc.CreateDataChannel("stream", &webrtc.DataChannelInit{
-		Ordered:        func(b bool) *bool { return &b }(true),
-		MaxRetransmits: &maxRetransmits,
+		Ordered: func(b bool) *bool { return &b }(true),
 	})
 	if err != nil {
 		_ = conn.Close()
