@@ -6,6 +6,7 @@ go build -o bin/unicompute-node.exe ./cmd/unicompute-node
 go build -o bin/unicompute-coordinator.exe ./cmd/unicompute-coordinator
 go build -o bin/unicompute-relay.exe ./cmd/unicompute-relay
 go build -o bin/verify-obj3.exe ./cmd/verify-obj3
+go build -o bin/unicompute-gui.exe ./cmd/unicompute-gui
 
 Write-Host "Signing binaries for Windows Smart App Control / Code Integrity..." -ForegroundColor Yellow
 $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Select-Object -First 1

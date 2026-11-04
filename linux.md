@@ -1,6 +1,6 @@
-# UniCompute Objective 1: Linux Deployment, Operation & Testing Guide
+# UniCompute: Objectives 1, 2, 3 & Desktop GUI — Linux Deployment, Operation & Testing Guide
 
-This guide provides end-to-end instructions for installing prerequisites, compiling static CGO-free binaries, configuring firewalls, operating, and verifying the **UniCompute Objective 1 (Peer-to-Peer Storage Substrate & Contributed Compute Fleet)** across major Linux distributions (Ubuntu 22.04/24.04 LTS, Debian 12, Fedora 40/41, and Arch Linux).
+This guide provides end-to-end instructions for installing prerequisites, compiling static CGO-free binaries, configuring firewalls, operating, and verifying the **UniCompute Volunteer Compute & Distributed Storage Fleet (Objectives 1, 2, and 3)** alongside the **Interactive Desktop GUI Control Room** across major Linux distributions (Ubuntu 22.04/24.04 LTS, Debian 12, Fedora 40/41, and Arch Linux).
 
 ---
 
@@ -11,6 +11,8 @@ This guide provides end-to-end instructions for installing prerequisites, compil
    - [2.2 Fedora 40 / 41 & RHEL 9](#22-fedora-40--41--rhel-9)
    - [2.3 Arch Linux](#23-arch-linux)
    - [2.4 Docker User Group & Service Activation](#24-docker-user-group--service-activation)
+   - [2.5 GPU Acceleration Drivers & Libraries (CUDA / ROCm)](#25-gpu-acceleration-drivers--libraries-cuda--rocm)
+   - [2.6 Desktop GUI Browser Runtime (Chromium / Chrome / Edge)](#26-desktop-gui-browser-runtime-chromium--chrome--edge)
 3. [Linux Firewall & Network Setup for WebRTC](#3-linux-firewall--network-setup-for-webrtc)
    - [3.1 UFW (Ubuntu / Debian)](#31-ufw-ubuntu--debian)
    - [3.2 firewalld (Fedora / RHEL)](#32-firewalld-fedora--rhel)
@@ -18,7 +20,7 @@ This guide provides end-to-end instructions for installing prerequisites, compil
 4. [Cloning the Repository & Go Version Alignment](#4-cloning-the-repository--go-version-alignment)
    - [4.1 Git Clone](#41-git-clone)
    - [4.2 Handling `go.mod` Version Alignment (`go 1.22`)](#42-handling-gomod-version-alignment-go-122)
-5. [Compiling Static CGO-Free Binaries](#5-compiling-static-cgo-free-binaries)
+5. [Compiling Static CGO-Free Binaries (`build_linux.sh`)](#5-compiling-static-cgo-free-binaries-build_linuxsh)
 6. [Running the Automated Verification Suite](#6-running-the-automated-verification-suite)
 7. [Pre-Pulling Docker Sandbox Images](#7-pre-pulling-docker-sandbox-images)
 8. [Running a 2-Node Cluster on Linux](#8-running-a-2-node-cluster-on-linux)
@@ -29,6 +31,7 @@ This guide provides end-to-end instructions for installing prerequisites, compil
    - [9.2 Content-Addressed Storage (CAS) Vault](#92-content-addressed-storage-cas-vault)
    - [9.3 Remote Terminal Execution (`exec`)](#93-remote-terminal-execution-exec)
    - [9.4 Air-Gapped Docker Sandbox Code Execution (`run`)](#94-air-gapped-docker-sandbox-code-execution-run)
+   - [9.5 Objective 3: GPU Acceleration & Resource Governance](#95-objective-3-gpu-acceleration--resource-governance)
 10. [Sample Programs & Security Boundary Tests](#10-sample-programs--security-boundary-tests)
     - [10.1 Python Data Processing with Stdin (`calc.py`)](#101-python-data-processing-with-stdin-calcpy)
     - [10.2 C++ High-Precision Computation (`fib.cpp`)](#102-c-high-precision-computation-fibcpp)
@@ -36,26 +39,40 @@ This guide provides end-to-end instructions for installing prerequisites, compil
     - [10.4 Security Test: Execution Timeout Enforcement (`timeout_test.py`)](#104-security-test-execution-timeout-enforcement-timeout_testpy)
     - [10.5 Security Test: Air-Gap Network Leak Block (`network_leak_test.py`)](#105-security-test-air-gap-network-leak-block-network_leak_testpy)
     - [10.6 Security Test: 128 MB RAM Limit Enforcement (`mem_limit_test.py`)](#106-security-test-128-mb-ram-limit-enforcement-mem_limit_testpy)
+    - [10.7 GPU Sample: Portable Vector Addition (`portable_vector_add.cu`)](#107-gpu-sample-portable-vector-addition-portable_vector_addcu)
+    - [10.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)](#108-gpu-sample-warp-reduction-blocker-warp_reductioncu)
+    - [10.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)](#109-gpu-sample-inline-ptx-assembly-blocker-inline_ptxcu)
+    - [10.10 GPU Sample: Model Capsule & Checkpoint (`test_model.json`)](#1010-gpu-sample-model-capsule--checkpoint-test_modeljson)
 11. [Cross-Platform Interoperability (Linux <-> Windows)](#11-cross-platform-interoperability-linux---windows)
-12. [Production Daemonization with Systemd](#12-production-daemonization-with-systemd)
-13. [Troubleshooting & Diagnostics on Linux](#13-troubleshooting--diagnostics-on-linux)
+12. [Desktop GUI Control Room Operation on Linux](#12-desktop-gui-control-room-operation-on-linux)
+13. [Production Daemonization with Systemd](#13-production-daemonization-with-systemd)
+14. [Troubleshooting & Diagnostics on Linux](#14-troubleshooting--diagnostics-on-linux)
 
 ---
 
 ## 1. Architecture Overview & Binaries
 
-UniCompute Objective 1 implements the peer-to-peer transport substrate, content-addressed storage (CAS) vault, WebRTC SCTP multiplexing, dual-stack NAT/CGNAT hole punching, remote host execution, and air-gapped Docker code execution for volunteer computing clusters.
+UniCompute integrates distributed volunteer compute, storage, and cross-platform hardware acceleration across three primary objectives:
+- **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, blind contributor relay fallback, WebRTC SCTP multiplexing (`dc-ctrl` and `dc-bulk`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
+- **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 128m`, `--cpus 1.0`, `--read-only`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
+- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (CUDA, ROCm, Vulkan), 50 ms battery/activity watchdog preemption, cgroup/setrlimit memory limits, CUDA-to-AMD HIPIFY analysis & translation, and ONNX training checkpoint persistence.
+- **Desktop GUI Control Room**: A standalone desktop app featuring a 60 FPS HTML5 Canvas topology engine (central mainframe tower, orbiting dual-hemisphere workstation rigs, glowing P2P laser beams) and 4 dedicated control panels.
 
-The project compiles into three standalone, CGO-free Linux ELF executables in the `bin/` directory:
+The project compiles into standalone, CGO-free Linux ELF executables in the `bin/` directory:
 
 | Binary | Description |
 |---|---|
-| `bin/unicompute-node` | Contributor peer storage node daemon and interactive CLI shell. Manages local CAS vault, WebRTC connections, remote command dispatch, and Docker sandbox execution. |
-| `bin/unicompute-coordinator` | Central WebSocket signaling hub and optional embedded RFC 5766 TURN server. Relays SDP offers/answers and ICE candidates. |
-| `bin/unicompute-relay` | Standalone peer-contributor relay (Syncthing relay-v1 model) providing blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
+| `bin/unicompute-gui-linux` | **Desktop GUI Control Room**. Static CGO-free ELF executable with embedded 60 FPS HTML5 Canvas topology engine, hardware dials, and multi-objective tabs. Compatible with Ubuntu 18/20/22/24 LTS. |
+| `bin/unicompute-node` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, and GPU acceleration. |
+| `bin/unicompute-coordinator` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. |
+| `bin/unicompute-relay` | **Contributor Relay Daemon**. Blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
 
 **Live Production Coordinator**: A central signaling coordinator is live on Render at:
 `wss://unicompute-coordinator.onrender.com/ws`
+
+**Linux GUI Launcher**:
+- Execute `./run-gui.sh` to start the daemon and launch the desktop window.
+- Build static binaries using `./build_linux.sh`.
 
 ---
 
@@ -148,6 +165,50 @@ If you see `"Hello from Docker!"`, your Docker environment is properly configure
 
 ---
 
+### 2.5 GPU Acceleration Drivers & Libraries (CUDA / ROCm)
+
+For Objective 3 GPU acceleration and telemetry on Linux:
+- **NVIDIA GPU (CUDA)**:
+  - Install the NVIDIA proprietary driver (`nvidia-driver-535` or `nvidia-driver-550`):
+    ```bash
+    sudo apt install -y nvidia-driver-550
+    ```
+  - Verify CUDA driver detection:
+    ```bash
+    nvidia-smi
+    ```
+- **AMD Radeon (ROCm / HIP)**:
+  - On Ubuntu 22.04 / 24.04, install ROCm packages (`rocm-hip-sdk` or `hip-runtime-amd`):
+    ```bash
+    sudo apt install -y hip-runtime-amd
+    ```
+- **Linux GPU Monitoring Permissions**:
+  - Ensure the user belongs to the `video` and `render` groups to access GPU device nodes (`/dev/kfd`, `/dev/dri/*`):
+    ```bash
+    sudo usermod -aG video,render $USER
+    ```
+
+---
+
+### 2.6 Desktop GUI Browser Runtime (Chromium / Chrome / Edge)
+
+The Desktop GUI Control Room runs as a native application window. Install Chromium or Google Chrome:
+- **Ubuntu / Debian**:
+  ```bash
+  sudo apt install -y chromium-browser || sudo apt install -y chromium
+  ```
+- **Fedora**:
+  ```bash
+  sudo dnf install -y chromium
+  ```
+- **Arch Linux**:
+  ```bash
+  sudo pacman -S --noconfirm chromium
+  ```
+When running `./run-gui.sh`, the launcher automatically probes `google-chrome`, `chromium-browser`, `chromium`, `microsoft-edge`, and falls back to `xdg-open` if no standalone browser is found.
+
+---
+
 ## 3. Linux Firewall & Network Setup for WebRTC
 
 UniCompute utilizes dual-stack STUN probing (`stun.l.google.com:19302`) and WebRTC ICE hole punching over dynamic UDP ports. On consumer broadband and cloud VPS instances, stateful firewalls require specific rules.
@@ -212,10 +273,17 @@ This ensures zero compilation errors and avoids automatic toolchain download att
 
 ---
 
-## 5. Compiling Static CGO-Free Binaries
+## 5. Compiling Static CGO-Free Binaries (`build_linux.sh`)
 
-Compile all three UniCompute binaries as static, portable ELF executables with stripped debugging symbols (`-ldflags="-s -w"`) and `CGO_ENABLED=0`:
+Compile all UniCompute binaries as static, portable ELF executables with stripped debugging symbols (`-ldflags="-s -w"`) and `CGO_ENABLED=0`. This ensures 100% portability across modern Linux distributions (Ubuntu 22.04/24.04, Debian 12, Fedora) as well as legacy systems (Ubuntu 18.04/20.04) with zero glibc shared library dependencies:
 
+```bash
+# Automated compilation:
+chmod +x build_linux.sh
+./build_linux.sh
+```
+
+Or compile manually:
 ```bash
 mkdir -p bin
 
@@ -228,6 +296,9 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-coordinator ./cmd/unic
 # 3. Compile Contributor Relay
 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-relay ./cmd/unicompute-relay
 
+# 4. Compile Desktop GUI Control Room (Linux Static ELF)
+CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-gui-linux ./cmd/unicompute-gui
+
 # Ensure executables have execution permissions
 chmod +x bin/*
 ```
@@ -235,7 +306,7 @@ chmod +x bin/*
 Verify the compiled binaries:
 ```bash
 ls -lh bin/
-file bin/unicompute-node
+file bin/unicompute-gui-linux
 # Expected: ELF 64-bit LSB executable, x86-64 (or aarch64), statically linked, stripped
 ```
 
@@ -243,20 +314,34 @@ file bin/unicompute-node
 
 ## 6. Running the Automated Verification Suite
 
-Run the full Go test suite:
+Run the full automated verification suite to validate all 12 Go packages, Objective 3 GPU hardware probes, and standalone samples:
 
 ```bash
-go test -v ./pkg/...
+# 1. Run all package unit tests:
+go test -v ./pkg/blobstore ./pkg/codeexec ./pkg/gpu ./pkg/gpu/hipify ./pkg/gpu/onnx ./pkg/instrumentation ./pkg/nat ./pkg/node ./pkg/relay ./pkg/remoteshell ./pkg/signaling ./pkg/transport
+
+# 2. Run standalone samples verification runner:
+go run ./cmd/test-samples
+
+# 3. Run Objective 3 physical hardware & governance suite:
+go run ./cmd/verify-obj3
 ```
+
+*(Note: On systems with PowerShell Core installed (`pwsh`), you can run `pwsh -File ./test_all.ps1` for the full 30-point scorecard).*
 
 ### Test Suite Coverage:
 - **`pkg/blobstore`**: Atomic filesystem commits, SHA-256 verification, quota accounting, bitrot scrub audit.
 - **`pkg/codeexec`**: Bounded code request/response framing, 12 KiB source and 4 KiB stdin ceiling checks.
+- **`pkg/gpu`**: Hardware capability discovery, ROCm/CUDA dynamic loading, temperature/VRAM monitoring.
+- **`pkg/gpu/hipify`**: Static AST analysis, 32-thread warp blocker detection, and CUDA-to-HIP AST translation.
+- **`pkg/gpu/onnx`**: Model checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
+- **`pkg/instrumentation`**: Prometheus metrics counters and histograms.
 - **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, and virtual adapter pruning (`docker0`, `veth`).
 - **`pkg/relay`**: Syncthing relay-v1 blind end-to-end byte transfer and embedded TURN server lifecycle.
 - **`pkg/remoteshell`**: Linux shell execution (`/bin/sh`, `/bin/bash`) and timeout enforcement.
 - **`pkg/signaling`**: WebSocket registration, 20-second keepalives, and candidate relay dispatch.
-- **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`stream` and `chunk`).
+- **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`dc-ctrl` and `dc-bulk`).
+- **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)**.
 - **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)** verifying data transfer resilience if the coordinator fails.
 
 ---
@@ -495,6 +580,51 @@ The `run` command reads a local source file on Client Node A, transmits the sour
 - **`--cap-drop ALL`**: Drops all Linux capabilities.
 - **`--security-opt no-new-privileges:true`**: Prevents setuid privilege elevation.
 - **`--tmpfs /tmp:rw,nosuid,nodev,size=64m`**: Ephemeral memory scratchpad.
+
+---
+
+### 9.5 Objective 3: GPU Acceleration & Resource Governance
+
+Objective 3 adds GPU hardware capability discovery, 50 ms battery/activity watchdog preemption, and memory governance on Linux. When running `unicompute-node`, activate GPU features using:
+
+```bash
+./bin/unicompute-node -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -enable-gpu -gpu-backend auto -gpu-mem-limit-mb 2048 -gpu-watchdog-poll-ms 50
+```
+
+#### Node Flags for GPU Subsystem:
+| Flag | Default | Description |
+|---|---|---|
+| `-enable-gpu` | `false` | Enables GPU capability probing, 50 ms watchdog, and memory limits. |
+| `-gpu-backend` | `auto` | Preferred compute backend: `auto`, `cuda`, `directml`. |
+| `-gpu-mem-limit-mb` | `2048` | Process memory ceiling in MB. |
+| `-gpu-watchdog-poll-ms` | `50` | Watchdog polling frequency in ms (battery and idle monitoring). |
+| `-gpu-ignore-battery` | `false` | Bypass battery check for AC-connected servers and desktop nodes. |
+
+#### Interactive CLI Commands for GPU:
+1. **`gpu`**: Displays real-time GPU hardware telemetry and 50 ms watchdog status:
+   ```text
+   > gpu
+   ======================= Objective 3: GPU Hardware & Governance =======================
+    Device Name:        NVIDIA GeForce RTX 4050 / AMD Radeon Graphics
+    Vendor:             NVIDIA / AMD
+    Total VRAM:         6141 MB
+    Available VRAM:     5920 MB
+    GPU Temperature:    45.0 °C | Power: 7.9 W
+    Backends Detected:  [CPU DirectML CUDA]
+   --------------------------------- 50 ms Watchdog State ---------------------------------
+    Watchdog Status:    running
+    Power Source:       OnBattery=false (100% remaining)
+    User Activity:      Active=false (Idle: 15m20s)
+   =======================================================================================
+   ```
+
+2. **`hipify <file.cu>`**: Analyzes CUDA kernels for 32-thread warp assumptions (`threadIdx.x % 32`, `__shfl_down_sync`) and translates portable kernels to HIP C++:
+   ```text
+   > hipify samples/gpu/portable_vector_add.cu
+   [SUCCESS] Kernel successfully translated to portable HIP C++ (7 replacements made).
+   ```
+
+3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes workloads with memory and priority limits.
 
 ---
 
@@ -964,6 +1094,76 @@ Allocating memory in 10 MB chunks...
 
 ---
 
+### 10.7 GPU Sample: Portable Vector Addition (`portable_vector_add.cu`)
+Clean CUDA code mapping to portable AMD HIP C++ without architectural blockers.
+
+**File**: `samples/gpu/portable_vector_add.cu`
+```cuda
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+__global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n) c[i] = a[i] + b[i];
+}
+
+int main() {
+    int n = 1024; size_t size = n * sizeof(float);
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, size); cudaMalloc(&d_b, size); cudaMalloc(&d_c, size);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    return 0;
+}
+```
+
+Verify translation with HIPIFY:
+```bash
+./bin/unicompute-node -id test -signaling ""
+> hipify samples/gpu/portable_vector_add.cu
+# Result: 7 replacements made (cudaMalloc -> hipMalloc, cudaFree -> hipFree, hip/hip_runtime.h)
+```
+
+---
+
+### 10.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)
+Demonstrates architectural blockers that assume a 32-thread warp size, preventing execution on AMD 64-thread wavefronts.
+
+```text
+> hipify samples/gpu/warp_reduction.cu
+[BLOCKED] cannot safely translate to HIP: 2 fatal compatibility issue(s) detected
+ * Line 4: Hardcoded modulo 32 indexing assumes 32-thread warp size.
+ * Line 9: NVIDIA 32-thread warp synchronous intrinsic does not map to AMD 64-thread wavefronts.
+Action: EXECUTE_NVIDIA_ONLY
+```
+
+---
+
+### 10.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)
+Demonstrates assembly-level NVIDIA hardware locking (`asm volatile("mov.u32 %0, %smid;" ...)`).
+
+```text
+> hipify samples/gpu/inline_ptx.cu
+[BLOCKED] cannot safely translate to HIP: 1 fatal compatibility issue(s) detected
+ * Line 6: NVIDIA Parallel Thread Execution (PTX) assembly cannot be compiled by AMD ROCm/HIP.
+Action: REJECT_RECOMMEND_ONNX
+```
+
+---
+
+### 10.10 GPU Sample: Model Capsule & Checkpoint (`test_model.json`)
+Portable model graph definition with initial weights and biases.
+
+---
+
+### 10.11 Standalone Automated Sample Runner (`cmd/test-samples`)
+Execute automated verification across all 10 sample files:
+
+```bash
+go run ./cmd/test-samples
+```
+
+---
+
 ## 11. Cross-Platform Interoperability (Linux <-> Windows)
 
 UniCompute nodes are fully interoperable across operating systems:
@@ -979,7 +1179,39 @@ UniCompute nodes are fully interoperable across operating systems:
 
 ---
 
-## 12. Production Daemonization with Systemd
+## 12. Desktop GUI Control Room Operation on Linux
+
+UniCompute provides a native desktop application with a 60 FPS HTML5 Canvas topology visualizer, hardware telemetry dials, and dedicated tabs for Objectives 1, 2, and 3.
+
+### 12.1 Launching the Desktop Window
+Launch the GUI directly via the provided launcher script:
+
+```bash
+chmod +x run-gui.sh
+./run-gui.sh
+```
+
+This starts the static daemon (`bin/unicompute-gui-linux`) on port 23080 and automatically launches a borderless desktop app window using Chromium, Google Chrome, or Microsoft Edge (`chromium --app="http://127.0.0.1:23080"`). If running in a headless or SSH session, add the `-headless` flag:
+```bash
+./bin/unicompute-gui-linux -headless -port 23080
+```
+
+### 12.2 Visual Topology Canvas & Controls
+- **Coordinator Mainframe Tower**: Visualizes active signaling heartbeat and connection to Render (`wss://unicompute-coordinator.onrender.com/ws`) or local coordinator.
+- **Workstation Rigs with Dual-Hemisphere Cores**:
+  - *Compute Core (Upper)*: Displays CPU container load and GPU hardware status.
+  - *Storage Core (Lower)*: Displays CAS vault quota and blob counts.
+- **Mutual P2P Laser DataChannels**: Pulsing, animated dashed conduits showing live WebRTC SCTP DataChannel transfers (`dc-ctrl` and `dc-bulk`).
+- **Hover HUD & Connection Drawer**: Hover over any rig to view public/private IP, NAT type, and GPU specs; click to send a P2P connection request.
+- **Dedicated Panels**:
+  - *CPU Containers (Obj 2)*: Code editor and container runner with pre-loaded samples.
+  - *GPU Acceleration (Obj 3)*: Real-time telemetry, 50 ms watchdog radar, and HIPIFY translator.
+  - *CAS Storage Vault (Obj 1)*: Content-addressed blob store and one-click SHA-256 scrub audit.
+  - *Fleet Console*: Real-time WebSocket event log and remote shell dispatcher.
+
+---
+
+## 13. Production Daemonization with Systemd
 
 To run the UniCompute node as a continuous background daemon on Linux servers:
 

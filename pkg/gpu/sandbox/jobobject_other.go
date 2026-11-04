@@ -3,7 +3,6 @@
 package sandbox
 
 import (
-	"os"
 	"syscall"
 )
 

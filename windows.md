@@ -1,6 +1,6 @@
-# UniCompute Objective 1: Windows 10/11 Deployment, Operation & Testing Guide
+# UniCompute: Objectives 1, 2, 3 & Desktop GUI — Windows 10/11 Deployment, Operation & Testing Guide
 
-This guide provides end-to-end instructions for installing prerequisites, building, configuring, operating, and verifying the **UniCompute Objective 1 (Peer-to-Peer Storage Substrate & Contributed Compute Fleet)** on Microsoft Windows 10 and Windows 11 (64-bit AMD64/ARM64).
+This guide provides end-to-end instructions for installing prerequisites, building, configuring, operating, and verifying the **UniCompute Volunteer Compute & Distributed Storage Fleet (Objectives 1, 2, and 3)** alongside the **Interactive Desktop GUI Control Room** on Microsoft Windows 10 and Windows 11 (64-bit AMD64/ARM64).
 
 ---
 
@@ -10,13 +10,15 @@ This guide provides end-to-end instructions for installing prerequisites, buildi
    - [2.1 Git for Windows](#21-git-for-windows)
    - [2.2 Go Programming Language (1.22+)](#22-go-programming-language-122)
    - [2.3 Docker Desktop with WSL2 Backend](#23-docker-desktop-with-wsl2-backend)
+   - [2.4 GPU Drivers & Acceleration Runtime (DirectML / CUDA)](#24-gpu-drivers--acceleration-runtime-directml--cuda)
+   - [2.5 Browser Runtime for Desktop GUI Window (Edge / Chrome)](#25-browser-runtime-for-desktop-gui-window-edge--chrome)
 3. [Windows Security, Code Signing & Smart App Control](#3-windows-security-code-signing--smart-app-control)
    - [3.1 PowerShell Execution Policy](#31-powershell-execution-policy)
    - [3.2 Unblocking Downloaded Files](#32-unblocking-downloaded-files)
    - [3.3 Authenticode Code-Signing (`build.ps1`)](#33-authenticode-code-signing-buildps1)
    - [3.4 Temporary Execution Directory (`GOTMPDIR`)](#34-temporary-execution-directory-gotmpdir)
 4. [Cloning the Repository & Building Binaries](#4-cloning-the-repository--building-binaries)
-5. [Running the Automated Verification Suite](#5-running-the-automated-verification-suite)
+5. [Running the Automated Master Verification Suite (`test_all.ps1`)](#5-running-the-automated-master-verification-suite-test_allps1)
 6. [Pre-Pulling Docker Sandbox Images](#6-pre-pulling-docker-sandbox-images)
 7. [Running a 2-Node Cluster on Windows](#7-running-a-2-node-cluster-on-windows)
    - [Option A: Public Live Coordinator on Render](#option-a-public-live-coordinator-on-render)
@@ -26,6 +28,7 @@ This guide provides end-to-end instructions for installing prerequisites, buildi
    - [8.2 Content-Addressed Storage (CAS) Vault](#82-content-addressed-storage-cas-vault)
    - [8.3 Remote Terminal Execution (`exec`)](#83-remote-terminal-execution-exec)
    - [8.4 Air-Gapped Docker Sandbox Code Execution (`run`)](#84-air-gapped-docker-sandbox-code-execution-run)
+   - [8.5 Objective 3: GPU Acceleration & Resource Governance](#85-objective-3-gpu-acceleration--resource-governance)
 9. [Sample Programs & Security Boundary Tests](#9-sample-programs--security-boundary-tests)
    - [9.1 Python Data Processing with Stdin (`calc.py`)](#91-python-data-processing-with-stdin-calcpy)
    - [9.2 C++ High-Precision Computation (`fib.cpp`)](#92-c-high-precision-computation-fibcpp)
@@ -33,24 +36,43 @@ This guide provides end-to-end instructions for installing prerequisites, buildi
    - [9.4 Security Test: Execution Timeout Enforcement (`timeout_test.py`)](#94-security-test-execution-timeout-enforcement-timeout_testpy)
    - [9.5 Security Test: Air-Gap Network Leak Block (`network_leak_test.py`)](#95-security-test-air-gap-network-leak-block-network_leak_testpy)
    - [9.6 Security Test: 128 MB RAM Limit Enforcement (`mem_limit_test.py`)](#96-security-test-128-mb-ram-limit-enforcement-mem_limit_testpy)
-10. [Troubleshooting & Windows Diagnostics](#10-troubleshooting--windows-diagnostics)
+   - [9.7 GPU Sample: Portable Vector Addition (`portable_vector_add.cu`)](#97-gpu-sample-portable-vector-addition-portable_vector_addcu)
+   - [9.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)](#98-gpu-sample-warp-reduction-blocker-warp_reductioncu)
+   - [9.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)](#99-gpu-sample-inline-ptx-assembly-blocker-inline_ptxcu)
+   - [9.10 GPU Sample: Model Capsule & Checkpoint (`test_model.json`)](#910-gpu-sample-model-capsule--checkpoint-test_modeljson)
+10. [Desktop GUI Control Room Operation](#10-desktop-gui-control-room-operation)
+    - [10.1 Launching the Desktop Window](#101-launching-the-desktop-window)
+    - [10.2 60 FPS Topology Canvas & Visual Elements](#102-60-fps-topology-canvas--visual-elements)
+    - [10.3 Multi-Objective Dedicated Control Panels](#103-multi-objective-dedicated-control-panels)
+11. [Troubleshooting & Windows Diagnostics](#11-troubleshooting--windows-diagnostics)
 
 ---
 
 ## 1. Architecture Overview & Binaries
 
-UniCompute Objective 1 implements the peer-to-peer transport substrate, content-addressed storage (CAS) vault, WebRTC SCTP multiplexing, dual-stack NAT/CGNAT hole punching, remote host execution, and air-gapped Docker code execution for volunteer computing clusters.
+UniCompute integrates distributed volunteer compute, storage, and cross-platform hardware acceleration across three primary objectives:
+- **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, blind contributor relay fallback, WebRTC SCTP multiplexing (`dc-ctrl` and `dc-bulk`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
+- **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 128m`, `--cpus 1.0`, `--read-only`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
+- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (DirectX 12 / DirectML, CUDA, DXGI, NVML), 50 ms battery/activity watchdog preemption, Win32 JobObject memory limits, CUDA-to-AMD HIPIFY analysis & translation, and ONNX training checkpoint persistence.
+- **Desktop GUI Control Room**: A standalone desktop app featuring a 60 FPS HTML5 Canvas topology engine (central mainframe tower, orbiting dual-hemisphere workstation rigs, glowing P2P laser beams) and 4 dedicated control panels.
 
-The project compiles into three discrete binaries in the `bin/` directory:
+The project compiles into the following binaries in the `bin/` directory:
 
 | Binary | Description |
 |---|---|
-| `bin\unicompute-node.exe` | Contributor peer node daemon and interactive CLI shell. Manages local CAS vault, WebRTC connections, remote command dispatch, and Docker sandbox execution. |
-| `bin\unicompute-coordinator.exe` | Central WebSocket signaling hub and optional embedded RFC 5766 TURN server. Relays SDP offers/answers and ICE candidates. |
-| `bin\unicompute-relay.exe` | Standalone peer-contributor relay (Syncthing relay-v1 model) providing blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
+| `bin\unicompute-gui.exe` | **Desktop GUI Control Room**. Full interactive topology canvas, telemetry dials, peer connection drawer, and panels for Objectives 1, 2, and 3. |
+| `bin\unicompute-node.exe` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, and GPU acceleration. |
+| `bin\unicompute-coordinator.exe` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. |
+| `bin\unicompute-relay.exe` | **Contributor Relay Daemon**. Blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
+| `bin\verify-obj3.exe` | **Objective 3 Automated Hardware Verification Suite**. 7-point validation suite for physical GPU, watchdog, and sandboxing. |
 
 **Live Deployment**: A production coordinator is hosted and live on Render at:
 `wss://unicompute-coordinator.onrender.com/ws`
+
+**Desktop GUI Launchers**:
+- Batch Launcher: `.\run-gui.bat`
+- PowerShell Launcher: `.\run-gui.ps1`
+- Master Verification Suite: `.\test_all.ps1`
 
 ---
 
@@ -128,6 +150,22 @@ Client: Docker Engine
 Server: Docker Engine - Community
  OS/Arch: linux/amd64
 ```
+
+### 2.4 GPU Drivers & Acceleration Runtime (DirectML / CUDA)
+For Objective 3 GPU acceleration and telemetry:
+- **DirectX 12 / DirectML**: DirectML is pre-installed on Windows 10 (version 1903+) and Windows 11. It provides hardware acceleration across NVIDIA, AMD Radeon, and Intel Arc GPUs without requiring vendor-specific SDKs.
+- **NVIDIA GPU (CUDA)**: Install the latest NVIDIA Game Ready or Studio Driver (v535+). Verify CUDA driver support:
+  ```powershell
+  nvidia-smi
+  # Look for CUDA Version: 12.x or 11.x in the top right header
+  ```
+- **AMD Radeon (HIP/ROCm)**: For AMD devices on Windows, UniCompute uses DirectML as the primary hardware acceleration target, bypassing ROCm Linux-only driver constraints.
+
+### 2.5 Browser Runtime for Desktop GUI Window (Edge / Chrome)
+The Desktop GUI Control Room launches as a borderless native application window using:
+- **Microsoft Edge** (installed by default on Windows 10/11: `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`).
+- **Google Chrome** (alternative: `C:\Program Files\Google\Chrome\Application\chrome.exe`).
+No external Electron or WebView2 runtime installation is required—the native browser app engine is used directly.
 
 ---
 
@@ -213,11 +251,18 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 Output:
 ```text
-Building UniCompute Objective 1 binaries...
+Building UniCompute binaries...
 Signing binaries for Windows Smart App Control / Code Integrity...
 
 [SUCCESS] Binaries built and signed successfully in .\bin\
 ```
+
+This compiles all five core executables:
+- `bin\unicompute-node.exe` (Node daemon & worker)
+- `bin\unicompute-coordinator.exe` (Signaling & TURN hub)
+- `bin\unicompute-relay.exe` (Blind contributor relay)
+- `bin\verify-obj3.exe` (Objective 3 hardware test suite)
+- `bin\unicompute-gui.exe` (Desktop GUI control room)
 
 ### 4.3 Manual Compilation Alternative
 If you prefer building each binary manually:
@@ -227,6 +272,8 @@ New-Item -ItemType Directory -Force -Path "bin" | Out-Null
 go build -o bin/unicompute-node.exe ./cmd/unicompute-node
 go build -o bin/unicompute-coordinator.exe ./cmd/unicompute-coordinator
 go build -o bin/unicompute-relay.exe ./cmd/unicompute-relay
+go build -o bin/verify-obj3.exe ./cmd/verify-obj3
+go build -o bin/unicompute-gui.exe ./cmd/unicompute-gui
 ```
 
 Verify that the binaries exist in `.\bin\`:
@@ -236,25 +283,45 @@ Get-ChildItem .\bin\*.exe
 
 ---
 
-## 5. Running the Automated Verification Suite
+## 5. Running the Automated Master Verification Suite (`test_all.ps1`)
 
-Run the full Objective 1 verification test suite to ensure your Windows environment passes all component specifications:
+UniCompute provides a unified 30-point master test automation suite covering all Go packages, physical GPU hardware, 50 ms watchdog radar, standalone samples, and GUI REST/WebSocket endpoints:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
+powershell -ExecutionPolicy Bypass -File .\test_all.ps1
 ```
 
-*(Note: On Windows 11 with Smart App Control enforced, use `run_tests.ps1` rather than direct `go test ./pkg/...`, as `run_tests.ps1` signs each package's test runner binary to ensure compliance with Windows Application Control policies).*
-
-### What is verified:
-- **`pkg/blobstore`**: Atomic file writes, SHA-256 validation, quota enforcement, bitrot detection (`scrub`), directory traversal prevention.
-- **`pkg/codeexec`**: Bounded code request/response framing, 12 KiB source and 4 KiB stdin ceiling checks.
-- **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, Hyper-V/WSL virtual adapter pruning, and Windows `WSAECONNRESET`/`WSAENETRESET` transient socket error handling.
-- **`pkg/relay`**: Syncthing relay-v1 end-to-end byte proxying and embedded TURN server lifecycle.
-- **`pkg/remoteshell`**: Windows PowerShell command execution and timeout enforcement.
-- **`pkg/signaling`**: WebSocket registration, keepalive tickers, and client message dispatch.
-- **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`stream` and `chunk`).
-- **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)** proving that active P2P data transfers continue uninterrupted if the central coordinator crashes.
+### What is verified (30 Tests Across 5 Phases):
+1. **Phase 1: Subsystem Unit Tests (12 Go Packages)**:
+   - **`pkg/blobstore`**: Atomic chunk persistence, SHA-256 validation, quota enforcement, bit-rot scrub audit, traversal prevention.
+   - **`pkg/codeexec`**: Bounded code request/response framing, 12 KiB source and 4 KiB stdin ceiling checks.
+   - **`pkg/gpu`**: Hardware probe (NVIDIA RTX 4050 / DirectML / CUDA / NVML discovery).
+   - **`pkg/gpu/hipify`**: Static AST analysis, 32-thread warp blocker detection, and CUDA-to-HIP AST translation.
+   - **`pkg/gpu/onnx`**: Model checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
+   - **`pkg/instrumentation`**: Prometheus metrics counters and histograms.
+   - **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, and Hyper-V/WSL adapter pruning.
+   - **`pkg/relay`**: Syncthing relay-v1 end-to-end byte proxying and embedded TURN server lifecycle.
+   - **`pkg/remoteshell`**: Windows PowerShell command execution and timeout enforcement.
+   - **`pkg/signaling`**: WebSocket registration, keepalive tickers, and client message dispatch.
+   - **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`dc-ctrl` and `dc-bulk`).
+   - **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)**.
+2. **Phase 2: Objective 3 Physical Hardware & Governance Suite**:
+   - `cmd/verify-obj3`: 7-point live test suite validating physical GPU detection, Win32 JobObject memory ceiling, 50 ms battery/idle watchdog preemption, and checkpoint rollback.
+3. **Phase 3: Standalone Sample Executions (10 Files Individually Verified)**:
+   - `samples/c/hello.c` (compiled via native MSYS2 GCC 16.1 -> FNV-1a hash verification).
+   - `samples/cpp/fib.cpp` (compiled via MSYS2 G++ 16.1 -> 45 Fibonacci steps and Golden Ratio convergence).
+   - `samples/python/calc.py` (executed via Python 3.11 with `samples/python/input.txt` -> 32 records processed).
+   - `samples/security/timeout_test.py` (infinite loop bounded by runtime timeout cap).
+   - `samples/gpu/portable_vector_add.cu` (standalone HIPIFY -> 7 replacements to portable HIP C++).
+   - `samples/gpu/warp_reduction.cu` (standalone HIPIFY -> quarantined under `EXECUTE_NVIDIA_ONLY`).
+   - `samples/gpu/inline_ptx.cu` (standalone HIPIFY -> quarantined under `REJECT_RECOMMEND_ONNX`).
+   - `samples/gpu/test_model.json` (ONNX capsule parsing, weight loading & SHA-256 checkpoint seal).
+   - `samples/security/network_leak_test.py` (air-gap socket probe protocol encapsulation).
+   - `samples/security/mem_limit_test.py` (128 MB RAM capping audit protocol encapsulation).
+4. **Phase 4: Desktop GUI Daemon & API Verification (Port 23098)**:
+   - Validates live `/api/status`, `/api/gpu`, `/api/samples`, `/api/gpu/hipify`, `/api/storage/put`, `/api/storage/scrub`, `/api/gpu/run`, and HTML5 Canvas bundle serving (`GET /`).
+5. **Phase 5: Collation & Scorecard Generation**:
+   - Outputs a clean terminal table summarizing 30/30 passed tests.
 
 ---
 
@@ -517,6 +584,61 @@ The `run` command reads a local source file on the client machine, packages it i
 - **`--cap-drop ALL`**: Drops all Linux kernel capabilities.
 - **`--security-opt no-new-privileges:true`**: Prevents privilege escalation.
 - **`--tmpfs /tmp:rw,nosuid,nodev,size=64m`**: Ephemeral memory-only scratch space.
+
+---
+
+### 8.5 Objective 3: GPU Acceleration & Resource Governance
+
+Objective 3 adds hardware acceleration discovery and background student governance. When running `unicompute-node.exe`, activate GPU support using:
+
+```powershell
+.\bin\unicompute-node.exe -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -enable-gpu -gpu-backend auto -gpu-mem-limit-mb 2048 -gpu-watchdog-poll-ms 50
+```
+
+#### Node Flags for GPU Subsystem:
+| Flag | Default | Description |
+|---|---|---|
+| `-enable-gpu` | `false` | Activates DXGI/NVML/DirectML/CUDA hardware detection, 50 ms watchdog, and Win32 JobObject sandbox. |
+| `-gpu-backend` | `auto` | Preferred compute backend: `auto`, `directml`, `cuda`. |
+| `-gpu-mem-limit-mb` | `2048` | Hard commit memory limit enforced via Win32 JobObject. |
+| `-gpu-watchdog-poll-ms` | `50` | Watchdog polling interval for AC power and student keyboard/mouse idle monitoring. |
+| `-gpu-ignore-battery` | `false` | Ignore battery state (useful for lab machines or desktop test rigs). |
+
+#### Interactive CLI Commands for GPU:
+1. **`gpu`**: Probes and displays real-time hardware telemetry and watchdog radar:
+   ```text
+   > gpu
+   ======================= Objective 3: GPU Hardware & Governance =======================
+    Device Name:        NVIDIA GeForce RTX 4050 Laptop GPU
+    Vendor:             NVIDIA
+    Total VRAM:         6141 MB (6.00 GB)
+    Available VRAM:     5920 MB
+    Driver Version:     32.0.15.9282
+    GPU Temperature:    45.0 °C | Power: 7.9 W
+    DirectML Support:   true (DirectX 12 feature level verified)
+    CUDA Support:       true
+    Backends Detected:  [CPU DirectML CUDA]
+   --------------------------------- 50 ms Watchdog State ---------------------------------
+    Watchdog Status:    running
+    Power Source:       OnBattery=false (100% remaining)
+    User Activity:      Active=false (Idle: 12m40s | Sustained Idle: 12m40s)
+   =======================================================================================
+   ```
+
+2. **`hipify <file.cu>`**: Analyzes CUDA kernels for 32-thread warp assumptions (`threadIdx.x % 32`, `__shfl_down_sync`), inline PTX assembly, and translates portable kernels to HIP C++:
+   ```text
+   > hipify samples\gpu\portable_vector_add.cu
+   [SUCCESS] Kernel successfully translated to portable HIP C++ (7 replacements made).
+   ```
+   If warp blockers are detected (e.g. `warp_reduction.cu`):
+   ```text
+   > hipify samples\gpu\warp_reduction.cu
+   [BLOCKED] cannot safely translate to HIP: 2 fatal compatibility issue(s) detected
+    * Line 4: Hardcoded modulo 32 indexing assumes 32-thread warp size.
+    * Line 9: NVIDIA 32-thread warp synchronous intrinsic does not map to AMD 64-thread wavefronts.
+   ```
+
+3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes workloads governed by Win32 JobObject memory ceilings and `IDLE_PRIORITY_CLASS`.
 
 ---
 
@@ -988,7 +1110,178 @@ Allocating memory in 10 MB chunks...
 
 ---
 
-## 10. Troubleshooting & Windows Diagnostics
+### 9.7 GPU Sample: Portable Vector Addition (`portable_vector_add.cu`)
+Demonstrates clean CUDA code that maps cleanly to AMD HIP C++ without hardware incompatibilities.
+
+**File**: `samples\gpu\portable_vector_add.cu`
+```cuda
+#include <cuda_runtime.h>
+#include <stdio.h>
+
+__global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < n) c[i] = a[i] + b[i];
+}
+
+int main() {
+    int n = 1024; size_t size = n * sizeof(float);
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, size); cudaMalloc(&d_b, size); cudaMalloc(&d_c, size);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    return 0;
+}
+```
+
+Verify translation with HIPIFY:
+```powershell
+go run ./cmd/unicompute-node -id test -signaling ""
+# In CLI:
+> hipify samples\gpu\portable_vector_add.cu
+# Result: 7 replacements made (cudaMalloc -> hipMalloc, cudaFree -> hipFree, hip/hip_runtime.h)
+```
+
+---
+
+### 9.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)
+Demonstrates architectural blockers that assume a 32-thread warp size, preventing execution on AMD 64-thread wavefronts.
+
+**File**: `samples\gpu\warp_reduction.cu`
+```cuda
+#include <cuda_runtime.h>
+
+__global__ void warpReduction(float *d_out, float *d_in) {
+    int lane = threadIdx.x % 32; // Blocker: modulo 32 assumes 32-thread warp
+    float val = d_in[threadIdx.x];
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset); // Blocker: 32-thread warp sync intrinsic
+    }
+    if (lane == 0) d_out[blockIdx.x] = val;
+}
+```
+
+Verify blocker detection:
+```text
+> hipify samples\gpu\warp_reduction.cu
+[BLOCKED] cannot safely translate to HIP: 2 fatal compatibility issue(s) detected
+ * Line 4: Hardcoded modulo 32 indexing assumes 32-thread warp size.
+ * Line 9: NVIDIA 32-thread warp synchronous intrinsic does not map to AMD 64-thread wavefronts.
+Action: EXECUTE_NVIDIA_ONLY
+```
+
+---
+
+### 9.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)
+Demonstrates assembly-level NVIDIA hardware locking (`asm volatile("mov.u32 %0, %smid;" ...)`).
+
+**File**: `samples\gpu\inline_ptx.cu`
+```text
+> hipify samples\gpu\inline_ptx.cu
+[BLOCKED] cannot safely translate to HIP: 1 fatal compatibility issue(s) detected
+ * Line 6: NVIDIA Parallel Thread Execution (PTX) assembly cannot be compiled by AMD ROCm/HIP.
+Action: REJECT_RECOMMEND_ONNX
+```
+
+---
+
+### 9.10 GPU Sample: Model Capsule & Checkpoint (`test_model.json`)
+A portable neural network definition with pre-initialized weight tensors and bias terms:
+
+```json
+{
+  "model_name": "toy_neural_net",
+  "layer_type": "Dense",
+  "input_shape": [1, 4],
+  "weights": [0.25, -0.5, 0.75, 1.0],
+  "bias": [0.1]
+}
+```
+
+---
+
+### 9.11 Standalone Automated Sample Runner (`cmd/test-samples`)
+You can run automated programmatic checks across all 10 sample files in one command:
+
+```powershell
+go run ./cmd/test-samples
+```
+
+Expected output:
+```text
+=======================================================================
+ UniCompute Standalone Samples Verification Runner
+=======================================================================
+[TEST GROUP 1] GPU Samples & HIPIFY Analysis/Translation
+  -> [PASS] portable_vector_add.cu: Translated to HIP C++ (7 replacements)
+  -> [PASS] warp_reduction.cu: Blocked on 32-thread warp assumptions (2 issues)
+  -> [PASS] inline_ptx.cu: Blocked on inline PTX assembly (1 issue)
+
+[TEST GROUP 2] Model Capsule & Checkpoint Serialization
+  -> [PASS] test_model.json: Valid JSON capsule parsed.
+  -> [PASS] Checkpoint saved: Step=10, SHA256=b2042f4f9c367aa8...
+  -> [PASS] Checkpoint integrity verified successfully.
+
+[TEST GROUP 3] Container Code Execution Protocol Encapsulation
+  -> [PASS] calc.py (python): Wire protocol encode/decode verified.
+  -> [PASS] hello.c (c): Wire protocol encode/decode verified.
+  -> [PASS] fib.cpp (cpp): Wire protocol encode/decode verified.
+  -> [PASS] timeout_test.py (python): Wire protocol encode/decode verified.
+  -> [PASS] network_leak_test.py (python): Wire protocol encode/decode verified.
+  -> [PASS] mem_limit_test.py (python): Wire protocol encode/decode verified.
+=======================================================================
+ [SUCCESS] All standalone sample verifications passed!
+=======================================================================
+```
+
+---
+
+## 10. Desktop GUI Control Room Operation
+
+UniCompute includes a dedicated desktop application with a real-time 60 FPS HTML5 Canvas topology visualizer and tabbed control panels for Objectives 1, 2, and 3.
+
+### 10.1 Launching the Desktop Window
+Launch the GUI directly via the provided single-click scripts:
+
+```powershell
+# Using the Batch script:
+.\run-gui.bat
+
+# Or using the PowerShell script:
+.\run-gui.ps1
+```
+
+This starts the local daemon and opens a native, borderless desktop window via Microsoft Edge or Google Chrome (`msedge.exe --app="http://127.0.0.1:23080"`).
+
+### 10.2 60 FPS Topology Canvas & Visual Elements
+The main canvas provides real-time situational awareness of the volunteer fleet:
+- **Central Coordinator Mainframe**: Rendered as a cybernetic server tower node with pulsing heartbeat rings, live ping telemetry, and connection status.
+- **Solid Signaling Rays**: Permanent control beams connecting all registered rigs to the coordinator.
+- **Orbiting Peer Workstation Rigs**: Custom isometric desktop rigs featuring **Dual-Hemisphere Cores**:
+  - *Upper Hemisphere (Compute Core)*: Shows CPU container load and GPU hardware availability.
+  - *Lower Hemisphere (Storage Core)*: Visualizes CAS vault quota, used bytes, and chunk counts.
+- **Mutual P2P Laser DataChannels**: Pulsing, animated dashed laser conduits with flowing photon packets reflecting live WebRTC SCTP DataChannel transfers (`dc-ctrl` and `dc-bulk`).
+- **Interactive Hover HUD**: Hovering your mouse over any workstation rig projects a holographic HUD telemetry card displaying Node ID, public/private IP, NAT type, GPU specs, and student idle duration.
+- **Interactive Action Drawer**: Clicking any workstation opens a drawer to send mutual P2P connection handshakes, latency pings, or raw stream data.
+
+### 10.3 Multi-Objective Dedicated Control Panels
+- **Tab 1: CPU Container Sandbox (Objective 2)**:
+  - Monaco-style dark code editor with pre-loaded samples (`calc.py`, `hello.c`, `fib.cpp`, `mem_limit_test.py`, `network_leak_test.py`).
+  - One-click execution targeting local or remote air-gapped Docker containers.
+  - Live console displaying stdout, stderr, execution duration, and exit status.
+- **Tab 2: GPU Acceleration & Governance (Objective 3)**:
+  - Real-time dials displaying RTX 4050 temperature, power draw (W), VRAM usage, and driver version.
+  - 50 ms Watchdog radar (AC power line status, battery percentage, keyboard/mouse idle timer).
+  - Interactive CUDA-to-AMD HIPIFY analyzer & translator with side-by-side code diff.
+  - Sandboxed Win32 JobObject GPU benchmark runner.
+- **Tab 3: CAS Storage Vault (Objective 1)**:
+  - Content-addressed blob stashing tool.
+  - Live chunk index table with SHA-256 hashes and sizes.
+  - One-click Bit-Rot Integrity Scrub audit.
+- **Tab 4: Fleet Console & Telemetry**:
+  - Live WebSocket event log capturing peer handshakes, NAT traversal states, and chunk deliveries.
+
+---
+
+## 11. Troubleshooting & Windows Diagnostics
 
 ### 1. "Docker is not ready: error during connect"
 - **Cause**: Docker Desktop is not running or the WSL2 engine has stopped.
