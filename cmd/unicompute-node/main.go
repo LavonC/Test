@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/node"
 	"github.com/unicompute/obj1/pkg/codeexec"
+	"github.com/unicompute/obj1/pkg/gpu"
 	"github.com/unicompute/obj1/pkg/relay"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/transport"
@@ -41,6 +42,11 @@ func main() {
 	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated node IDs allowed to submit code jobs")
 	codeTimeout := flag.Int("code-timeout", 10, "Code job timeout in seconds (1-30)")
 	relayListen := flag.String("relay-listen", "0.0.0.0:22067", "Relay listen address if run-relay is enabled")
+	enableGPU := flag.Bool("enable-gpu", false, "Enable Objective 3 GPU acceleration and resource governance")
+	gpuBackend := flag.String("gpu-backend", "auto", "Preferred GPU compute backend: auto, directml, cuda")
+	gpuMemLimitMB := flag.Int("gpu-mem-limit-mb", 2048, "GPU process memory ceiling in MB")
+	gpuWatchdogPollMS := flag.Int("gpu-watchdog-poll-ms", 50, "Watchdog polling frequency in ms (default: 50)")
+	gpuIgnoreBattery := flag.Bool("gpu-ignore-battery", false, "Ignore battery state (for testing or plugged-in lab machines)")
 
 	flag.Parse()
 	if *codeTimeout < 1 || *codeTimeout > codeexec.MaxTimeoutSeconds {
@@ -165,6 +171,33 @@ func main() {
 			MaxConcurrent:  2,
 		}), allowedPeers...)
 		log.Printf("[CODEEXEC] Docker sandbox enabled; allowed submitting peers: %s", strings.Join(allowedPeers, ", "))
+	}
+	if *enableGPU {
+		prefBackend := gpu.BackendDirectML
+		switch strings.ToLower(*gpuBackend) {
+		case "cuda":
+			prefBackend = gpu.BackendCUDA
+		case "directml":
+			prefBackend = gpu.BackendDirectML
+		default:
+			prefBackend = ""
+		}
+		gpuCfg := gpu.ManagerConfig{
+			StorageDir:          filepath.Join(*storageDir, "gpu"),
+			MaxMemoryBytes:      uint64(*gpuMemLimitMB) * 1024 * 1024,
+			PreferredBackend:    prefBackend,
+			WatchdogInterval:    time.Duration(*gpuWatchdogPollMS) * time.Millisecond,
+			UserActiveThreshold: 1000 * time.Millisecond,
+			ResumeGracePeriod:   30 * time.Second,
+			IgnoreBattery:       *gpuIgnoreBattery,
+		}
+		if err := n.EnableGPU(gpuCfg); err != nil {
+			log.Printf("[WARN] Failed to enable GPU subsystem: %v\n", err)
+		} else {
+			prof, _ := n.GPUProfile()
+			log.Printf("[GPU] Objective 3 enabled: %s (%s, %d MB VRAM, DirectML=%v, CUDA=%v)",
+				prof.DeviceName, prof.Vendor, prof.TotalVRAMBytes/(1024*1024), prof.DirectMLSupported, prof.CUDASupported)
+		}
 	}
 	defer n.Close()
 
@@ -296,6 +329,9 @@ func main() {
 				fmt.Println("  exec <peerID|all> <command...> - Execute shell command on connected remote PC(s)")
 				fmt.Println("  shell <peerID|all> <cmd...>    - Alias for remote command execution")
 				fmt.Println("  run <peerID> <c|cpp|python> <source-file> [stdin-file] - Run source code in a Docker sandbox")
+				fmt.Println("  gpu                            - Display GPU hardware profile & watchdog state")
+				fmt.Println("  gpu-run <c|cpp|onnx> <file>    - Run GPU workload with Win32 JobObject governance")
+				fmt.Println("  hipify <cuda-source-file>      - Analyze CUDA C++ source for AMD compatibility & translate")
 				fmt.Println("  quit, exit                     - Terminate the node")
 			case "peers", "users", "nodes":
 				fleetList, err := n.GetFleetNodes(context.Background())
@@ -726,6 +762,138 @@ func main() {
 				if resp.OutputTruncated { fmt.Println(" [!] Output was truncated by the worker's output limit.") }
 				fmt.Printf(" Exit code: %d | Worker execution: %d ms | Round trip: %d ms\n", resp.ExitCode, resp.DurationMs, time.Since(jobStart).Milliseconds())
 				fmt.Println("=================================================================")
+			case "gpu":
+				prof, enabled := n.GPUProfile()
+				if !enabled {
+					fmt.Println("GPU subsystem is not enabled. Run node with -enable-gpu to activate Objective 3.")
+					break
+				}
+				wdStatus, _ := n.GPUWatchdogStatus()
+				fmt.Println("\n======================= Objective 3: GPU Hardware & Governance =======================")
+				fmt.Printf(" Device Name:        %s\n", prof.DeviceName)
+				fmt.Printf(" Vendor:             %s\n", prof.Vendor)
+				fmt.Printf(" Total VRAM:         %d MB (%.2f GB)\n", prof.TotalVRAMBytes/(1024*1024), float64(prof.TotalVRAMBytes)/(1024*1024*1024))
+				fmt.Printf(" Available VRAM:     %d MB\n", prof.AvailableVRAMBytes/(1024*1024))
+				if prof.DriverVersion != "" {
+					fmt.Printf(" Driver Version:     %s\n", prof.DriverVersion)
+				}
+				if prof.TemperatureC > 0 {
+					fmt.Printf(" GPU Temperature:    %.1f °C | Power: %.1f W\n", prof.TemperatureC, prof.PowerUsageW)
+				}
+				fmt.Printf(" DirectML Support:   %v (Universal DirectX 12 acceleration across AMD/Intel/NVIDIA)\n", prof.DirectMLSupported)
+				fmt.Printf(" CUDA Support:       %v\n", prof.CUDASupported)
+				fmt.Printf(" Backends Detected:  %v\n", prof.SupportedBackends)
+				fmt.Println("--------------------------------- 50 ms Watchdog State ---------------------------------")
+				fmt.Printf(" Watchdog Status:    %s\n", wdStatus.State)
+				fmt.Printf(" Power Source:       OnBattery=%v (%d%% remaining)\n", wdStatus.OnBattery, wdStatus.BatteryPercent)
+				fmt.Printf(" User Activity:      Active=%v (Idle: %v | Sustained Idle: %v)\n",
+					wdStatus.UserActive, wdStatus.UserIdleDuration.Round(time.Millisecond), wdStatus.SustainedIdlePeriod.Round(time.Second))
+				if wdStatus.LastPauseReason != "" {
+					fmt.Printf(" Last Pause Reason:  %s (%v ago)\n", wdStatus.LastPauseReason, time.Since(wdStatus.LastPauseTime).Round(time.Second))
+				}
+				fmt.Println("=======================================================================================")
+			case "hipify":
+				if len(parts) < 2 {
+					fmt.Println("Usage: hipify <cuda-source-file>")
+					fmt.Println("Example: hipify ./samples/cuda/vector_add.cu")
+					break
+				}
+				cudaBytes, err := os.ReadFile(parts[1])
+				if err != nil {
+					fmt.Printf("Cannot read source file: %v\n", err)
+					break
+				}
+				res := gpu.TranslateCUDAToHIP(string(cudaBytes))
+				fmt.Println("\n======================= CUDA -> AMD HIPIFY Portability Analysis =======================")
+				fmt.Printf(" Source File:        %s (%d lines)\n", parts[1], res.Report.TotalLines)
+				fmt.Printf(" Portable to AMD:    %v\n", res.Report.TargetAMDSupported)
+				fmt.Printf(" Suggested Action:   %s\n", res.Report.SuggestedAction)
+				if len(res.Report.Issues) > 0 {
+					fmt.Printf("\n Detected %d Incompatibility Issue(s):\n", len(res.Report.Issues))
+					for idx, iss := range res.Report.Issues {
+						fmt.Printf("  [%d] Line %d: [%s] %s\n      Reason: %s\n      Remedy: %s\n",
+							idx+1, iss.LineNumber, iss.Severity, iss.Construct, iss.Reason, iss.Remediation)
+					}
+				}
+				if res.Success {
+					fmt.Printf("\n[SUCCESS] Kernel successfully translated to portable HIP C++ (%d replacements made).\n", res.ReplacementsMade)
+					fmt.Println("--- Translated Code Preview ---")
+					lines := strings.Split(res.TranslatedSource, "\n")
+					limit := 15
+					if len(lines) < limit {
+						limit = len(lines)
+					}
+					for i := 0; i < limit; i++ {
+						fmt.Println(lines[i])
+					}
+					if len(lines) > limit {
+						fmt.Printf("... (%d lines total)\n", len(lines))
+					}
+				} else {
+					fmt.Printf("\n[BLOCKED] %s\n", res.Error)
+				}
+				fmt.Println("=======================================================================================")
+			case "gpu-run":
+				if len(parts) < 3 {
+					fmt.Println("Usage: gpu-run <c|cpp|onnx> <source-file> [batches]")
+					fmt.Println("Example: gpu-run onnx ./model.onnx 100")
+					fmt.Println("Example: gpu-run cpp ./kernel.cu")
+					break
+				}
+				lang := strings.ToLower(parts[1])
+				filePath := parts[2]
+				totalBatches := 50
+				if len(parts) >= 4 {
+					fmt.Sscanf(parts[3], "%d", &totalBatches)
+				}
+				srcBytes, err := os.ReadFile(filePath)
+				if err != nil {
+					fmt.Printf("Cannot read source file: %v\n", err)
+					break
+				}
+				req := gpu.GPUTaskRequest{
+					JobID: "gpu-job-" + uuid.New().String()[:8],
+					Manifest: gpu.TaskCapsuleManifest{
+						Name:         filepath.Base(filePath),
+						TargetTier:   "tier3",
+						TaskType:     "training",
+						TotalBatches: totalBatches,
+					},
+					SourceCode: string(srcBytes),
+					TimeoutSeconds: 60,
+				}
+				if lang == "onnx" {
+					req.Manifest.TaskType = "inference"
+					req.InputTensors = map[string][]float32{
+						"input": {1.0, 2.0, 3.0, 4.0},
+					}
+				}
+				fmt.Printf("[GPU-RUN] Executing %s task %s under Win32 JobObject governance...\n", lang, req.JobID)
+				execCtx, cancelExec := context.WithTimeout(context.Background(), 60*time.Second)
+				resp, execErr := n.ExecuteGPUTask(execCtx, req)
+				cancelExec()
+				if execErr != nil {
+					fmt.Printf("[GPU-RUN] Execution failed: %v\n", execErr)
+					break
+				}
+				fmt.Println("\n============================ Objective 3 GPU Task Result ============================")
+				fmt.Printf(" Job ID:          %s\n", resp.JobID)
+				fmt.Printf(" Status:          %s\n", resp.Status)
+				fmt.Printf(" Execution Time:  %d ms\n", resp.ExecutionMs)
+				if resp.PreemptedReason != "" {
+					fmt.Printf(" Preempted By:    %s\n", resp.PreemptedReason)
+					fmt.Printf(" Checkpoint Saved: %s\n", resp.CheckpointBlob)
+				}
+				if resp.DiagnosticMessage != "" {
+					fmt.Printf(" Diagnostic:      %s\n", resp.DiagnosticMessage)
+				}
+				if resp.Error != "" {
+					fmt.Printf(" Error:           %s\n", resp.Error)
+				}
+				if len(resp.OutputTensors) > 0 {
+					fmt.Printf(" Outputs:         %+v\n", resp.OutputTensors)
+				}
+				fmt.Println("=====================================================================================")
 			case "quit", "exit":
 				fmt.Println("Exiting node...")
 				os.Exit(0)

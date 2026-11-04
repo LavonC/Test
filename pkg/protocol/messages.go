@@ -27,6 +27,12 @@ const (
 	DataMsgChunkAck      byte = 0x13
 	DataMsgStreamLog     byte = 0x20
 	DataMsgKeepalive     byte = 0x30
+
+	// Objective 3 GPU protocol messages
+	DataMsgGPUTaskRequest        byte = 0x40
+	DataMsgGPUTaskResponse       byte = 0x41
+	DataMsgGPUPreemptAlert       byte = 0x42
+	DataMsgGPUCheckpointAnnounce byte = 0x43
 )
 
 // Envelope wraps all WebSocket signaling control plane messages.

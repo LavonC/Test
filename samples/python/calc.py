@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-UniCompute Sample: Python Data Processor with Stdin
-Reads a sequence of numerical records from standard input, parses them,
-and computes comprehensive descriptive statistics and sorting.
-"""
-
 import sys
 import math
 
@@ -13,8 +7,6 @@ def process_stream():
     print("==================================================")
     print("   UniCompute Worker: Python Data Processing Job  ")
     print("==================================================")
-    
-    # Read all lines from standard input
     raw_input = sys.stdin.read()
     if not raw_input.strip():
         print("[WARN] No input received on stdin. Generating default test data.")
@@ -24,7 +16,6 @@ def process_stream():
             try:
                 numbers.append(float(token))
             except ValueError:
-                # Ignore non-numeric tokens
                 pass
 
     if not numbers:

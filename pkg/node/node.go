@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/unicompute/obj1/pkg/blobstore"
 	"github.com/unicompute/obj1/pkg/codeexec"
+	"github.com/unicompute/obj1/pkg/gpu"
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
 	"github.com/unicompute/obj1/pkg/protocol"
@@ -67,6 +68,7 @@ type Node struct {
 	pendingCode      map[string]pendingCodeResult
 	pendingExecsMu sync.Mutex
 	pendingExecs   map[string]chan remoteshell.ShellResponse
+	gpuManager     *gpu.Manager
 
 	started bool
 	closed  bool
@@ -685,6 +687,9 @@ func (n *Node) Close() error {
 	}
 	if n.store != nil {
 		_ = n.store.Close()
+	}
+	if n.gpuManager != nil {
+		_ = n.gpuManager.Close()
 	}
 
 	return nil
