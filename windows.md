@@ -347,6 +347,21 @@ To experience the full peer-to-peer distributed system, open **two separate Powe
 - **Window 1 (Worker Node B)**: Enables Docker sandbox code execution, contributes storage, and serves code execution requests.
 - **Window 2 (Client Node A)**: Connects to Node B, transfers files into the CAS vault, issues shell commands, and submits jobs.
 
+> [!NOTE]
+> **Coordinator Architecture & GUI Visualization**:
+> - The Coordinator (`unicompute-coordinator` or the live Render cloud deployment) is a **headless signaling hub and embedded TURN server**. It intentionally has **no standalone web GUI**, as volunteer compute networks require zero overhead on the signaling plane.
+> - **Verifying Coordinator Health via API**:
+>   ```powershell
+>   # Health & Uptime Check (Live Render):
+>   curl.exe -s https://unicompute-coordinator.onrender.com/health
+>   # Discovered Fleet Registry (Live Render):
+>   curl.exe -s https://unicompute-coordinator.onrender.com/api/nodes
+>   # Local Coordinator:
+>   curl.exe -s http://127.0.0.1:8080/health
+>   curl.exe -s http://127.0.0.1:8080/api/nodes
+>   ```
+> - **Visualizing the Coordinator in the Desktop GUI**: The visual representation of the coordinator lives inside the **Desktop GUI Control Room** (`unicompute-gui.exe`). When you launch the GUI, **Tab 1: P2P Topology Mesh** renders the coordinator as the central glowing mainframe tower, dynamically surrounded by orbiting worker rigs.
+
 ### Option A: Public Live Coordinator on Render
 Both nodes connect over the Internet via the production coordinator on Render (`wss://unicompute-coordinator.onrender.com/ws`).
 
@@ -1370,19 +1385,17 @@ To test real WebRTC P2P DataChannels, remote container execution, and live netwo
    ```powershell
    go run ./cmd/unicompute-gui -id node-desktop -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
    ```
-3. **Establish WebRTC P2P Connection in GUI**:
-   - Switch to the **P2P Topology Mesh** tab.
-   - You will see `node-B` orbiting the central coordinator tower.
-   - Click on `node-B` to open the **PC Inspector** drawer.
-   - Click **Connect P2P**: WebRTC ICE candidate gathering and SDP exchange execute over the coordinator WebSocket.
-   - Once connected, an animated green dashed laser conduit appears connecting `node-desktop` and `node-B` with flowing photon packets.
-   - Click **Ping** in the inspector: SCTP ACK confirms direct P2P link with live round-trip latency (e.g. `14 ms`).
-   - The inspector displays real path telemetry: Path type (`host-host` or `host-srflx`), SCTP 16 MiB window, and direct link status.
+3. **P2P Connection Workflows (Automatic vs. Manual)**:
+   UniCompute supports two distinct P2P connection workflows:
+   - **Workflow A: Automatic On-Demand Connection (Zero-Friction - Recommended)**:
+     You do **not** need to manually connect peers prior to launching tasks. Simply switch to the **CPU Containers (O2)** tab, choose `node-B [Coordinator]` in the **Target Peer** selector, and click **Run Code in Sandbox** or **Run Shell Command**. The GUI automatically detects that the direct WebRTC DataChannel is not yet active, triggers SDP/ICE negotiation over the coordinator in the background, transitions the connection state to `CONNECTED`, and executes the job immediately.
+   - **Workflow B: Manual Interactive Connection (Topology Canvas & Inspector)**:
+     Switch to **Tab 1: P2P Topology Mesh**. You will see `node-B` orbiting the central coordinator tower. Click on `node-B` to open the **PC Inspector** drawer, then click **Connect P2P**. WebRTC ICE candidate gathering and SDP exchange execute over the coordinator WebSocket. Once connected, an animated green dashed laser conduit links `node-desktop` and `node-B` with flowing photon packets. Click **Ping** in the inspector to measure round-trip latency (e.g. `14 ms`), or inspect connection telemetry (`host-host` pair, direct=true, SCTP 16 MiB window).
 4. **Execute Remote Code over WebRTC DataChannel**:
-   - Click **Target for Docker Job (O2)** in the inspector drawer (this automatically switches to the CPU Containers tab with `node-B` selected).
+   - If using Workflow B, click **Target for Docker Job (O2)** in the inspector drawer (this automatically switches to the CPU Containers tab with `node-B` selected). If using Workflow A, simply select `node-B` from the dropdown.
    - Select `calc.py` from the sample dropdown.
    - Click **Run Code in Sandbox**:
-     - The job payload is framed and transmitted over WebRTC DataChannel to `node-B`.
+     - The job payload is framed and transmitted over the direct WebRTC DataChannel to `node-B` (never passing payload data through the coordinator).
      - `node-B` executes the script inside an air-gapped Docker container (`--network none`, `--memory 128m`).
      - Standard output streams back to the GUI console in real time.
 5. **Execute Remote Shell Command**:

@@ -385,6 +385,15 @@ func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *ServerState) isPeerConnected(peerID string) bool {
+	for _, p := range s.node.GetConnectedPeers() {
+		if p == peerID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PeerID   string `json:"peer_id"`
@@ -410,7 +419,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: body.Timeout,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(body.Timeout+8)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(body.Timeout+15)*time.Second)
 	defer cancel()
 
 	// If local node or local worker is selected:
@@ -435,7 +444,26 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remote peer execution over WebRTC DataChannel
+	// Remote peer execution over WebRTC DataChannel.
+	// If peer is in the fleet but not yet connected via WebRTC, auto-connect on-demand.
+	if !s.isPeerConnected(body.PeerID) {
+		s.Broadcast("P2P_CONNECT", body.PeerID, fmt.Sprintf("Auto-establishing direct WebRTC link with %s via coordinator...", body.PeerID), nil)
+		connectCtx, cancelConnect := context.WithTimeout(ctx, 10*time.Second)
+		_, err := s.node.ConnectPeer(connectCtx, body.PeerID)
+		cancelConnect()
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"job_id":      req.JobID,
+				"language":    body.Language,
+				"exit_code":   -1,
+				"duration_ms": 0,
+				"error":       fmt.Sprintf("Failed to auto-connect P2P WebRTC link with %s: %v", body.PeerID, err),
+			})
+			return
+		}
+		s.Broadcast("P2P_CONNECTED", body.PeerID, fmt.Sprintf("Direct WebRTC link active with %s. Dispatching task...", body.PeerID), nil)
+	}
+
 	resp, err := s.node.ExecuteRemoteCode(ctx, body.PeerID, req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "resp": resp})
@@ -474,6 +502,22 @@ func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
 		})
 		writeJSON(w, http.StatusOK, res)
 		return
+	}
+
+	// If remote peer is not yet connected via WebRTC, auto-connect on-demand.
+	if !s.isPeerConnected(body.PeerID) {
+		s.Broadcast("P2P_CONNECT", body.PeerID, fmt.Sprintf("Auto-establishing direct WebRTC link with %s for shell command...", body.PeerID), nil)
+		connectCtx, cancelConnect := context.WithTimeout(ctx, 10*time.Second)
+		_, err := s.node.ConnectPeer(connectCtx, body.PeerID)
+		cancelConnect()
+		if err != nil {
+			writeJSON(w, http.StatusOK, remoteshell.ShellResponse{
+				ExitCode: -1,
+				Error:    fmt.Sprintf("Failed to auto-connect P2P WebRTC link with %s: %v", body.PeerID, err),
+			})
+			return
+		}
+		s.Broadcast("P2P_CONNECTED", body.PeerID, fmt.Sprintf("Direct WebRTC link active with %s. Executing shell...", body.PeerID), nil)
 	}
 
 	res, err := s.node.ExecuteRemoteCommand(ctx, body.PeerID, remoteshell.ShellRequest{

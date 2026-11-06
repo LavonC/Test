@@ -390,6 +390,21 @@ Open **two separate terminal tabs or windows**:
 - **Terminal 1 (Worker Node B)**: Contributes storage, enables Docker sandbox execution, and executes code jobs from allowed peers.
 - **Terminal 2 (Client Node A)**: Connects to Node B, transfers files into the CAS vault, issues shell commands, and submits jobs.
 
+> [!NOTE]
+> **Coordinator Architecture & GUI Visualization**:
+> - The Coordinator (`unicompute-coordinator` or the live Render cloud deployment) is a **headless signaling hub and embedded TURN server**. It intentionally has **no standalone web GUI**, ensuring zero footprint and maximum throughput on the signaling control plane.
+> - **Verifying Coordinator Health via API**:
+>   ```bash
+>   # Health & Uptime Check (Live Render):
+>   curl -s https://unicompute-coordinator.onrender.com/health
+>   # Discovered Fleet Registry (Live Render):
+>   curl -s https://unicompute-coordinator.onrender.com/api/nodes
+>   # Local Coordinator:
+>   curl -s http://127.0.0.1:8080/health
+>   curl -s http://127.0.0.1:8080/api/nodes
+>   ```
+> - **Visualizing the Coordinator in the Desktop GUI**: The visual representation of the coordinator lives inside the **Desktop GUI Control Room** (`unicompute-gui-linux`). When you launch the GUI, **Tab 1: P2P Topology Mesh** renders the coordinator as the central glowing mainframe tower, dynamically surrounded by orbiting worker rigs.
+
 ### Option A: Public Live Coordinator on Render
 Both nodes connect over the Internet via the production coordinator on Render:
 
@@ -1302,8 +1317,14 @@ Then access `http://<server-ip>:23080` from any web browser on your network.
    ```bash
    ./bin/unicompute-gui-linux -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
    ```
-3. Open Topology tab: Click `node-B` -> click **Connect P2P** -> verify animated green photon laser -> click **Ping** to test SCTP latency.
-4. Click **Target for Docker Job (O2)** -> load `calc.py` -> click **Run Code in Sandbox** -> verify remote container execution over WebRTC DataChannel.
+3. **P2P Connection Workflows (Automatic vs. Manual)**:
+   - **Workflow A: Automatic On-Demand Connection (Zero-Friction - Recommended)**:
+     You do **not** need to manually connect peers beforehand. Navigate to the **CPU Containers (O2)** tab, choose `node-B [Coordinator]` in the **Target Peer** selector, and click **Run Code in Sandbox** or **Run Shell Command**. The GUI automatically detects that the direct WebRTC DataChannel is absent, triggers SDP/ICE exchange via the coordinator, establishes the direct P2P link, and executes the job.
+   - **Workflow B: Manual Interactive Connection (Topology Canvas & Inspector)**:
+     Switch to **Tab 1: P2P Topology Mesh**. Click on `node-B` orbiting the central coordinator tower -> click **Connect P2P** -> verify animated green photon laser -> click **Ping** to test SCTP latency and inspect network path metrics (`pair=host-host`, direct=true).
+4. **Execute Remote Workloads**:
+   - In **CPU Containers**, with `node-B` selected, load `calc.py` and click **Run Code in Sandbox** -> verify remote container execution over WebRTC DataChannel without data touching the coordinator.
+   - In the stdin box, type `uname -a` and click **Run Shell Command** -> verify remote shell output.
 
 ---
 
