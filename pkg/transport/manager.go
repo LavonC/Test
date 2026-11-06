@@ -540,3 +540,17 @@ func (m *Manager) Close() error {
 
 	return nil
 }
+
+// SetFallbackTimeout dynamically updates the blind relay fallback timeout threshold.
+func (m *Manager) SetFallbackTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.FallbackTimeout = d
+}
+
+// FallbackTimeout returns the active blind relay fallback timeout threshold.
+func (m *Manager) FallbackTimeout() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.FallbackTimeout
+}

@@ -694,3 +694,21 @@ func (n *Node) Close() error {
 
 	return nil
 }
+
+// SetFallbackTimeout dynamically updates the blind relay fallback timeout threshold.
+func (n *Node) SetFallbackTimeout(d time.Duration) {
+	n.mu.Lock()
+	n.cfg.FallbackTimeout = d
+	tm := n.transport
+	n.mu.Unlock()
+	if tm != nil {
+		tm.SetFallbackTimeout(d)
+	}
+}
+
+// FallbackTimeout returns the active blind relay fallback timeout threshold.
+func (n *Node) FallbackTimeout() time.Duration {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.cfg.FallbackTimeout
+}

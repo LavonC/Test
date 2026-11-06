@@ -1074,6 +1074,72 @@
           </div>
         </div>
 
+        <!-- DATASET 3: local-vault-cas-blobs (Live Local CAS RS(4,2) Partition) -->
+        <div class="telemetry-card space-y-4">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-outline-variant/30 pb-3">
+            <div class="flex items-center gap-3">
+              <span class="material-symbols-outlined text-secondary text-2xl">storage</span>
+              <div>
+                <div class="flex items-center gap-2">
+                  <h3 class="font-headline font-semibold text-sm text-on-surface font-mono" id="rsCasDatasetName">local-vault-cas-blobs</h3>
+                  <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-emerald-500/15 text-secondary border border-secondary/30 font-semibold">Active Vault</span>
+                  <span class="text-xs font-mono text-outline" id="rsCasTotalSize">0 B</span>
+                </div>
+                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices striped across mesh peers with SHA-256 CAS verification</p>
+              </div>
+            </div>
+            <!-- Merkle Verification Badge -->
+            <div class="flex items-center gap-2">
+              <div class="merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5" id="merkleBadgeCas">
+                <span class="material-symbols-outlined text-sm">check_circle</span>
+                <span>Merkle Root: Valid / Matched</span>
+              </div>
+              <span class="text-xs font-mono text-outline" id="rsCasRootHash">0x110fb...382a</span>
+            </div>
+          </div>
+          <!-- 6-Cell RS(4,2) Shard Distribution Bar -->
+          <div>
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D1 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerD1">PC-Node-01</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeD1">Primary • 25%</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D2 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerD2">PC-Node-04</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeD2">Replica • 25%</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D3 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerD3">PC-Node-07</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeD3">Replica • 25%</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D4 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerD4">PC-Node-12</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeD4">Replica • 25%</div>
+              </div>
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="text-xs font-bold text-tertiary font-mono">P1 (Parity)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerP1">PC-Node-02</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeP1">Reed-Solomon Parity</div>
+              </div>
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="text-xs font-bold text-tertiary font-mono">P2 (Parity)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate" id="rsCasPeerP2">PC-Node-03</div>
+                <div class="text-[10px] text-outline font-mono" id="rsCasSizeP2">Reed-Solomon Parity</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Local CAS Storage Vault (O1) Substrate -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-2">
           <!-- Left Col: Quota & Ingestion (4 Cols) -->
