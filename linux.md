@@ -1250,19 +1250,29 @@ go run ./cmd/unicompute-gui -headless -port 23080
 ```
 Then navigate to `http://<linux-host-ip>:23080` from any web browser on your local network.
 
-### 12.2 Five-Tab Workstation Layout
-- **1. P2P Topology Mesh**: Central coordinator node with orbiting rigs, dual-hemisphere telemetry (CPU/GPU and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and PC Inspector drawer with live SCTP ping and link controls.
-- **2. CPU Containers (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
-- **3. GPU Subsystem (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
-- **4. CAS Vault (Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
-- **5. Wire Logs & Diagnostics**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
+### 12.2 Seven-Tab Unified Workstation Layout
+The GUI provides a comprehensive 7-tab control room uniting Coordinator administration and Worker execution:
+- **`[HEALTH & CONN]` Titlebar Pill**: Jumps directly to Tab 2 (Coordinator Hub) for cluster connectivity vitals.
+- **`[CODE & DATA]` Titlebar Pill**: Jumps directly to Tab 3 (CPU Sandbox) for execution workloads.
+
+- **1. Topology Canvas**: Central coordinator node with orbiting rigs, dual-hemisphere telemetry (CPU/GPU and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and PC Inspector drawer with live SCTP ping and link controls.
+- **2. Coordinator Hub**: Cluster signaling and daemon operations center with live daemon uptime counter, listen socket address, TLS/mTLS verification, ED25519 join token presentation with cryptographic QR preview and token rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, HEALTH | CONN vitals matrix, and cryptographic keyring.
+- **3. CPU Sandbox (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
+- **4. GPU Acceleration (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
+- **5. Storage & Shard Matrix**: Reed-Solomon RS(4,2) 6-cell striping layout for distributed dataset shards (`open-llama-weights-v2`, `genomics-chm13-alignments`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification.
+- **6. Cluster Task Queue**: Global ClassAd matchmaking task queue tracking active, queued, and completed DAG jobs across the fleet (`#JOB-8104` to `#JOB-8107`). Dynamically appends real-time compute jobs dispatched via GPU DirectML and CPU code execution.
+- **7. Cluster Wire Logs**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
 
 ### 12.3 Standalone Local Testing on Linux (1 Node)
-1. Start GUI: `./run-gui.sh` (or `go run ./cmd/unicompute-gui -headless`).
-2. Open `http://localhost:23080`.
-3. In **CAS Vault**, stash a text string, verify the blob appears in the table, click **View** to inspect the SHA-256 modal, and click **Scrub Storage Vault** to test bit-rot detection.
-4. In **GPU Subsystem**, analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY.
-5. In **CPU Containers**, with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
+1. Start GUI: `./run-gui.sh` (or `go run ./cmd/unicompute-gui -headless -port 23080`).
+2. Open `http://localhost:23080` (or `http://<linux-host-ip>:23080`).
+3. Click the **`[HEALTH & CONN]`** titlebar pill: Switches to **Coordinator Hub** (Tab 2). Observe daemon uptime, socket status, copy the join token, and adjust the blind relay fallback slider.
+4. In **Storage & Shard Matrix** (Tab 5), inspect the Reed-Solomon RS(4,2) 6-cell striping table, click **Verify All Merkle Roots** to audit Merkle trees via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
+5. In **GPU Acceleration** (Tab 4), analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY, and run a JobObject batch.
+6. In **CPU Sandbox** (Tab 3), with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
+7. In **Cluster Task Queue** (Tab 6), verify that initial DAG tasks and your newly dispatched CPU/GPU tasks are listed with ClassAd criteria and completion status.
+8. In **Topology Canvas** (Tab 1), inspect local PC rig telemetry and loopback metrics.
+9. In **Cluster Wire Logs** (Tab 7), observe live WebSocket events across all subsystems.
 
 ### 12.4 Distributed Cluster Testing on Linux (2 Nodes)
 1. Terminal 1 (Worker Node B):

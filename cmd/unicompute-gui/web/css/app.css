@@ -1264,6 +1264,189 @@ html, body {
   color: var(--border-outline);
 }
 
+/* =========================================================================
+   6. COORDINATOR HUB, REED-SOLOMON SHARD MATRIX & CLUSTER TASK QUEUE
+   ========================================================================= */
+
+/* Titlebar Dual Context Pills */
+.titlebar-pill-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-outline);
+  background-color: var(--surface-container);
+  border: 1px solid var(--border-outline);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.titlebar-pill-btn:hover {
+  color: var(--text-on-surface);
+  border-color: var(--primary-cyan);
+}
+.titlebar-pill-btn.active {
+  color: var(--primary-cyan);
+  background-color: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+/* Bento Grid */
+.bento-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+}
+.bento-card {
+  background-color: var(--surface-container);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+
+/* Reed-Solomon RS(4,2) 6-Cell Shard Strips */
+.shard-box {
+  background-color: var(--surface-lowest);
+  border-radius: 8px;
+  padding: 10px 12px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.shard-box:hover {
+  transform: translateY(-1px);
+}
+.shard-data {
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.shard-data:hover {
+  border-color: var(--primary-cyan);
+}
+.shard-parity {
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+.shard-parity:hover {
+  border-color: var(--tertiary-violet);
+}
+.shard-top-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+.merkle-badge-valid {
+  background-color: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: var(--secondary-light);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all 0.2s ease;
+}
+.merkle-badge-verifying {
+  background-color: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: var(--primary-cyan);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  animation: pulseSubtle 1s infinite;
+}
+
+/* Cluster Task Queue Table */
+.priority-p0 {
+  background-color: rgba(244, 63, 94, 0.2);
+  color: #ffb4ab;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.priority-p1 {
+  background-color: rgba(56, 189, 248, 0.2);
+  color: var(--primary-cyan);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.priority-p2 {
+  background-color: var(--surface-bright);
+  color: var(--text-variant);
+  border: 1px solid var(--border-outline);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.priority-p3 {
+  background-color: var(--surface-low);
+  color: var(--text-outline);
+  border: 1px solid var(--border-default);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.task-status-running {
+  color: var(--secondary-light);
+  font-weight: 600;
+}
+.task-status-completed {
+  color: var(--secondary-emerald);
+  font-weight: 700;
+}
+.task-status-dispatched {
+  color: var(--primary-cyan);
+}
+.task-status-queued {
+  color: var(--text-variant);
+}
+.task-status-failed {
+  color: var(--rose-fault);
+  font-weight: 600;
+}
+
+/* Range Slider */
+.styled-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: var(--surface-highest);
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.styled-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary-cyan);
+  cursor: pointer;
+  border: 2px solid var(--surface-lowest);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
+  transition: transform 0.1s;
+}
+.styled-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+.styled-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary-cyan);
+  cursor: pointer;
+  border: 2px solid var(--surface-lowest);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
+}
+
 /* Utility Hidden */
 .hidden {
   display: none !important;

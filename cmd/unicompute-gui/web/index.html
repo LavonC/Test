@@ -28,7 +28,8 @@
       <div class="brand-group">
         <span class="material-symbols-outlined text-primary text-base">hub</span>
         <span class="brand-title">UniCompute</span>
-        <span class="brand-badge">[OBJ 1-3 WORKSTATION]</span>
+        <button id="pillHealthConn" class="titlebar-pill-btn" title="Coordinator Health &amp; Connectivity View">[HEALTH &amp; CONN]</button>
+        <button id="pillCodeData" class="titlebar-pill-btn active" title="Worker Code &amp; Data Execution View">[CODE &amp; DATA]</button>
       </div>
     </div>
 
@@ -88,28 +89,42 @@
       </button>
 
       <!-- Tab 2 -->
-      <button class="nav-tab-btn" data-tab="tab-code" id="navTab2">
+      <button class="nav-tab-btn" data-tab="tab-coordinator" id="navTab2">
+        <span class="material-symbols-outlined text-base">dns</span>
+        <span>Coordinator Hub</span>
+        <span class="tab-pill">[HEALTH &amp; CONN]</span>
+      </button>
+
+      <!-- Tab 3 -->
+      <button class="nav-tab-btn" data-tab="tab-code" id="navTab3">
         <span class="material-symbols-outlined text-base">memory</span>
         <span>CPU Sandbox (O2)</span>
         <span class="tab-pill">DOCKER</span>
       </button>
 
-      <!-- Tab 3 -->
-      <button class="nav-tab-btn" data-tab="tab-gpu" id="navTab3">
+      <!-- Tab 4 -->
+      <button class="nav-tab-btn" data-tab="tab-gpu" id="navTab4">
         <span class="material-symbols-outlined text-base">speed</span>
         <span>GPU Acceleration (O3)</span>
         <span class="tab-pill">TIER 3</span>
       </button>
 
-      <!-- Tab 4 -->
-      <button class="nav-tab-btn" data-tab="tab-storage" id="navTab4">
+      <!-- Tab 5 -->
+      <button class="nav-tab-btn" data-tab="tab-storage" id="navTab5">
         <span class="material-symbols-outlined text-base">dataset</span>
-        <span>CAS Storage Vault (O1)</span>
-        <span class="tab-pill">SHA-256</span>
+        <span>Storage &amp; Shard Matrix</span>
+        <span class="tab-pill">[RS(4,2)]</span>
       </button>
 
-      <!-- Tab 5 -->
-      <button class="nav-tab-btn" data-tab="tab-logs" id="navTab5">
+      <!-- Tab 6 -->
+      <button class="nav-tab-btn" data-tab="tab-tasks" id="navTab6">
+        <span class="material-symbols-outlined text-base">task_alt</span>
+        <span>Cluster Task Queue</span>
+        <span class="tab-pill">[CLASSAD]</span>
+      </button>
+
+      <!-- Tab 7 -->
+      <button class="nav-tab-btn" data-tab="tab-logs" id="navTab7">
         <span class="material-symbols-outlined text-base">receipt_long</span>
         <span>Cluster Wire Logs</span>
         <span class="status-dot-sm"></span>
@@ -344,7 +359,219 @@
     </section>
 
     <!-- ========================================================================= -->
-    <!-- TAB 2: CPU CONTAINER SANDBOX (OBJECTIVE 2)                                 -->
+    <!-- TAB 2: COORDINATOR HUB [HEALTH & CONN]                                    -->
+    <!-- ========================================================================= -->
+    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-coordinator">
+      <div class="max-w-7xl mx-auto space-y-6">
+        <!-- Page Title & Quick Info -->
+        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Host Setup &amp; Daemon Controls</h1>
+              <span class="badge-pri font-mono text-xs">[HEALTH &amp; CONN]</span>
+            </div>
+            <p class="font-body text-body-sm text-on-surface-variant mt-1">Configure root coordinator socket bindings, peer relay thresholds, and cryptographic access credentials.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn-surface font-mono text-xs flex items-center gap-1.5" id="btnSyncCoordinatorConfig">
+              <span class="material-symbols-outlined text-base">refresh</span>
+              <span>Sync Configuration</span>
+            </button>
+            <button class="btn-emerald font-semibold text-xs flex items-center gap-1.5" id="btnRestartDaemon">
+              <span class="material-symbols-outlined text-base">power_settings_new</span>
+              <span>Restart Daemon</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 3-Column Card Bento -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <!-- Card 1: Daemon Status Toggle Card -->
+          <div class="telemetry-card flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center text-secondary border border-secondary/30">
+                    <span class="material-symbols-outlined">dns</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Coordinator Daemon</h3>
+                    <p class="font-mono text-[11px] text-outline">PID 98124 • systemd unit</p>
+                  </div>
+                </div>
+                <!-- Status Toggle -->
+                <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
+                  <span class="status-dot-pulse"></span>
+                  <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
+                </div>
+              </div>
+
+              <div class="space-y-2.5 pt-2 font-mono text-xs">
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">Uptime</span>
+                  <span class="text-on-surface font-semibold" id="coordUptime">14h 22m 19s</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">QUIC Listen Socket</span>
+                  <span class="text-primary font-semibold" id="coordListenSocket">0.0.0.0:4194/quic</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">Heartbeat Ping Frequency</span>
+                  <span class="text-on-surface font-semibold">5.000 ms (Interval 5s)</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">mTLS Protocol</span>
+                  <span class="text-secondary font-semibold" id="coordMtls">TLS_AES_256_GCM_SHA384</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-5 pt-3 border-t border-outline-variant/30 flex items-center justify-between">
+              <span class="text-xs text-outline font-mono">Active thread pool: 8 workers</span>
+              <span class="badge-pri font-mono text-[11px]">QUIC v1 Native</span>
+            </div>
+          </div>
+
+          <!-- Card 2: Join Code Generation & Relay Configuration -->
+          <div class="telemetry-card flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
+                    <span class="material-symbols-outlined">vpn_key</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Cluster Join Token</h3>
+                    <p class="font-mono text-[11px] text-outline">Peer discovery broadcast payload</p>
+                  </div>
+                </div>
+                <button class="btn-icon" id="btnRotateToken" title="Rotate Cluster Token">
+                  <span class="material-symbols-outlined text-sm">autorenew</span>
+                </button>
+              </div>
+
+              <!-- Large Token Presentation -->
+              <div class="bg-surface-lowest p-3 rounded-lg border border-outline-variant/40 flex flex-col items-center justify-center my-2 text-center">
+                <span class="text-[10px] text-outline font-mono uppercase tracking-wider mb-1">Cryptographic Discovery ID</span>
+                <span class="font-mono text-xl font-bold text-primary tracking-widest" id="coordDisplayedToken">UC-9F4A-82B1</span>
+                <div class="flex items-center gap-2 mt-2">
+                  <button class="btn-surface font-mono text-xs flex items-center gap-1" id="btnCopyCoordToken">
+                    <span class="material-symbols-outlined text-xs">content_copy</span>
+                    <span>Copy Code</span>
+                  </button>
+                  <button class="btn-surface font-mono text-xs flex items-center gap-1" id="btnQrPreview">
+                    <span class="material-symbols-outlined text-xs">qr_code_2</span>
+                    <span>QR Preview</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Relay Slider Setting -->
+              <div class="mt-4 space-y-1.5">
+                <div class="flex justify-between items-center text-xs">
+                  <span class="text-outline font-mono">Blind Relay Fallback Threshold</span>
+                  <span class="font-mono text-primary font-semibold" id="coordSliderValueText">2.0s</span>
+                </div>
+                <input class="styled-range w-full" id="coordRelaySlider" max="5.0" min="0.5" step="0.1" type="range" value="2.0"/>
+                <p class="text-[11px] text-outline">Peers unable to establish direct NAT UDP holes fall back to blind coordinator relays after timeout.</p>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-outline-variant/30 flex justify-between items-center text-xs text-outline font-mono">
+              <span>Token expires in: <span class="text-on-surface">23h 38m</span></span>
+              <span class="text-secondary">ED25519 Signed</span>
+            </div>
+          </div>
+
+          <!-- Card 3: HEALTH & CONN Vitals Matrix -->
+          <div class="telemetry-card flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-purple-500/15 flex items-center justify-center text-tertiary border border-tertiary/30">
+                    <span class="material-symbols-outlined">speed</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">HEALTH | CONN Vitals</h3>
+                    <p class="font-mono text-[11px] text-outline">Real-time coordinator mesh telemetry</p>
+                  </div>
+                </div>
+                <span class="badge-emerald font-mono text-[10px]">PEER PARITY OK</span>
+              </div>
+
+              <!-- Vitals stats breakdown -->
+              <div class="grid grid-cols-2 gap-3 mt-2">
+                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
+                  <span class="text-[11px] text-outline font-mono">Direct P2P Links</span>
+                  <div class="font-mono text-lg font-bold text-secondary mt-0.5" id="coordDirectPeers">18 Nodes</div>
+                  <span class="text-[10px] text-outline font-mono" id="coordAvgRtt">Avg RTT: 21.4ms</span>
+                </div>
+                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
+                  <span class="text-[11px] text-outline font-mono">Relayed Throughput</span>
+                  <div class="font-mono text-lg font-bold text-primary mt-0.5" id="coordRelayedPeers">6 Nodes</div>
+                  <span class="text-[10px] text-outline font-mono" id="coordRelayFallback">2.0s Fallback Active</span>
+                </div>
+                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
+                  <span class="text-[11px] text-outline font-mono">Throttled Peers</span>
+                  <div class="font-mono text-lg font-bold text-on-surface mt-0.5" id="coordThrottledPeers">0 Nodes</div>
+                  <span class="text-[10px] text-secondary font-mono">Zero backpressure</span>
+                </div>
+                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
+                  <span class="text-[11px] text-outline font-mono">Merkle Tree Verif.</span>
+                  <div class="font-mono text-lg font-bold text-tertiary mt-0.5" id="coordMerkleVerif">100.0%</div>
+                  <span class="text-[10px] text-outline font-mono" id="coordHashCount">3,892,104 Hashes</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Health Bar summary -->
+            <div class="mt-4 pt-3 border-t border-outline-variant/30">
+              <div class="flex justify-between items-center text-xs font-mono mb-1.5">
+                <span class="text-outline" id="coordMeshSaturationLabel">Mesh Link Saturation: 24/32 Cap</span>
+                <span class="text-secondary font-semibold" id="coordMeshPercent">75% Capacity</span>
+              </div>
+              <div class="h-2 w-full bg-surface-lowest rounded-full overflow-hidden flex border border-outline-variant/30">
+                <div class="bg-secondary h-full" id="coordBarDirect" style="width: 56.25%" title="Direct P2P"></div>
+                <div class="bg-primary h-full" id="coordBarRelay" style="width: 18.75%" title="Relayed"></div>
+                <div class="bg-outline-variant/40 h-full" id="coordBarSpare" style="width: 25%" title="Spare capacity"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- System Daemon Cryptographic Keyring & Protocol Attributes Card -->
+        <div class="telemetry-card space-y-3">
+          <div class="flex items-center justify-between border-b border-outline-variant/30 pb-2">
+            <h3 class="font-headline font-semibold text-sm text-on-surface flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-base">key</span>
+              <span>Runtime Cryptographic Keyring &amp; Protocol Attributes</span>
+            </h3>
+            <span class="text-xs font-mono text-outline">X.509 Coordinator Cert SHA-256: 7f8a...c931</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs font-mono">
+            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
+              <div class="text-outline">COORDINATOR_KEY</div>
+              <div class="text-on-surface truncate mt-1">ed25519-sk-0x9F4A82B14C00EA1</div>
+            </div>
+            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
+              <div class="text-outline">CIPHER_SUITE</div>
+              <div class="text-on-surface truncate mt-1">CHACHA20_POLY1305_SHA256</div>
+            </div>
+            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
+              <div class="text-outline">NAT_HOLE_PUNCH</div>
+              <div class="text-secondary truncate mt-1">STUN/TURN RFC-8489 Active</div>
+            </div>
+            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
+              <div class="text-outline">CONCURRENCY_POLICY</div>
+              <div class="text-primary truncate mt-1">EPOLL_WORKER_FAIR_QUEUING</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 3: CPU CONTAINER SANDBOX (OBJECTIVE 2)                                 -->
     <!-- ========================================================================= -->
     <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-code">
       <div class="max-w-7xl mx-auto space-y-5">
@@ -642,38 +869,219 @@
     </section>
 
     <!-- ========================================================================= -->
-    <!-- TAB 4: CAS STORAGE VAULT (OBJECTIVE 1)                                    -->
+    <!-- TAB 5: STORAGE & REED-SOLOMON SHARD MATRIX [RS(4,2)]                       -->
     <!-- ========================================================================= -->
     <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-storage">
-      <div class="max-w-7xl mx-auto space-y-5">
+      <div class="max-w-7xl mx-auto space-y-6">
         <!-- Title & Subsystem Status -->
         <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
           <div>
             <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Content-Addressed Storage (CAS) Vault</h1>
-              <span class="badge-pri font-mono text-xs">OBJECTIVE 1 SUBSTRATE</span>
+              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Network Storage &amp; Reed-Solomon Shard Matrix</h1>
+              <span class="badge-pri font-mono text-xs">[RS(4,2) ACTIVE]</span>
             </div>
             <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              High-integrity node-local storage vault enforcing disk quotas, atomic commits via temporary files, SHA-256 content addressing, and cryptographic bit-rot scrub auditing.
+              Distributed datasets sharded with Reed-Solomon RS(4,2) parity (4 data chunks + 2 erasure recovery shards) across fleet peers, anchored by local CAS Blake3 / SHA-256 integrity audits.
             </p>
           </div>
           <div class="flex items-center gap-2">
-            <button id="btnScrubVault" class="btn-surface font-mono text-xs flex items-center gap-1.5">
+            <button id="btnVerifyAllMerkle" class="btn-surface font-mono text-xs flex items-center gap-1.5">
               <span class="material-symbols-outlined text-xs">verified</span>
-              <span>Run Bitrot Scrub</span>
+              <span>Verify All Merkle Roots</span>
+            </button>
+            <button id="btnShardNewDataset" class="btn-emerald font-semibold text-xs flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-xs">upload_file</span>
+              <span>Shard New Dataset</span>
             </button>
             <button id="btnRefreshBlobs" class="btn-primary-compact">Refresh</button>
           </div>
         </div>
 
-        <!-- 2-Column Split: Storage Metrics & Ingestion vs Blobs Table -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <!-- Reed-Solomon Legend & Quick Overview -->
+        <div class="telemetry-card flex flex-wrap items-center justify-between gap-4 p-4">
+          <div class="flex items-center gap-4">
+            <span class="text-xs font-mono text-outline font-semibold uppercase">Shard Topology:</span>
+            <div class="flex items-center gap-2 text-xs font-mono">
+              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
+              <span class="text-on-surface">Data Shard (D1-D4)</span>
+            </div>
+            <div class="flex items-center gap-2 text-xs font-mono">
+              <span class="w-3 h-3 rounded bg-purple-500/80 border border-tertiary/50"></span>
+              <span class="text-on-surface">Parity Recovery Shard (P1-P2)</span>
+            </div>
+          </div>
+          <div class="text-xs font-mono text-on-surface-variant">
+            Tolerates up to <span class="text-secondary font-semibold">2 Simultaneous Peer Failures</span> per dataset slice.
+          </div>
+        </div>
+
+        <!-- DATASET 1: open-llama-weights-v2 -->
+        <div class="telemetry-card space-y-4">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-outline-variant/30 pb-3">
+            <div class="flex items-center gap-3">
+              <span class="material-symbols-outlined text-primary text-2xl">folder_data</span>
+              <div>
+                <div class="flex items-center gap-2">
+                  <h3 class="font-headline font-semibold text-sm text-on-surface font-mono">open-llama-weights-v2</h3>
+                  <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-surface-high text-on-surface-variant border border-outline-variant/40">Public</span>
+                  <span class="text-xs font-mono text-outline">14.2 GB</span>
+                </div>
+                <p class="text-xs text-on-surface-variant mt-0.5">Llama-2 7B distributed tensor partition • 48 Blake3 chunk slices</p>
+              </div>
+            </div>
+            <!-- Merkle Verification Badge -->
+            <div class="flex items-center gap-2">
+              <div class="merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5" id="merkleBadgeLlama">
+                <span class="material-symbols-outlined text-sm">check_circle</span>
+                <span>Merkle Root: Valid / Matched</span>
+              </div>
+              <span class="text-xs font-mono text-outline">0x8a91f...e43c</span>
+            </div>
+          </div>
+          <!-- 6-Cell RS(4,2) Shard Distribution Bar -->
+          <div>
+            <div class="flex justify-between items-center text-xs font-mono mb-2">
+              <span class="text-outline">Reed-Solomon RS(4,2) Striping Layout Across Mesh:</span>
+              <span class="text-primary font-semibold">6 / 6 Shards Healthy</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+              <!-- D1 -->
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-primary">D1 (Data)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-01</div>
+                <div class="text-[10px] text-outline font-mono">Seattle • 3.55 GB</div>
+              </div>
+              <!-- D2 -->
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-primary">D2 (Data)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-04</div>
+                <div class="text-[10px] text-outline font-mono">Austin • 3.55 GB</div>
+              </div>
+              <!-- D3 -->
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-primary">D3 (Data)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-07</div>
+                <div class="text-[10px] text-outline font-mono">Toronto • 3.55 GB</div>
+              </div>
+              <!-- D4 -->
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-primary">D4 (Data)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-12</div>
+                <div class="text-[10px] text-outline font-mono">Chicago • 3.55 GB</div>
+              </div>
+              <!-- P1 (Parity) -->
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-tertiary">P1 (Parity)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-02</div>
+                <div class="text-[10px] text-outline font-mono">Tokyo • 3.55 GB</div>
+              </div>
+              <!-- P2 (Parity) -->
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="flex justify-between items-center font-mono">
+                  <span class="text-xs font-bold text-tertiary">P2 (Parity)</span>
+                  <span class="text-[10px] text-secondary">OK</span>
+                </div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-03</div>
+                <div class="text-[10px] text-outline font-mono">Frankfurt • 3.55 GB</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DATASET 2: genomics-chm13-alignments -->
+        <div class="telemetry-card space-y-4">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-outline-variant/30 pb-3">
+            <div class="flex items-center gap-3">
+              <span class="material-symbols-outlined text-tertiary text-2xl">biotech</span>
+              <div>
+                <div class="flex items-center gap-2">
+                  <h3 class="font-headline font-semibold text-sm text-on-surface font-mono">genomics-chm13-alignments</h3>
+                  <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold">Private</span>
+                  <span class="text-xs font-mono text-outline">4.8 GB</span>
+                </div>
+                <p class="text-xs text-on-surface-variant mt-0.5">Encrypted human reference genome BAM indexes • AES-256 GCM encrypted at rest</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5" id="merkleBadgeGenome">
+                <span class="material-symbols-outlined text-sm">check_circle</span>
+                <span>Merkle Root: Valid / Matched</span>
+              </div>
+              <span class="text-xs font-mono text-outline">0x44c12...b998</span>
+            </div>
+          </div>
+          <!-- 6-Cell RS(4,2) Shard Distribution Bar -->
+          <div>
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D1 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-04</div>
+                <div class="text-[10px] text-outline font-mono">Austin • 1.2 GB</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D2 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-06</div>
+                <div class="text-[10px] text-outline font-mono">London • 1.2 GB</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D3 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-08</div>
+                <div class="text-[10px] text-outline font-mono">Paris • 1.2 GB</div>
+              </div>
+              <div class="shard-box shard-data">
+                <div class="shard-top-bar bg-primary"></div>
+                <div class="text-xs font-bold text-primary font-mono">D4 (Data)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-10</div>
+                <div class="text-[10px] text-outline font-mono">Sydney • 1.2 GB</div>
+              </div>
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="text-xs font-bold text-tertiary font-mono">P1 (Parity)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-01</div>
+                <div class="text-[10px] text-outline font-mono">Seattle • 1.2 GB</div>
+              </div>
+              <div class="shard-box shard-parity">
+                <div class="shard-top-bar bg-tertiary"></div>
+                <div class="text-xs font-bold text-tertiary font-mono">P2 (Parity)</div>
+                <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-14</div>
+                <div class="text-[10px] text-outline font-mono">Seoul • 1.2 GB</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Local CAS Storage Vault (O1) Substrate -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-2">
           <!-- Left Col: Quota & Ingestion (4 Cols) -->
           <div class="lg:col-span-4 space-y-4">
             <!-- Quota Card -->
             <div class="telemetry-card">
               <div class="flex justify-between items-center mb-1">
-                <span class="dial-label">STORAGE QUOTA ENFORCEMENT</span>
+                <span class="dial-label">LOCAL CAS STORAGE VAULT</span>
                 <span class="font-mono text-xs text-outline" id="storageBlobCount">0 Blobs</span>
               </div>
               <div class="dial-title font-mono text-primary" id="storageUsedText">0 MB / 10 GB</div>
@@ -688,12 +1096,21 @@
 
             <!-- Ingest New Blob Card -->
             <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-4 space-y-3">
-              <span class="font-headline font-semibold text-sm text-on-surface block">Ingest New Data Blob</span>
-              <textarea id="storageContentInput" class="styled-input font-mono text-xs w-full" rows="3" placeholder="Enter text or paste data to store into vault..."></textarea>
-              <button id="btnPutBlob" class="btn-emerald w-full font-semibold flex items-center justify-center gap-1.5">
-                <span class="material-symbols-outlined text-sm">upload</span>
-                <span>Commit to Local Vault</span>
-              </button>
+              <div class="flex justify-between items-center">
+                <span class="font-headline font-semibold text-sm text-on-surface block">Ingest New Data Blob</span>
+                <span class="text-[10px] font-mono text-primary">SHA-256 CAS</span>
+              </div>
+              <textarea id="storageContentInput" class="styled-input font-mono text-xs w-full" rows="3" placeholder="Enter text or paste dataset chunk to store and stripe..."></textarea>
+              <div class="flex items-center gap-2">
+                <button id="btnPutBlob" class="btn-emerald flex-1 font-semibold flex items-center justify-center gap-1.5">
+                  <span class="material-symbols-outlined text-sm">upload</span>
+                  <span>Commit to Local Vault</span>
+                </button>
+                <button id="btnScrubVault" class="btn-surface font-mono text-xs flex items-center gap-1" title="Scrub local CAS for bitrot">
+                  <span class="material-symbols-outlined text-xs">verified</span>
+                  <span>Scrub</span>
+                </button>
+              </div>
             </div>
 
             <!-- Scrub Result Panel -->
@@ -705,7 +1122,7 @@
             <div class="px-4 py-3 bg-surface-high border-b border-outline-variant/40 flex items-center justify-between">
               <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-primary text-base">folder_open</span>
-                <span class="font-headline font-semibold text-sm text-on-surface">Content-Addressed Blobs in Vault</span>
+                <span class="font-headline font-semibold text-sm text-on-surface">Content-Addressed Shards &amp; Blobs</span>
               </div>
               <span class="text-xs font-mono text-outline" id="blobCountBadge">0 Total Blobs</span>
             </div>
@@ -725,6 +1142,66 @@
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================================================= -->
+    <!-- TAB 6: CLUSTER TASK QUEUE & BILATERAL MATCHMAKING [CLASSAD]                -->
+    <!-- ========================================================================= -->
+    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-tasks">
+      <div class="max-w-7xl mx-auto space-y-6">
+        <!-- Header -->
+        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Cluster Task Queue &amp; Bilateral Matchmaking</h1>
+              <span class="badge-pri font-mono text-xs">[CLASSAD]</span>
+            </div>
+            <p class="font-body text-body-sm text-on-surface-variant mt-1">Bilateral ClassAd matchmaking, stage DAG dispatch, and real-time coordinator stream execution.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="px-2.5 py-1 rounded bg-secondary/15 text-secondary border border-secondary/30 font-mono text-xs font-semibold">
+              Live Stream Active (5s Heartbeat)
+            </span>
+            <button class="btn-surface font-mono text-xs flex items-center gap-1.5" id="btnRefreshTasks">
+              <span class="material-symbols-outlined text-xs">refresh</span>
+              <span>Refresh Queue</span>
+            </button>
+            <button class="btn-emerald font-semibold text-xs flex items-center gap-1.5" id="btnDispatchSampleTask">
+              <span class="material-symbols-outlined text-xs">send</span>
+              <span>Dispatch Sample DAG</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Global Pending Task Queue Table Card -->
+        <div class="bg-surface-low rounded-xl border border-outline-variant/50 overflow-hidden shadow-sm">
+          <div class="px-4 py-3 bg-surface-high border-b border-outline-variant/40 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-base">task_alt</span>
+              <h3 class="font-headline font-semibold text-sm text-on-surface">Global Pending &amp; Scheduled Task Queue</h3>
+            </div>
+            <span class="text-xs font-mono text-outline" id="taskQueueCount">Showing 4 of 12 Active DAG Tasks</span>
+          </div>
+
+          <div class="overflow-x-auto custom-scroll">
+            <table class="styled-table font-mono text-xs w-full text-left">
+              <thead>
+                <tr>
+                  <th>Job ID</th>
+                  <th>Bilateral ClassAd Requirement</th>
+                  <th>Target Node / Match</th>
+                  <th>Stage DAG Routing</th>
+                  <th>Priority</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="taskQueueTableBody">
+                <!-- Dynamically populated from /api/tasks -->
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -762,8 +1239,55 @@
       </div>
     </div>
 
+    <!-- QR Preview Modal -->
+    <div id="qrModal" class="incoming-modal hidden">
+      <div class="modal-card max-w-sm w-full text-center">
+        <div class="flex items-center justify-between border-b border-outline-variant/40 pb-3 mb-4">
+          <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-primary text-xl">qr_code_2</span>
+            <span class="font-headline font-semibold text-sm text-on-surface">Cluster Discovery QR</span>
+          </div>
+          <button class="btn-close-sm" id="btnCloseQrModal">&times;</button>
+        </div>
+        <div class="p-4 bg-white rounded-lg inline-block mx-auto mb-3 shadow-inner">
+          <!-- Scalable crisp SVG QR Code representation -->
+          <svg class="w-48 h-48 mx-auto" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100" height="100" fill="white"/>
+            <!-- Corner marker 1 -->
+            <rect x="10" y="10" width="24" height="24" stroke="black" stroke-width="4" fill="none"/>
+            <rect x="16" y="16" width="12" height="12" fill="black"/>
+            <!-- Corner marker 2 -->
+            <rect x="66" y="10" width="24" height="24" stroke="black" stroke-width="4" fill="none"/>
+            <rect x="72" y="16" width="12" height="12" fill="black"/>
+            <!-- Corner marker 3 -->
+            <rect x="10" y="66" width="24" height="24" stroke="black" stroke-width="4" fill="none"/>
+            <rect x="16" y="72" width="12" height="12" fill="black"/>
+            <!-- Data pattern modules -->
+            <rect x="42" y="14" width="6" height="6" fill="black"/>
+            <rect x="52" y="14" width="6" height="6" fill="black"/>
+            <rect x="46" y="24" width="6" height="6" fill="black"/>
+            <rect x="14" y="42" width="6" height="6" fill="black"/>
+            <rect x="24" y="46" width="6" height="6" fill="black"/>
+            <rect x="42" y="42" width="16" height="16" fill="#00668a"/>
+            <rect x="66" y="42" width="6" height="6" fill="black"/>
+            <rect x="76" y="46" width="6" height="6" fill="black"/>
+            <rect x="42" y="66" width="6" height="6" fill="black"/>
+            <rect x="52" y="76" width="6" height="6" fill="black"/>
+            <rect x="66" y="66" width="12" height="6" fill="black"/>
+            <rect x="76" y="76" width="12" height="6" fill="black"/>
+            <rect x="66" y="86" width="6" height="6" fill="black"/>
+          </svg>
+        </div>
+        <p class="font-mono text-xs text-primary font-bold" id="qrModalToken">UC-9F4A-82B1</p>
+        <p class="text-[11px] text-outline mt-1">Scan from any UniCompute client device to join discovery mesh.</p>
+        <div class="mt-4 pt-3 border-t border-outline-variant/30 flex justify-end">
+          <button class="btn-primary-compact" id="btnCloseQrModalBtn">Done</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ========================================================================= -->
-    <!-- TAB 5: CLUSTER WIRE LOGS & TELEMETRY STREAM                               -->
+    <!-- TAB 7: CLUSTER WIRE LOGS & TELEMETRY STREAM                               -->
     <!-- ========================================================================= -->
     <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-logs">
       <div class="max-w-7xl mx-auto space-y-4 h-full flex flex-col">

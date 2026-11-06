@@ -1316,17 +1316,21 @@ This boots the local HTTP/WebSocket daemon and launches a native borderless appl
 
 ---
 
-### 10.2 Five-Tab Workstation Architecture
+### 10.2 Seven-Tab Unified Workstation Architecture
 
-The GUI provides 5 distinct views corresponding directly to the underlying architecture:
+The GUI features a unified 7-tab layout bridging Coordinator management and Worker execution in a single control room, complemented by dual context pills in the titlebar:
+- **`[HEALTH & CONN]` Titlebar Pill**: Instantly switches context to the Coordinator Hub and network mesh telemetry.
+- **`[CODE & DATA]` Titlebar Pill**: Instantly switches context to local/remote CPU and GPU sandboxes.
 
 | Tab | Name | Primary Capabilities |
 |---|---|---|
-| **1** | **P2P Topology Mesh** | Interactive 60 FPS Canvas showing signaling coordinator, orbiting workstation rigs, dual-hemisphere telemetry (compute & storage), animated SCTP laser beams, hover HUDs, and PC Inspector drawer with live RTT latency and P2P connection controls. |
-| **2** | **CPU Containers (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
-| **3** | **GPU Subsystem (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
-| **4** | **CAS Vault (O1)** | Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit. |
-| **5** | **Wire Logs & Diagnostics** | Real-time WebSocket event bus stream with category filtering (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing. |
+| **1** | **Topology Canvas** | Interactive 60 FPS Canvas showing central coordinator, orbiting workstation rigs, dual-hemisphere telemetry (compute & storage), animated SCTP laser beams, hover HUDs, and PC Inspector drawer with live RTT latency and P2P connection controls. |
+| **2** | **Coordinator Hub** | Dedicated control center for the signaling & daemon subsystem. Displays daemon uptime, listen socket, mTLS status, ED25519 join token presentation with QR preview and token rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, HEALTH \| CONN vitals matrix, and cryptographic keyring. |
+| **3** | **CPU Sandbox (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
+| **4** | **GPU Acceleration (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
+| **5** | **Storage & Shard Matrix** | Reed-Solomon RS(4,2) 6-cell striping matrix for distributed datasets (`open-llama-weights-v2`, `genomics-chm13-alignments`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification. |
+| **6** | **Cluster Task Queue** | Global ClassAd matchmaking task queue tracking active, queued, and completed DAG jobs across the fleet (`#JOB-8104` through `#JOB-8107`). Dynamically records real-time compute jobs dispatched via GPU DirectML and CPU code execution. |
+| **7** | **Cluster Wire Logs** | Real-time WebSocket event bus stream with category filtering (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing. |
 
 ---
 
@@ -1336,39 +1340,40 @@ You can verify all capabilities on a single machine without spinning up multiple
 
 1. **Launch the Workstation**:
    Run `.\run-gui.bat` and wait for the application window to open.
-2. **Verify Local Node Status**:
-   - Check the header: Verify your Node ID, Join Code (e.g. `UC-XXXX-82B1`), and local NAT classification.
-   - Look at the top-right badges: Verify Storage and Watchdog state.
-3. **Test Objective 1 (CAS Vault)**:
-   - Click the **CAS Vault** tab in the top navigation bar.
-   - In the "Stash Data into Content-Addressed Vault" box, type: `UniCompute Objective 1 Sovereign Storage Test`.
-   - Click **Commit to Local Vault**.
-   - Notice the table immediately updates with a new SHA-256 blob ID.
-   - Click **View** next to the blob: A modal window opens displaying the exact blob ID, size in KiB, cryptographic confirmation `SHA-256 Valid: YES`, and the stored text.
-   - Click **Copy Content** or **Close**.
-   - Click **Scrub Storage Vault**: The system audits all stored blobs with SHA-256 checks and reports `✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot`.
+2. **Verify Dual Context Pills & Coordinator Hub**:
+   - In the titlebar, click the **`[HEALTH & CONN]`** pill: The interface immediately switches to Tab 2 (**Coordinator Hub**).
+   - Observe live daemon metrics: Uptime counter, listen socket (`127.0.0.1:23080`), TLS/mTLS protocol state, and active cryptographic keyring (ED25519 node identity).
+   - Test Join Token Controls: Click **Copy Token** (copies `UC-XXXX-XXXX` to clipboard), or click **Show QR** to inspect the cryptographically signed connection QR modal.
+   - Test Relay Threshold Slider: Adjust the Blind Relay Fallback threshold slider (e.g., from `1.5s` to `2.5s`). Notice the slider updates the backend via `POST /api/coordinator/settings` and broadcasts the update across the cluster.
+3. **Test Objective 1 (Storage & Shard Matrix)**:
+   - Click the **Storage & Shard Matrix** tab (Tab 5).
+   - Inspect the Reed-Solomon RS(4,2) 6-cell striping layouts: 4 primary data chunks (`D0`–`D3`) and 2 Cauchy Reed-Solomon parity shards (`P0`, `P1`) mapped across peer nodes with real-time transfer throughput and chunk availability.
+   - Click **Verify All Merkle Roots**: The system queries `/api/storage/scrub` and audits all local and striped Merkle tree roots, transitioning badges through verifying states to `VERIFIED (SHA-256)` with zero bit-rot detected.
+   - Scroll to the integrated **CAS Storage Vault**: Type `UniCompute Sovereign Sharded Storage Test` into the stash box and click **Commit to Local Vault**.
+   - Notice the table immediately updates with a new SHA-256 blob ID. Click **View** to inspect the cryptographic modal (`SHA-256 Valid: YES`).
 4. **Test Objective 3 (GPU Hardware & HIPIFY)**:
-   - Click the **GPU Subsystem** tab.
+   - Click the **GPU Acceleration (O3)** tab (Tab 4).
    - Observe real-time GPU telemetry: Device name (e.g. `NVIDIA GeForce RTX 4050 Laptop GPU`), VRAM allocation bar, temperature, and power draw.
    - Check the 50 ms Watchdog radar: Displays AC power status, user idle timer, and state banner.
    - In the HIPIFY analyzer, select `portable_vector_add.cu` from the sample dropdown.
    - Click **Analyze & Translate to HIP**: The system replaces CUDA calls (`cudaMalloc` -> `hipMalloc`) and displays `PORTABLE TO AMD` with green verdict badge.
-   - Now select `warp_reduction.cu` and click **Analyze & Translate to HIP**: The system flags fatal blockers (modulo 32 warp assumptions, `__shfl_down_sync`) and displays `BLOCKED ON AMD` with line-by-line diagnostics.
-   - In the Win32 JobObject runner, set batches to `20` and click **Execute JobObject Task**: The background process executes within the configured memory ceiling and saves a verified checkpoint.
-5. **Test Objective 2 (Code Execution Sandbox)**:
-   - Click the **CPU Containers** tab.
-   - Note the **Target Peer** selector defaults to `Local Worker (This Machine)`.
+   - In the Win32 JobObject runner, set batches to `20` and click **Execute JobObject Task**: The process runs within memory limits, and dispatches a recorded `#JOB-XXXX` DAG task.
+5. **Test Objective 2 (CPU Code Sandbox & Task Tracking)**:
+   - Click the **CPU Sandbox (O2)** tab (Tab 3).
    - In the sample dropdown, select `matrix_multiply.py (python)`.
    - In the "Standard Input Stream (stdin)" box, type `48` (to set dimension to 48x48).
-   - Click **Run Code in Sandbox**: The code executes in the local container sandbox (or host fallback), streams stdout/stderr, and reports duration and `EXIT 0`.
-   - In the stdin box, type `hostname` and click **Run Shell Command**: Executes the host shell command locally and displays your PC's hostname.
-6. **Test Topology Inspector**:
-   - Click the **P2P Topology Mesh** tab.
+   - Click **Run Code in Sandbox**: The code executes, streams stdout/stderr, reports duration and `EXIT 0`.
+6. **Test Cluster Task Queue (Tab 6)**:
+   - Click the **Cluster Task Queue** tab (Tab 6).
+   - Observe the live ClassAd matchmaking table: Initial seed DAG tasks (`#JOB-8104` to `#JOB-8107`) alongside the newly dispatched GPU and CPU tasks triggered in steps 4 and 5.
+   - Verify ClassAd criteria (`CUDA_ARCH >= 80`, `AVX512 == True`), priority tags (`P0_CRITICAL`, `P1_HIGH`), matched target nodes, and live completion statuses.
+7. **Test Topology Inspector**:
+   - Click the **Topology Canvas** tab (Tab 1).
    - Click on the central node or the local workstation rig.
    - The PC Inspector drawer slides open showing `(This PC)`, host CPU cores, OS/architecture, local NAT interface, and stored CAS metrics.
-7. **Test Wire Logs**:
-   - Click the **Wire Logs** tab.
-   - Verify that all previous actions (storage stash, GPU execution, code execution) produced corresponding event entries.
+8. **Test Cluster Wire Logs**:
+   - Click the **Cluster Wire Logs** tab (Tab 7).
+   - Verify that all previous actions (coordinator settings updates, storage stash, GPU execution, code run, task dispatches) produced corresponding event entries.
    - Click the filter buttons (`P2P`, `Code`, `GPU`, `Storage`) to filter events by subsystem.
 
 ---
