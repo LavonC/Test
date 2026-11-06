@@ -167,3 +167,42 @@ func (n *Node) handleCodeStreamMessage(peerID string, data []byte) bool {
 	}()
 	return true
 }
+
+// ExecuteCodeLocal runs a code job locally on this node's executor if enabled.
+func (n *Node) ExecuteCodeLocal(ctx context.Context, req codeexec.Request) (codeexec.Response, error) {
+	n.mu.RLock()
+	executor := n.codeExecutor
+	n.mu.RUnlock()
+
+	if executor == nil {
+		return codeexec.Response{
+			JobID:    req.JobID,
+			Language: req.Language,
+			ExitCode: -1,
+			Error:    "code execution is disabled on this worker (Docker is not running or -enable-code-execution=false)",
+		}, errors.New("code execution is disabled on this worker")
+	}
+
+	if req.JobID == "" {
+		req.JobID = "local-" + uuid.New().String()[:8]
+	}
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = 10
+	}
+
+	resp := executor.Execute(ctx, req)
+	if resp.JobID == "" {
+		resp.JobID = req.JobID
+	}
+	if resp.Language == "" {
+		resp.Language = req.Language
+	}
+	return resp, nil
+}
+
+// HasCodeExecutor returns true if this node has an active code executor (e.g. Docker sandbox).
+func (n *Node) HasCodeExecutor() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.codeExecutor != nil
+}

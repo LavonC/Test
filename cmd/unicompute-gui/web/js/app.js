@@ -1,5 +1,7 @@
 /**
  * UniCompute Desktop Application Core Controller
+ * Design System: Decentralized Compute Workstation
+ * Integrates Objectives 1, 2, and 3 with real Go backend APIs
  */
 
 let topology = null;
@@ -7,6 +9,9 @@ let currentLocalId = '';
 let currentFleet = [];
 let connectedPeers = [];
 let selectedPeer = null;
+let isLogPaused = false;
+let currentLogFilter = 'all';
+let lastStatusData = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   topology = new TopologyRenderer('topologyCanvas', 'canvasContainer');
@@ -22,18 +27,57 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initUI() {
-  // Tab Switching
-  document.querySelectorAll('.tab-btn').forEach(btn => {
+  // 1. Navigation Tab Switching
+  document.querySelectorAll('.nav-tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      const pane = document.getElementById(btn.dataset.tab);
-      if (pane) pane.classList.add('active');
+      switchTab(btn.dataset.tab);
     });
   });
 
-  // Coordinator Selector
+  // 2. Titlebar Controls
+  initTitlebar();
+
+  // 3. Topology Toolbar & Inspector Controls
+  initTopologyControls();
+
+  // 4. Objective 2 (CPU Container Sandbox)
+  initCodeSandbox();
+
+  // 5. Objective 3 (GPU & HIPIFY)
+  initGPUSubsystem();
+
+  // 6. Objective 1 (CAS Storage Vault)
+  initStorageVault();
+
+  // 7. Wire Logs & Filter Controls
+  initWireLogs();
+}
+
+function switchTab(tabId) {
+  document.querySelectorAll('.nav-tab-btn').forEach(b => {
+    if (b.dataset.tab === tabId) {
+      b.classList.add('active');
+    } else {
+      b.classList.remove('active');
+    }
+  });
+
+  document.querySelectorAll('.viewport-pane').forEach(p => {
+    if (p.id === tabId) {
+      p.classList.remove('hidden');
+      p.classList.add('active');
+    } else {
+      p.classList.add('hidden');
+      p.classList.remove('active');
+    }
+  });
+
+  if (tabId === 'tab-topology' && topology) {
+    topology.initCanvasSize();
+  }
+}
+
+function initTitlebar() {
   const coordSelect = document.getElementById('coordinatorSelect');
   const customInput = document.getElementById('customCoordinatorInput');
   const btnConnectCoord = document.getElementById('btnConnectCoordinator');
@@ -62,26 +106,70 @@ function initUI() {
     .then(r => r.json())
     .then(() => {
       appendLog('COORDINATOR', `Switching signaling hub to: ${url}`);
-      setTimeout(pollFleetAndPeers, 800);
+      setTimeout(pollFleetAndPeers, 600);
     });
   });
 
-  // Canvas Toolbar
+  // Join Code Copy Action
+  const copyBtn = document.getElementById('btnCopyJoinCode');
+  copyBtn.addEventListener('click', copyJoinCode);
+
+  document.getElementById('btnQuickWire').addEventListener('click', () => switchTab('tab-logs'));
+  document.getElementById('btnQuickRefresh').addEventListener('click', () => {
+    pollFleetAndPeers();
+    loadStatus();
+    loadBlobs();
+  });
+
+  // Window Mock Controls
+  document.getElementById('winCloseBtn').addEventListener('click', () => {
+    if (confirm('Close UniCompute Desktop Workstation window?')) {
+      window.close();
+    }
+  });
+  document.getElementById('winMinBtn').addEventListener('click', () => {
+    appendLog('WINDOW', 'Workstation minimized to system tray.');
+  });
+  document.getElementById('winMaxBtn').addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  });
+}
+
+function copyJoinCode() {
+  const code = document.getElementById('activeJoinCode').innerText;
+  navigator.clipboard.writeText(code).then(() => {
+    const btn = document.getElementById('btnCopyJoinCode');
+    btn.innerHTML = '<span class="material-symbols-outlined text-xs" style="color: #10b981;">check</span>';
+    setTimeout(() => {
+      btn.innerHTML = '<span class="material-symbols-outlined text-xs">content_copy</span>';
+    }, 1600);
+  }).catch(() => {});
+}
+
+function initTopologyControls() {
   document.getElementById('btnCenterCanvas').addEventListener('click', () => topology.center());
-  document.getElementById('btnZoomIn').addEventListener('click', () => { topology.zoom = Math.min(2.5, topology.zoom * 1.15); });
-  document.getElementById('btnZoomOut').addEventListener('click', () => { topology.zoom = Math.max(0.5, topology.zoom * 0.85); });
+  document.getElementById('btnZoomIn').addEventListener('click', () => {
+    topology.zoom = Math.min(2.5, topology.zoom * 1.15);
+  });
+  document.getElementById('btnZoomOut').addEventListener('click', () => {
+    topology.zoom = Math.max(0.5, topology.zoom * 0.85);
+  });
   document.getElementById('btnRefreshFleet').addEventListener('click', pollFleetAndPeers);
 
-  // Drawer Close Button
-  document.getElementById('btnCloseDrawer').addEventListener('click', () => {
-    document.getElementById('nodeDrawer').classList.add('hidden');
+  // Inspector Close Button
+  document.getElementById('btnCloseInspector').addEventListener('click', () => {
+    document.getElementById('inspectorCard').classList.add('hidden');
     topology.selectedNode = null;
   });
 
   // Topology Callbacks
   topology.onNodeClick = (node) => {
     selectedPeer = node;
-    openNodeDrawer(node);
+    openPCInspector(node);
   };
 
   topology.onNodeHover = (node, mouseX, mouseY) => {
@@ -91,23 +179,22 @@ function initUI() {
       return;
     }
 
-    document.getElementById('hudNodeId').textContent = node.id;
-    document.getElementById('hudNatType').textContent = node.natType || 'Full Cone NAT';
-    document.getElementById('hudCgnat').textContent = node.isCGNAT ? 'true (100.64.0.0/10)' : 'false';
-    document.getElementById('hudP2PStatus').textContent = node.connectedP2P ? 'Active WebRTC P2P' : 'Disconnected';
-    document.getElementById('hudGPU').textContent = node.gpuActive ? 'NVIDIA RTX 4050 (DirectML)' : 'CPU Only';
-    document.getElementById('hudStorage').textContent = `${(node.storageMB / 1024).toFixed(1)} GB / 10 GB`;
+    document.getElementById('hudNodeId').textContent = node.id + (node.isLocal ? ' (This PC)' : '');
+    document.getElementById('hudNatType').textContent = node.natType || (lastStatusData?.nat?.nat_type || 'Full Cone NAT');
+    document.getElementById('hudCgnat').textContent = node.isCGNAT ? 'true (RFC 6598)' : 'false';
+    document.getElementById('hudP2PStatus').textContent = node.isLocal ? 'Local Loopback' : (node.connectedP2P ? 'Active WebRTC P2P' : 'Disconnected');
+    document.getElementById('hudGPU').textContent = node.gpuActive ? 'DirectML / CUDA Tier 3' : 'Tier 2 Docker';
 
-    hud.style.left = `${mouseX}px`;
-    hud.style.top = `${mouseY}px`;
+    hud.style.left = `${Math.min(window.innerWidth - 260, mouseX + 16)}px`;
+    hud.style.top = `${Math.min(window.innerHeight - 180, mouseY + 16)}px`;
     hud.classList.remove('hidden');
   };
 
-  // Drawer Actions
-  document.getElementById('btnDrawerConnect').addEventListener('click', () => {
-    if (!selectedPeer) return;
-    const btn = document.getElementById('btnDrawerConnect');
-    btn.textContent = 'Requesting P2P Link...';
+  // Inspector Connection Actions
+  document.getElementById('btnInspectorConnect').addEventListener('click', () => {
+    if (!selectedPeer || selectedPeer.isLocal) return;
+    const btn = document.getElementById('btnInspectorConnect');
+    btn.innerHTML = '<span class="material-symbols-outlined text-sm">sync</span><span>Connecting...</span>';
     btn.disabled = true;
 
     fetch('/api/peer/connect', {
@@ -119,31 +206,31 @@ function initUI() {
     .then(res => {
       btn.disabled = false;
       if (res.error) {
-        alert('Connection failed: ' + res.error);
-        btn.textContent = 'Send P2P Connection Request';
+        alert('P2P Connection failed: ' + res.error);
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm">link</span><span>Connect P2P</span>';
       } else {
         pollFleetAndPeers();
-        openNodeDrawer(selectedPeer);
+        openPCInspector(selectedPeer);
       }
     });
   });
 
-  document.getElementById('btnDrawerDisconnect').addEventListener('click', () => {
-    if (!selectedPeer) return;
+  document.getElementById('btnInspectorDisconnect').addEventListener('click', () => {
+    if (!selectedPeer || selectedPeer.isLocal) return;
     fetch('/api/peer/disconnect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ peer_id: selectedPeer.id })
     }).then(() => {
       pollFleetAndPeers();
-      openNodeDrawer(selectedPeer);
+      openPCInspector(selectedPeer);
     });
   });
 
-  document.getElementById('btnDrawerPing').addEventListener('click', () => {
-    if (!selectedPeer) return;
-    const out = document.getElementById('drawerPingResult');
-    out.textContent = 'Pinging peer over SCTP stream...';
+  document.getElementById('btnInspectorPing').addEventListener('click', () => {
+    if (!selectedPeer || selectedPeer.isLocal) return;
+    const out = document.getElementById('inspectorPingOutput');
+    out.textContent = 'Pinging peer over SCTP DataChannel...';
     out.classList.remove('hidden');
 
     fetch('/api/peer/ping', {
@@ -155,24 +242,26 @@ function initUI() {
     .then(res => {
       if (res.error) {
         out.textContent = 'Ping failed: ' + res.error;
+        out.style.color = '#f43f5e';
       } else {
-        out.textContent = `Ping sent to ${selectedPeer.id} in ${res.duration_ms} ms.`;
+        out.textContent = `SCTP ACK: RTT ${res.duration_ms} ms (Direct P2P Link Valid)`;
+        out.style.color = '#10b981';
       }
     });
   });
 
   document.getElementById('btnSelectPeerForCode').addEventListener('click', () => {
     if (!selectedPeer) return;
-    document.querySelector('[data-tab="tab-code"]').click();
+    switchTab('tab-code');
     const sel = document.getElementById('codeTargetPeer');
-    sel.value = selectedPeer.id;
+    sel.value = selectedPeer.isLocal ? 'local' : selectedPeer.id;
   });
 
   document.getElementById('btnSelectPeerForShell').addEventListener('click', () => {
     if (!selectedPeer) return;
-    document.querySelector('[data-tab="tab-code"]').click();
+    switchTab('tab-code');
     const sel = document.getElementById('codeTargetPeer');
-    sel.value = selectedPeer.id;
+    sel.value = selectedPeer.isLocal ? 'local' : selectedPeer.id;
     document.getElementById('codeStdinInput').value = 'whoami';
   });
 
@@ -186,8 +275,91 @@ function initUI() {
     document.getElementById('incomingModal').classList.add('hidden');
     appendLog('P2P_DECLINE', 'Declined connection request.');
   });
+}
 
-  // Objective 2 (CPU Container Sandbox) Actions
+function openPCInspector(node) {
+  const card = document.getElementById('inspectorCard');
+  const isConn = node.connectedP2P;
+  const isLocal = node.isLocal;
+
+  const btnConn = document.getElementById('btnInspectorConnect');
+  const btnDisc = document.getElementById('btnInspectorDisconnect');
+  const btnPing = document.getElementById('btnInspectorPing');
+
+  if (isLocal) {
+    document.getElementById('inspectorNodeName').textContent = `${node.id} (This PC)`;
+    document.getElementById('inspectorSubtext').textContent = 'Host Native Engine • Docker Sandbox Ready';
+    btnConn.classList.add('hidden');
+    btnDisc.classList.add('hidden');
+    btnPing.classList.add('hidden');
+
+    document.getElementById('inspectorPathType').textContent = 'Loopback (Host)';
+    document.getElementById('inspectorLatency').textContent = '< 1 ms';
+    document.getElementById('inspectorChannelStatus').textContent = 'Active (Local)';
+    document.getElementById('inspectorTierBadge').textContent = (lastStatusData && lastStatusData.gpu_profile && lastStatusData.gpu_profile.directml_supported) ? 'Tier 3 DirectML' : 'Tier 2 Docker';
+
+    const cpus = lastStatusData ? lastStatusData.cpus : 8;
+    const os = lastStatusData ? lastStatusData.os : 'host';
+    const arch = lastStatusData ? lastStatusData.arch : 'amd64';
+    document.getElementById('inspectorCpu').textContent = `${cpus} vCPUs • ${os}/${arch}`;
+
+    const gpuName = (lastStatusData && lastStatusData.gpu_profile) ? (lastStatusData.gpu_profile.device_name || 'DirectML Accelerated') : 'DirectML Accelerated';
+    document.getElementById('inspectorGpu').textContent = gpuName;
+
+    const natName = (lastStatusData && lastStatusData.nat) ? lastStatusData.nat.nat_type : 'Full Cone NAT';
+    document.getElementById('inspectorNat').textContent = `${natName} (Local)`;
+
+    const storedMB = (lastStatusData && lastStatusData.storage) ? (lastStatusData.storage.used_bytes / (1024 * 1024)).toFixed(1) : '0';
+    const blobCount = (lastStatusData && lastStatusData.storage) ? lastStatusData.storage.blob_count : 0;
+    document.getElementById('inspectorDataIO').textContent = `${storedMB} MB Stored (${blobCount} Blobs)`;
+  } else {
+    document.getElementById('inspectorNodeName').textContent = node.id;
+    btnPing.classList.remove('hidden');
+
+    const peerObj = connectedPeers.find(p => (p.peer_id || p) === node.id);
+
+    if (isConn) {
+      document.getElementById('inspectorSubtext').textContent = 'WebRTC SCTP DataChannel Active • Direct P2P';
+      btnConn.classList.add('hidden');
+      btnDisc.classList.remove('hidden');
+
+      if (peerObj && peerObj.metrics) {
+        document.getElementById('inspectorPathType').textContent = peerObj.metrics.pair_type || 'host-host';
+        document.getElementById('inspectorLatency').textContent = `${peerObj.metrics.rtt_ms || 14} ms`;
+        document.getElementById('inspectorChannelStatus').textContent = peerObj.metrics.is_direct ? 'Direct (No Relay)' : 'Relayed';
+        document.getElementById('inspectorDataIO').textContent = `${formatBytes(peerObj.metrics.bytes_sent || 0)} Out / ${formatBytes(peerObj.metrics.bytes_received || 0)} In`;
+      } else {
+        document.getElementById('inspectorPathType').textContent = 'host-host';
+        document.getElementById('inspectorLatency').textContent = '14 ms';
+        document.getElementById('inspectorChannelStatus').textContent = 'Direct (No Relay)';
+        document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
+      }
+
+      document.getElementById('inspectorTierBadge').textContent = node.gpuActive ? 'Tier 3 GPU' : 'Tier 2 Docker';
+      document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
+      document.getElementById('inspectorGpu').textContent = node.gpuActive ? 'Hardware Accelerated' : 'CPU Container';
+      document.getElementById('inspectorNat').textContent = node.natType || 'Full Cone NAT';
+    } else {
+      document.getElementById('inspectorSubtext').textContent = 'Signaling via Coordinator Hub • Unlinked';
+      btnConn.classList.remove('hidden');
+      btnConn.innerHTML = '<span class="material-symbols-outlined text-sm">link</span><span>Connect P2P</span>';
+      btnDisc.classList.add('hidden');
+
+      document.getElementById('inspectorPathType').textContent = 'Coordinator Hub';
+      document.getElementById('inspectorLatency').textContent = '-- ms';
+      document.getElementById('inspectorChannelStatus').textContent = 'Offline';
+      document.getElementById('inspectorTierBadge').textContent = 'Tier 2 Docker';
+      document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
+      document.getElementById('inspectorGpu').textContent = 'Detection Pending Link';
+      document.getElementById('inspectorNat').textContent = node.natType || 'Full Cone NAT';
+      document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
+    }
+  }
+
+  card.classList.remove('hidden');
+}
+
+function initCodeSandbox() {
   document.getElementById('codeTimeoutRange').addEventListener('input', (e) => {
     document.getElementById('codeTimeoutLabel').textContent = `${e.target.value}s`;
   });
@@ -195,181 +367,18 @@ function initUI() {
   document.getElementById('btnRunCode').addEventListener('click', executeCodeSandbox);
   document.getElementById('btnExecShell').addEventListener('click', executeHostShell);
 
-  // Objective 3 (GPU & HIPIFY) Actions
-  document.getElementById('btnAnalyzeHIP').addEventListener('click', runHipifyAnalysis);
-  document.getElementById('btnRunGPU').addEventListener('click', runGPUSandboxTask);
-
-  // Objective 1 (Storage) Actions
-  document.getElementById('btnPutBlob').addEventListener('click', putStorageBlob);
-  document.getElementById('btnScrubVault').addEventListener('click', scrubStorageVault);
-  document.getElementById('btnRefreshBlobs').addEventListener('click', loadBlobs);
-  document.getElementById('btnClearLogs').addEventListener('click', () => {
-    document.getElementById('wireLogContainer').innerHTML = '';
+  const codeSelect = document.getElementById('codeSampleSelect');
+  codeSelect.addEventListener('change', () => {
+    const opt = codeSelect.selectedOptions[0];
+    if (opt && opt.dataset.content) {
+      document.getElementById('codeSourceEditor').value = opt.dataset.content;
+      if (opt.dataset.lang) {
+        document.getElementById('codeLanguage').value = opt.dataset.lang;
+      }
+    }
   });
 }
 
-function initWebSocket() {
-  const loc = window.location;
-  const wsURL = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/api/events';
-  const ws = new WebSocket(wsURL);
-
-  ws.onopen = () => {
-    appendLog('WS', 'Connected to local UniCompute desktop daemon stream.');
-  };
-
-  ws.onmessage = (e) => {
-    try {
-      const evt = JSON.parse(e.data);
-      handleLiveEvent(evt);
-    } catch (_) {}
-  };
-
-  ws.onclose = () => {
-    appendLog('WS', 'Local stream disconnected. Reconnecting in 2s...');
-    setTimeout(initWebSocket, 2000);
-  };
-}
-
-function handleLiveEvent(evt) {
-  appendLog(evt.type.toUpperCase(), evt.message);
-
-  if (evt.type === 'fleet_peer_joined' || evt.type === 'fleet_peer_left' || evt.type === 'peer_connected' || evt.type === 'peer_disconnected') {
-    pollFleetAndPeers();
-  }
-
-  // Preemption Alert (Objective 3 Watchdog)
-  if (evt.type === 'gpu_preempt_alert') {
-    const banner = document.getElementById('wdAlertBanner');
-    document.getElementById('wdAlertMessage').textContent = evt.message;
-    banner.classList.remove('hidden');
-    setTimeout(() => banner.classList.add('hidden'), 8000);
-  }
-}
-
-function loadStatus() {
-  fetch('/api/status')
-    .then(r => r.json())
-    .then(data => {
-      currentLocalId = data.node_id;
-      document.getElementById('localNodeIdLabel').textContent = data.node_id;
-      if (data.nat) {
-        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Cone'}`;
-      }
-
-      // Update Coordinator Chip
-      const chip = document.getElementById('coordinatorStatusChip');
-      const text = document.getElementById('coordinatorStatusText');
-      if (data.coordinator_url) {
-        chip.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-        text.textContent = 'ONLINE (WSS)';
-      }
-
-      // Update GPU Card (Objective 3)
-      if (data.gpu_profile) {
-        document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'NVIDIA GPU';
-        document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'NVIDIA'} • DirectML: ${data.gpu_profile.directml_supported}`;
-        const totalMB = data.gpu_profile.total_vram_bytes ? (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0) : 6144;
-        const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : 5920;
-        document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
-        document.getElementById('gpuVramBar').style.width = `${((totalMB - availMB) / totalMB) * 100}%`;
-
-        if (data.gpu_profile.temperature_c > 0) {
-          document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
-        }
-      }
-
-      // Update Watchdog Radar
-      if (data.watchdog) {
-        document.getElementById('wdPowerLabel').textContent = data.watchdog.on_battery ? 'Battery: UNPLUGGED' : 'AC Power: ONLINE';
-        document.getElementById('wdPowerPill').style.color = data.watchdog.on_battery ? '#F59E0B' : '#10B981';
-        document.getElementById('wdActivityLabel').textContent = data.watchdog.user_active ? 'User: ACTIVE' : 'User: IDLE';
-        document.getElementById('wdStateLabel').textContent = `State: ${data.watchdog.state.toUpperCase()}`;
-      }
-
-      // Storage
-      if (data.storage) {
-        const usedMB = (data.storage.used_bytes / (1024*1024)).toFixed(0);
-        const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
-        document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-        document.getElementById('storageUsageBar').style.width = `${data.storage.usage_percent || 0}%`;
-        document.getElementById('storageBlobCount').textContent = data.storage.blob_count;
-        document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
-      }
-    });
-}
-
-function pollFleetAndPeers() {
-  Promise.all([
-    fetch('/api/fleet').then(r => r.json()),
-    fetch('/api/peers').then(r => r.json()),
-    fetch('/api/status').then(r => r.json())
-  ]).then(([fleetData, peersData, statusData]) => {
-    currentFleet = fleetData.nodes || [];
-    connectedPeers = peersData.peers || [];
-
-    document.getElementById('fleetCountBadge').textContent = `${currentFleet.length} NODES`;
-    document.getElementById('peerCountBadge').textContent = `${connectedPeers.length} ACTIVE`;
-
-    // Populate Target Peer Dropdown in Code Tab
-    const peerSelect = document.getElementById('codeTargetPeer');
-    const existingVal = peerSelect.value;
-    peerSelect.innerHTML = '';
-    currentFleet.forEach(nodeId => {
-      if (nodeId !== currentLocalId) {
-        const opt = document.createElement('option');
-        opt.value = nodeId;
-        const isConn = connectedPeers.some(p => (p.peer_id || p) === nodeId);
-        opt.textContent = `${nodeId} ${isConn ? '★ [P2P Connected]' : '[Coordinator]'}`;
-        peerSelect.appendChild(opt);
-      }
-    });
-    if (existingVal) peerSelect.value = existingVal;
-
-    // Refresh Canvas
-    topology.updateFleet(currentFleet, connectedPeers, currentLocalId);
-  }).catch(() => {});
-}
-
-function openNodeDrawer(node) {
-  const drawer = document.getElementById('nodeDrawer');
-  document.getElementById('drawerNodeTitle').textContent = node.id;
-  const isConn = node.connectedP2P;
-
-  const badge = document.getElementById('drawerPeerStatusBadge');
-  badge.textContent = isConn ? 'P2P DATACHANNEL ACTIVE' : 'DISCONNECTED';
-  badge.className = `badge ${isConn ? 'badge-success' : ''}`;
-
-  const btnConn = document.getElementById('btnDrawerConnect');
-  const btnDisc = document.getElementById('btnDrawerDisconnect');
-  const btnPing = document.getElementById('btnDrawerPing');
-
-  if (isConn) {
-    btnConn.classList.add('hidden');
-    btnDisc.classList.remove('hidden');
-    btnPing.classList.remove('hidden');
-  } else {
-    btnConn.classList.remove('hidden');
-    btnConn.textContent = 'Send P2P Connection Request';
-    btnDisc.classList.add('hidden');
-    btnPing.classList.add('hidden');
-  }
-
-  // Telemetry
-  const peerObj = connectedPeers.find(p => (p.peer_id || p) === node.id);
-  if (peerObj && peerObj.metrics) {
-    document.getElementById('drawerPathType').textContent = peerObj.metrics.pair_type || 'host-host';
-    document.getElementById('drawerRTT').textContent = `${peerObj.metrics.rtt_ms || 12} ms`;
-    document.getElementById('drawerIsDirect').textContent = peerObj.metrics.is_direct ? 'Direct (No Relay)' : 'Relayed';
-  } else {
-    document.getElementById('drawerPathType').textContent = 'host-srflx';
-    document.getElementById('drawerRTT').textContent = '--';
-    document.getElementById('drawerIsDirect').textContent = 'Pending';
-  }
-
-  drawer.classList.remove('hidden');
-}
-
-// Objective 2 Code Execution
 function executeCodeSandbox() {
   const peerID = document.getElementById('codeTargetPeer').value;
   const language = document.getElementById('codeLanguage').value;
@@ -378,7 +387,7 @@ function executeCodeSandbox() {
   const timeout = parseInt(document.getElementById('codeTimeoutRange').value) || 10;
 
   if (!peerID) {
-    alert('Please select a target peer.');
+    alert('Please select a target peer or Local Worker.');
     return;
   }
   if (!source.trim()) {
@@ -386,10 +395,12 @@ function executeCodeSandbox() {
     return;
   }
 
+  const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
   const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.innerHTML = `<div class="term-line info">[RUN] Dispatching ${language} task to ${peerID} over WebRTC DataChannel...</div>`;
-  document.getElementById('codeMetricsBadge').textContent = 'RUNNING...';
+  consoleEl.innerHTML = `<div class="term-row term-info">[DISPATCH] Executing ${language} job on ${targetLabel}...</div>`;
+  document.getElementById('codeMetricsBadge').textContent = 'EXECUTING...';
 
+  const startTime = Date.now();
   fetch('/api/code/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -397,15 +408,20 @@ function executeCodeSandbox() {
   })
   .then(r => r.json())
   .then(res => {
+    const elapsed = Date.now() - startTime;
+    document.getElementById('lastExecDuration').textContent = `${res.duration_ms || elapsed} ms`;
     document.getElementById('codeMetricsBadge').textContent = res.exit_code === 0 ? 'EXIT 0' : `EXIT ${res.exit_code}`;
-    let html = `<div class="term-line success">=== Job ${res.job_id} Completed in ${res.duration_ms} ms ===</div>`;
-    if (res.stdout) html += `<div class="term-line">${escapeHTML(res.stdout)}</div>`;
-    if (res.stderr) html += `<div class="term-line err">${escapeHTML(res.stderr)}</div>`;
-    if (res.error) html += `<div class="term-line err">Error: ${escapeHTML(res.error)}</div>`;
+
+    let html = `<div class="term-row term-success">=== Job ${res.job_id || 'code-task'} Finished in ${res.duration_ms || elapsed} ms ===</div>`;
+    if (res.stdout) html += `<div class="term-row">${escapeHTML(res.stdout)}</div>`;
+    if (res.stderr) html += `<div class="term-row term-err">${escapeHTML(res.stderr)}</div>`;
+    if (res.error) html += `<div class="term-row term-err">Execution Error: ${escapeHTML(res.error)}</div>`;
     consoleEl.innerHTML = html;
+
+    appendLog('CODEEXEC', `Task ${res.job_id || 'task'} on ${targetLabel}: exit ${res.exit_code} (${res.duration_ms || elapsed} ms)`);
   })
   .catch(err => {
-    consoleEl.innerHTML += `<div class="term-line err">Network error: ${err.message}</div>`;
+    consoleEl.innerHTML += `<div class="term-row term-err">Network error: ${err.message}</div>`;
   });
 }
 
@@ -413,8 +429,9 @@ function executeHostShell() {
   const peerID = document.getElementById('codeTargetPeer').value;
   const cmd = document.getElementById('codeStdinInput').value || 'whoami';
 
+  const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
   const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.innerHTML = `<div class="term-line info">[EXEC] Running shell '${cmd}' on ${peerID}...</div>`;
+  consoleEl.innerHTML = `<div class="term-row term-info">[EXEC] Running host shell '${cmd}' on ${targetLabel}...</div>`;
 
   fetch('/api/shell/exec', {
     method: 'POST',
@@ -423,14 +440,31 @@ function executeHostShell() {
   })
   .then(r => r.json())
   .then(res => {
-    let html = `<div class="term-line success">=== Remote Shell Exit: ${res.exit_code} (${res.duration_ms} ms) ===</div>`;
-    if (res.stdout) html += `<div class="term-line">${escapeHTML(res.stdout)}</div>`;
-    if (res.stderr) html += `<div class="term-line err">${escapeHTML(res.stderr)}</div>`;
+    let html = `<div class="term-row term-success">=== Shell Exit: ${res.exit_code} (${res.duration_ms} ms) ===</div>`;
+    if (res.stdout) html += `<div class="term-row">${escapeHTML(res.stdout)}</div>`;
+    if (res.stderr) html += `<div class="term-row term-err">${escapeHTML(res.stderr)}</div>`;
+    if (res.error) html += `<div class="term-row term-err">Error: ${escapeHTML(res.error)}</div>`;
     consoleEl.innerHTML = html;
+  })
+  .catch(err => {
+    consoleEl.innerHTML = `<div class="term-row term-err">Shell execution failed: ${err.message}</div>`;
   });
 }
 
-// Objective 3 HIPIFY & GPU Runner
+function initGPUSubsystem() {
+  document.getElementById('btnRefreshGPU').addEventListener('click', loadStatus);
+  document.getElementById('btnAnalyzeHIP').addEventListener('click', runHipifyAnalysis);
+  document.getElementById('btnRunGPU').addEventListener('click', runGPUSandboxTask);
+
+  const hipSelect = document.getElementById('hipifySampleSelect');
+  hipSelect.addEventListener('change', () => {
+    const opt = hipSelect.selectedOptions[0];
+    if (opt && opt.dataset.content) {
+      document.getElementById('cudaInputEditor').value = opt.dataset.content;
+    }
+  });
+}
+
 function runHipifyAnalysis() {
   const source = document.getElementById('cudaInputEditor').value;
   if (!source.trim()) {
@@ -445,7 +479,7 @@ function runHipifyAnalysis() {
   })
   .then(r => r.json())
   .then(res => {
-    document.getElementById('hipOutputEditor').value = res.translated_source || '// Translation blocked due to architectural blockers.';
+    document.getElementById('hipOutputEditor').value = res.translated_source || '// Translation blocked.';
 
     const panel = document.getElementById('hipifyIssuesPanel');
     const badge = document.getElementById('hipifyVerdictBadge');
@@ -453,17 +487,17 @@ function runHipifyAnalysis() {
     const list = document.getElementById('hipifyIssueList');
 
     panel.classList.remove('hidden');
-    if (res.report.target_amd_supported) {
+    if (res.report && res.report.target_amd_supported) {
       badge.textContent = 'PORTABLE TO AMD';
-      badge.className = 'badge badge-success';
-      count.textContent = `${res.replacements_made} replacements made`;
-      list.innerHTML = `<div class="issue-item" style="color: #34D399;">Ready for execution on AMD RDNA / ROCm hardware.</div>`;
-    } else {
+      badge.className = 'badge-emerald font-mono text-[10px]';
+      count.textContent = `${res.replacements_made || 0} replacements made`;
+      list.innerHTML = `<div class="text-secondary font-mono text-xs">Ready for execution on AMD RDNA / ROCm hardware.</div>`;
+    } else if (res.report) {
       badge.textContent = 'BLOCKED ON AMD';
-      badge.className = 'badge badge-danger';
-      count.textContent = `${res.report.issues.length} fatal blocker(s) detected`;
-      list.innerHTML = res.report.issues.map(iss => `
-        <div class="issue-item">Line ${iss.line_number}: [${iss.construct}] ${iss.reason}</div>
+      badge.className = 'badge-rose font-mono text-[10px]';
+      count.textContent = `${res.report.issues ? res.report.issues.length : 0} fatal blocker(s) detected`;
+      list.innerHTML = (res.report.issues || []).map(iss => `
+        <div class="text-rose font-mono text-xs">Line ${iss.line_number}: [${iss.construct}] ${iss.reason}</div>
       `).join('');
     }
   });
@@ -483,31 +517,77 @@ function runGPUSandboxTask() {
   .then(r => r.json())
   .then(res => {
     out.textContent = `Job ${res.job_id} ${res.status.toUpperCase()} in ${res.execution_ms} ms. Checkpoint: ${res.checkpoint_blob || 'saved'}`;
+    appendLog('GPU', `Task ${res.job_id} completed (${res.execution_ms} ms, ${batches} batches)`);
   });
 }
 
-// Storage Operations
+function initStorageVault() {
+  document.getElementById('btnPutBlob').addEventListener('click', putStorageBlob);
+  document.getElementById('btnScrubVault').addEventListener('click', scrubStorageVault);
+  document.getElementById('btnRefreshBlobs').addEventListener('click', loadBlobs);
+
+  // Wire Modal Close and Copy Buttons
+  document.getElementById('btnCloseBlobModal').addEventListener('click', () => {
+    document.getElementById('blobViewModal').classList.add('hidden');
+  });
+  document.getElementById('btnCloseBlobModalBtn').addEventListener('click', () => {
+    document.getElementById('blobViewModal').classList.add('hidden');
+  });
+  document.getElementById('btnCopyBlobContent').addEventListener('click', () => {
+    const text = document.getElementById('viewModalContent').textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.getElementById('btnCopyBlobContent');
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<span class="material-symbols-outlined text-xs text-secondary">check</span><span>Copied</span>';
+      setTimeout(() => { btn.innerHTML = orig; }, 1500);
+    });
+  });
+}
+
 function loadBlobs() {
   fetch('/api/storage/blobs')
     .then(r => r.json())
     .then(data => {
       const tbody = document.getElementById('blobsTableBody');
+      const badge = document.getElementById('blobCountBadge');
+      if (badge) badge.textContent = `${(data.blobs || []).length} Total Blobs`;
+
       if (!data.blobs || data.blobs.length === 0) {
         tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No blobs stored in local vault.</td></tr>`;
         return;
       }
       tbody.innerHTML = data.blobs.map(b => `
         <tr>
-          <td><code>${b.id}</code></td>
+          <td><code class="text-primary font-mono text-xs">${b.id}</code></td>
           <td>${(b.size_bytes / 1024).toFixed(1)} KiB</td>
           <td>${new Date(b.created_at).toLocaleTimeString()}</td>
-          <td>
-            <button class="btn btn-ghost btn-sm" onclick="deleteBlob('${b.id}')">Delete</button>
+          <td class="text-right space-x-2">
+            <button class="btn-tool-text text-secondary hover:text-white" onclick="viewBlob('${b.id}')">View</button>
+            <button class="btn-tool-text text-rose hover:text-white" onclick="deleteBlob('${b.id}')">Delete</button>
           </td>
         </tr>
       `).join('');
     });
 }
+
+window.viewBlob = function(blobId) {
+  fetch(`/api/storage/get?id=${encodeURIComponent(blobId)}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        alert('Failed to retrieve blob: ' + data.error);
+        return;
+      }
+      document.getElementById('viewModalBlobId').textContent = data.blob_id;
+      const sizeKiB = (data.size_bytes / 1024).toFixed(2);
+      document.getElementById('viewModalSize').textContent = `${sizeKiB} KiB • SHA-256 Valid: ${data.valid ? 'YES' : 'CORRUPTED'}`;
+      document.getElementById('viewModalContent').textContent = data.content || '(empty)';
+      document.getElementById('blobViewModal').classList.remove('hidden');
+    })
+    .catch(err => {
+      alert('Network error retrieving blob: ' + err.message);
+    });
+};
 
 function putStorageBlob() {
   const content = document.getElementById('storageContentInput').value;
@@ -521,6 +601,7 @@ function putStorageBlob() {
     document.getElementById('storageContentInput').value = '';
     loadBlobs();
     loadStatus();
+    appendLog('STORAGE', `Stored new content-addressed blob into local disk vault.`);
   });
 }
 
@@ -532,23 +613,205 @@ window.deleteBlob = function(blobId) {
   }).then(() => {
     loadBlobs();
     loadStatus();
+    appendLog('STORAGE', `Deleted blob ${blobId} from vault.`);
   });
 };
 
 function scrubStorageVault() {
   const out = document.getElementById('scrubResult');
-  out.textContent = 'Scrubbing storage vault with SHA-256 integrity audits...';
+  out.textContent = 'Scrubbing storage vault with SHA-256 cryptographic audits...';
   out.classList.remove('hidden');
 
   fetch('/api/storage/scrub', { method: 'POST' })
     .then(r => r.json())
     .then(res => {
       if (!res.corrupted || res.corrupted.length === 0) {
-        out.textContent = 'Audit complete: all stored blobs passed cryptographic SHA-256 verification.';
+        out.innerHTML = '<span class="text-secondary">✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot.</span>';
       } else {
-        out.textContent = `Warning: found ${res.corrupted.length} corrupted blobs!`;
+        out.innerHTML = `<span class="text-rose">⚠ Warning: detected ${res.corrupted.length} corrupted blob(s)!</span>`;
       }
     });
+}
+
+function initWireLogs() {
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentLogFilter = btn.dataset.filter;
+      applyLogFilter();
+    });
+  });
+
+  const btnPause = document.getElementById('btnPauseLogs');
+  btnPause.addEventListener('click', () => {
+    isLogPaused = !isLogPaused;
+    document.getElementById('pauseLogLabel').textContent = isLogPaused ? 'Resume' : 'Pause';
+    btnPause.style.color = isLogPaused ? '#f59e0b' : '';
+  });
+
+  document.getElementById('btnClearLogs').addEventListener('click', () => {
+    document.getElementById('wireLogContainer').innerHTML = '';
+  });
+}
+
+function applyLogFilter() {
+  const rows = document.querySelectorAll('#wireLogContainer .log-row');
+  rows.forEach(r => {
+    if (currentLogFilter === 'all') {
+      r.classList.remove('hidden');
+    } else {
+      const cat = r.dataset.category || 'all';
+      if (cat === currentLogFilter) {
+        r.classList.remove('hidden');
+      } else {
+        r.classList.add('hidden');
+      }
+    }
+  });
+}
+
+function initWebSocket() {
+  const loc = window.location;
+  const wsURL = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/api/events';
+  const ws = new WebSocket(wsURL);
+
+  ws.onopen = () => {
+    appendLog('DAEMON', 'Connected to UniCompute desktop daemon WebSocket event bus.');
+    document.getElementById('footerSocketStatus').innerHTML = '<span class="text-secondary">● WebSocket Event Bus Connected</span>';
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const evt = JSON.parse(e.data);
+      handleLiveEvent(evt);
+    } catch (_) {}
+  };
+
+  ws.onclose = () => {
+    document.getElementById('footerSocketStatus').innerHTML = '<span class="text-amber">○ Reconnecting WebSocket...</span>';
+    setTimeout(initWebSocket, 2000);
+  };
+}
+
+function handleLiveEvent(evt) {
+  let category = 'coordinator';
+  const t = (evt.type || '').toLowerCase();
+  if (t.includes('peer') || t.includes('stream') || t.includes('chunk')) category = 'p2p';
+  if (t.includes('code') || t.includes('shell')) category = 'code';
+  if (t.includes('gpu')) category = 'gpu';
+  if (t.includes('storage') || t.includes('blob')) category = 'storage';
+
+  appendLog(evt.type.toUpperCase(), evt.message, category);
+
+  if (t.includes('peer')) {
+    pollFleetAndPeers();
+  }
+
+  // Preemption Alert (Objective 3 Watchdog)
+  if (evt.type === 'gpu_preempt_alert') {
+    const banner = document.getElementById('wdAlertBanner');
+    document.getElementById('wdAlertMessage').textContent = evt.message;
+    banner.classList.remove('hidden');
+    setTimeout(() => banner.classList.add('hidden'), 8000);
+  }
+}
+
+function loadStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(data => {
+      lastStatusData = data;
+      currentLocalId = data.node_id;
+      document.getElementById('localNodeIdLabel').textContent = data.node_id;
+
+      // Update Join Code
+      const joinCode = 'UC-' + (data.node_id ? data.node_id.replace('node-', '').substring(0, 4).toUpperCase() + '-' + (data.pool_id ? data.pool_id.substring(0, 4).toUpperCase() : '82B1') : '9F4A-82B1');
+      document.getElementById('activeJoinCode').textContent = joinCode;
+
+      if (data.nat) {
+        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Cone'}`;
+      }
+
+      // Update GPU Card (Objective 3)
+      if (data.gpu_profile) {
+        document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'NVIDIA RTX Hardware';
+        document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'NVIDIA'} • DirectML: ${data.gpu_profile.directml_supported}`;
+        const totalMB = data.gpu_profile.total_vram_bytes ? (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0) : 6144;
+        const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : 5800;
+        document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
+        document.getElementById('gpuVramAlloc').textContent = `${totalMB - availMB} MB`;
+        document.getElementById('gpuVramBar').style.width = `${((totalMB - availMB) / totalMB) * 100}%`;
+
+        if (data.gpu_profile.temperature_c > 0) {
+          document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
+        }
+      }
+
+      // Update Watchdog Radar
+      if (data.watchdog) {
+        document.getElementById('wdPowerLabel').textContent = data.watchdog.on_battery ? 'Battery: UNPLUGGED' : 'AC Power: ONLINE';
+        document.getElementById('wdActivityLabel').textContent = data.watchdog.user_active ? 'User: ACTIVE' : 'User: IDLE';
+        document.getElementById('wdStateLabel').textContent = `State: ${data.watchdog.state.toUpperCase()}`;
+        document.getElementById('navWatchdogBadge').textContent = `${data.watchdog.state.toUpperCase()} (50ms)`;
+      }
+
+      // Storage
+      if (data.storage) {
+        const usedMB = (data.storage.used_bytes / (1024*1024)).toFixed(0);
+        const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
+        document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
+        document.getElementById('navStorageBadge').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
+        document.getElementById('storageUsageBar').style.width = `${data.storage.usage_percent || 0}%`;
+        document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
+        document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
+      }
+    });
+}
+
+function pollFleetAndPeers() {
+  Promise.all([
+    fetch('/api/fleet').then(r => r.json()),
+    fetch('/api/peers').then(r => r.json()),
+    fetch('/api/status').then(r => r.json())
+  ]).then(([fleetData, peersData, statusData]) => {
+    lastStatusData = statusData;
+    currentFleet = fleetData.nodes || [];
+    connectedPeers = peersData.peers || [];
+
+    document.getElementById('fleetCountBadge').textContent = `${currentFleet.length} Nodes`;
+    document.getElementById('peerCountBadge').textContent = `${connectedPeers.length} Active`;
+    document.getElementById('footerP2PCount').textContent = `${connectedPeers.length} P2P Links Active`;
+
+    // Populate Target Peer Dropdown in Code Tab
+    const peerSelect = document.getElementById('codeTargetPeer');
+    const existingVal = peerSelect.value;
+    peerSelect.innerHTML = '';
+
+    const localOpt = document.createElement('option');
+    localOpt.value = 'local';
+    localOpt.textContent = 'Local Worker (This Machine)';
+    peerSelect.appendChild(localOpt);
+
+    currentFleet.forEach(nodeId => {
+      if (nodeId !== currentLocalId) {
+        const opt = document.createElement('option');
+        opt.value = nodeId;
+        const isConn = connectedPeers.some(p => (p.peer_id || p) === nodeId);
+        opt.textContent = `${nodeId} ${isConn ? '★ [P2P Direct]' : '[Coordinator]'}`;
+        peerSelect.appendChild(opt);
+      }
+    });
+
+    if (existingVal && (existingVal === 'local' || currentFleet.includes(existingVal))) {
+      peerSelect.value = existingVal;
+    } else {
+      peerSelect.value = 'local';
+    }
+
+    // Refresh Canvas with real status
+    topology.updateFleet(currentFleet, connectedPeers, currentLocalId, statusData);
+  }).catch(() => {});
 }
 
 function loadSamples() {
@@ -558,6 +821,9 @@ function loadSamples() {
       if (!data.samples) return;
       const codeSelect = document.getElementById('codeSampleSelect');
       const hipSelect = document.getElementById('hipifySampleSelect');
+
+      while (codeSelect.options.length > 1) codeSelect.remove(1);
+      while (hipSelect.options.length > 1) hipSelect.remove(1);
 
       data.samples.forEach(s => {
         const opt = document.createElement('option');
@@ -572,34 +838,40 @@ function loadSamples() {
           codeSelect.appendChild(opt);
         }
       });
-
-      codeSelect.addEventListener('change', () => {
-        const opt = codeSelect.selectedOptions[0];
-        if (opt && opt.dataset.content) {
-          document.getElementById('codeSourceEditor').value = opt.dataset.content;
-          document.getElementById('codeLanguage').value = opt.dataset.lang;
-        }
-      });
-
-      hipSelect.addEventListener('change', () => {
-        const opt = hipSelect.selectedOptions[0];
-        if (opt && opt.dataset.content) {
-          document.getElementById('cudaInputEditor').value = opt.dataset.content;
-        }
-      });
     });
 }
 
-function appendLog(type, msg) {
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function appendLog(type, msg, category = 'all') {
+  if (isLogPaused) return;
+
   const container = document.getElementById('wireLogContainer');
   if (!container) return;
 
   const div = document.createElement('div');
-  div.className = 'log-entry';
+  div.className = 'log-row';
+  div.dataset.category = category;
+
+  if (currentLogFilter !== 'all' && currentLogFilter !== category) {
+    div.classList.add('hidden');
+  }
+
+  let typeColor = 'text-primary';
+  if (type.includes('P2P') || type.includes('CHUNK')) typeColor = 'text-secondary';
+  if (type.includes('CODE') || type.includes('SHELL')) typeColor = 'text-tertiary';
+  if (type.includes('STORAGE') || type.includes('BLOB')) typeColor = 'text-primary';
+
   div.innerHTML = `
-    <span class="log-time">[${new Date().toLocaleTimeString()}]</span>
-    <span class="log-type">&lt;${type}&gt;</span>
-    <span class="log-msg">${escapeHTML(msg)}</span>
+    <span class="text-outline">[${new Date().toLocaleTimeString()}]</span>
+    <span class="${typeColor} font-semibold font-mono">[${type}]</span>
+    <span class="text-on-surface">${escapeHTML(msg)}</span>
   `;
   container.appendChild(div);
 
@@ -609,5 +881,6 @@ function appendLog(type, msg) {
 }
 
 function escapeHTML(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

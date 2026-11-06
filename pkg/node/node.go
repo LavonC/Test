@@ -61,14 +61,14 @@ type Node struct {
 	onFleetPeerJoin func(peerID string)
 	onFleetPeerLeft func(peerID string)
 
-	shellExecutor  remoteshell.Executor
-	codeExecutor      codeexec.Executor
+	shellExecutor    remoteshell.Executor
+	codeExecutor     codeexec.Executor
 	codeAllowedPeers map[string]struct{}
 	pendingCodeMu    sync.Mutex
 	pendingCode      map[string]pendingCodeResult
-	pendingExecsMu sync.Mutex
-	pendingExecs   map[string]chan remoteshell.ShellResponse
-	gpuManager     *gpu.Manager
+	pendingExecsMu   sync.Mutex
+	pendingExecs     map[string]chan remoteshell.ShellResponse
+	gpuManager       *gpu.Manager
 
 	started bool
 	closed  bool
@@ -96,16 +96,16 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	classifier := nat.NewClassifier(cfg.STUNServersV4, cfg.STUNServersV6)
 
 	n := &Node{
-		cfg:           cfg,
-		store:         store,
-		tracker:       tracker,
-		classifier:    classifier,
-		relayClient:   &relay.RelayClient{},
-		fleetNodes:    make(map[string]bool),
-		shellExecutor:   remoteshell.NewSystemExecutor(),
+		cfg:              cfg,
+		store:            store,
+		tracker:          tracker,
+		classifier:       classifier,
+		relayClient:      &relay.RelayClient{},
+		fleetNodes:       make(map[string]bool),
+		shellExecutor:    remoteshell.NewSystemExecutor(),
 		codeAllowedPeers: make(map[string]struct{}),
 		pendingCode:      make(map[string]pendingCodeResult),
-		pendingExecs:  make(map[string]chan remoteshell.ShellResponse),
+		pendingExecs:     make(map[string]chan remoteshell.ShellResponse),
 	}
 
 	return n, nil

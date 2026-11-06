@@ -146,3 +146,25 @@ go test -v ./...
 2. **Relay Token Matching**: Relayed sessions use 128-bit random hex tokens exchanged via signaling so that relays remain blind to payload data.
 3. **Storage Vault Directory Structure**: Separates active blobs into a `data/` directory and staged uploads into a `tmp/` directory to guarantee atomic POSIX/NTFS renames.
 4. **Windows Temp Binary Execution**: Addressed Windows Application Control policies by configuring a local `.tmp` directory for Go test binaries.
+
+---
+
+## 7. Desktop GUI Control Room & Integrated Objectives
+
+UniCompute provides an industrial-grade Desktop Workstation GUI (`cmd/unicompute-gui`) with a 60 FPS HTML5 Canvas topology visualizer and 5 dedicated operational control panels:
+
+1. **P2P Topology Mesh (Tab 1)**: Interactive fleet topology canvas displaying the central coordinator, orbiting workstation rigs, dual-hemisphere cores (CPU/GPU load and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and the PC Inspector drawer with live SCTP ping and link controls.
+2. **CPU Containers (Tab 2 - Objective 2)**: Dark code editor, recursive sample dropdown (`samples/`), stdin stream input, execution timeout slider, target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
+3. **GPU Subsystem (Tab 3 - Objective 3)**: Real-time hardware telemetry (RTX 4050 / DirectML), 50 ms battery/activity watchdog radar, CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner.
+4. **CAS Vault (Tab 4 - Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
+5. **Wire Logs & Diagnostics (Tab 5)**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
+
+### Launching the Desktop Workstation
+- **Windows**: Run `.\run-gui.bat` or `.\run-gui.ps1`
+- **Linux**: Run `./run-gui.sh` (or `./bin/unicompute-gui-linux -headless -port 23080`)
+- **Go Toolchain**: `go run ./cmd/unicompute-gui -port 23080`
+
+For complete platform-specific operational guides, multi-node deployment walkthroughs, and security test suites, refer to:
+- **Windows Deployment & Testing Guide**: [`windows.md`](windows.md)
+- **Linux Deployment & Testing Guide**: [`linux.md`](linux.md)
+

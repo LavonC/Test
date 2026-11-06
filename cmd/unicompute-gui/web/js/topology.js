@@ -1,7 +1,7 @@
 /**
  * UniCompute Fleet Topology Canvas Engine
- * Renders the central Coordinator Mainframe and orbiting Workstation Rigs with
- * dual Compute/Storage cores, glowing fiber conduits, and animated P2P laser beams.
+ * Design System: Decentralized Compute Workstation
+ * 100% Grounded in Live Go Substrate State (Zero Randomizer Mocks)
  */
 
 class TopologyRenderer {
@@ -11,8 +11,8 @@ class TopologyRenderer {
     this.ctx = this.canvas.getContext('2d');
 
     this.nodes = [];         // Fleet peer rigs
-    this.peers = [];         // Connected P2P pairs
-    this.particles = [];     // Animated data packets along P2P links
+    this.peers = [];         // Connected P2P pairs with metrics
+    this.particles = [];     // Animated data packets along active P2P links
     this.selectedNode = null;
     this.hoveredNode = null;
 
@@ -27,7 +27,7 @@ class TopologyRenderer {
       id: 'COORDINATOR',
       x: 0,
       y: 0,
-      radius: 46,
+      radius: 44,
       status: 'ONLINE',
       pulse: 0
     };
@@ -102,10 +102,16 @@ class TopologyRenderer {
     };
   }
 
-  updateFleet(fleetNodes, connectedPeers, localId) {
-    const orbitRadius = Math.min(this.width, this.height) * 0.35;
+  updateFleet(fleetNodes, connectedPeers, localId, localStatus = null) {
+    const orbitRadius = Math.min(this.width, this.height) * 0.36;
     const count = fleetNodes.length;
-    const peerMap = new Set(connectedPeers.map(p => p.peer_id || p));
+
+    // Build map of connected peer objects
+    const peerMetricsMap = new Map();
+    connectedPeers.forEach(p => {
+      const pid = p.peer_id || p;
+      peerMetricsMap.set(pid, p);
+    });
 
     const existingMap = new Map(this.nodes.map(n => [n.id, n]));
     const updated = [];
@@ -115,6 +121,10 @@ class TopologyRenderer {
       const targetX = this.coordinator.x + Math.cos(angle) * orbitRadius;
       const targetY = this.coordinator.y + Math.sin(angle) * orbitRadius;
 
+      const isLocal = nodeId === localId;
+      const peerData = peerMetricsMap.get(nodeId);
+      const connectedP2P = !!peerData;
+
       let node = existingMap.get(nodeId);
       if (!node) {
         node = {
@@ -122,56 +132,60 @@ class TopologyRenderer {
           x: targetX,
           y: targetY,
           width: 140,
-          height: 80,
-          isLocal: nodeId === localId,
-          connectedP2P: peerMap.has(nodeId),
-          gpuActive: true,
-          dockerActive: true,
-          storageMB: Math.floor(Math.random() * 2048) + 256,
-          quotaMB: 10240,
-          blobs: Math.floor(Math.random() * 12) + 2
+          height: 76,
+          isLocal: isLocal,
+          connectedP2P: connectedP2P,
+          metrics: peerData ? peerData.metrics : null
         };
       } else {
-        node.connectedP2P = peerMap.has(nodeId);
-        // Smoothly adjust towards target orbit slot
-        node.x += (targetX - node.x) * 0.1;
-        node.y += (targetY - node.y) * 0.1;
+        node.isLocal = isLocal;
+        node.connectedP2P = connectedP2P;
+        node.metrics = peerData ? peerData.metrics : null;
+        node.x += (targetX - node.x) * 0.12;
+        node.y += (targetY - node.y) * 0.12;
       }
+
+      // Ground local node metrics directly in real status
+      if (isLocal && localStatus) {
+        node.storageMB = localStatus.storage ? Math.round(localStatus.storage.used_bytes / (1024 * 1024)) : 0;
+        node.quotaMB = localStatus.storage ? Math.round(localStatus.storage.quota_bytes / (1024 * 1024)) : 10240;
+        node.blobs = localStatus.storage ? localStatus.storage.blob_count : 0;
+        node.gpuActive = localStatus.gpu_enabled;
+        node.dockerActive = localStatus.docker_available;
+      }
+
       updated.push(node);
     });
 
     this.nodes = updated;
     this.peers = connectedPeers;
 
-    // Spawn animated data/code packets along direct P2P mesh links between remote nodes
-    if (this.nodes.length >= 2 && Math.random() < 0.3) {
-      const idxA = Math.floor(Math.random() * this.nodes.length);
-      const idxB = (idxA + 1) % this.nodes.length;
-      const nodeA = this.nodes[idxA];
-      const nodeB = this.nodes[idxB];
-      if (nodeA && nodeB) {
+    // Spawn packets only along genuinely established P2P connections
+    const connectedList = this.nodes.filter(n => n.connectedP2P);
+    if (connectedList.length > 0 && Math.random() < 0.25) {
+      const nodeA = this.nodes.find(n => n.isLocal) || this.coordinator;
+      const nodeB = connectedList[Math.floor(Math.random() * connectedList.length)];
+      if (nodeA && nodeB && nodeA !== nodeB) {
         this.particles.push({
           x: nodeA.x,
           y: nodeA.y,
           targetX: nodeB.x,
           targetY: nodeB.y,
           progress: 0,
-          color: Math.random() > 0.5 ? '#10B981' : '#00F2FE',
-          speed: 0.025
+          color: '#10b981',
+          speed: 0.024
         });
       }
     }
   }
 
   hitTest(x, y) {
-    // Check central coordinator
     const dxCoord = x - this.coordinator.x;
     const dyCoord = y - this.coordinator.y;
     if (Math.sqrt(dxCoord * dxCoord + dyCoord * dyCoord) <= this.coordinator.radius) {
       return this.coordinator;
     }
 
-    // Check rigs
     for (const node of this.nodes) {
       const halfW = node.width / 2;
       const halfH = node.height / 2;
@@ -194,66 +208,85 @@ class TopologyRenderer {
     this.ctx.clearRect(0, 0, this.width, this.height);
 
     this.ctx.save();
-    // Apply pan and zoom around center
     this.ctx.translate(this.coordinator.x + this.panX, this.coordinator.y + this.panY);
     this.ctx.scale(this.zoom, this.zoom);
     this.ctx.translate(-this.coordinator.x, -this.coordinator.y);
 
-    // 1. Draw solid signaling conduits (Health / Conn from Central Coordinator)
+    // 1. Concentric background orbital guide rings
+    this.drawOrbitRings();
+
+    // 2. Control plane signaling conduits
     this.drawSignalingConduits();
 
-    // 2. Draw dashed P2P perimeter mesh links (Direct Code/Data Channels between Remote PCs)
+    // 3. Real established P2P WebRTC DataChannel laser beams
     this.drawP2PMeshLinks();
 
-    // 3. Draw streaming data/code packets along P2P mesh
+    // 4. Data packet particles
     this.drawDataParticles();
 
-    // 4. Draw Central Coordinator Mainframe Tower (Health & Connection Hub)
+    // 5. Central Hub Coordinator
     this.drawCoordinatorTower();
 
-    // 5. Draw Orbiting Remote Nodes (Split Code / Data Compartments)
+    // 6. Workstation Nodes
     this.drawPeerRigs();
 
     this.ctx.restore();
   }
 
+  drawOrbitRings() {
+    const c = this.coordinator;
+    const orbitRadius = Math.min(this.width, this.height) * 0.36;
+
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.arc(c.x, c.y, orbitRadius, 0, Math.PI * 2);
+    this.ctx.strokeStyle = '#161f33';
+    this.ctx.lineWidth = 1.5;
+    this.ctx.setLineDash([4, 6]);
+    this.ctx.stroke();
+
+    this.ctx.beginPath();
+    this.ctx.arc(c.x, c.y, orbitRadius * 0.55, 0, Math.PI * 2);
+    this.ctx.strokeStyle = '#121b2f';
+    this.ctx.lineWidth = 1;
+    this.ctx.setLineDash([2, 4]);
+    this.ctx.stroke();
+    this.ctx.restore();
+  }
+
   drawSignalingConduits() {
-    // Solid control plane lines radiating from central Health/Conn Coordinator to all Remote Nodes
     for (const node of this.nodes) {
       this.ctx.save();
       this.ctx.beginPath();
       this.ctx.moveTo(this.coordinator.x, this.coordinator.y);
       this.ctx.lineTo(node.x, node.y);
-      this.ctx.strokeStyle = 'rgba(0, 242, 254, 0.35)';
-      this.ctx.lineWidth = 2;
+      this.ctx.strokeStyle = 'rgba(56, 189, 248, 0.28)';
+      this.ctx.lineWidth = 1.5;
       this.ctx.stroke();
       this.ctx.restore();
     }
   }
 
   drawP2PMeshLinks() {
-    // Dashed data plane lines connecting remote nodes directly to each other in a P2P mesh
-    const n = this.nodes.length;
-    if (n < 2) return;
+    const localNode = this.nodes.find(n => n.isLocal);
+    if (!localNode) return;
 
     this.ctx.save();
-    this.ctx.strokeStyle = '#10B981';
-    this.ctx.lineWidth = 2.5;
-    this.ctx.setLineDash([8, 6]);
-    this.ctx.lineDashOffset = -Date.now() / 35;
+    this.ctx.strokeStyle = '#10b981';
+    this.ctx.lineWidth = 2;
+    this.ctx.setLineDash([6, 5]);
+    this.ctx.lineDashOffset = -Date.now() / 40;
     this.ctx.shadowColor = 'rgba(16, 185, 129, 0.4)';
-    this.ctx.shadowBlur = 8;
+    this.ctx.shadowBlur = 6;
 
-    for (let i = 0; i < n; i++) {
-      const nextIdx = (i + 1) % n;
-      const nodeA = this.nodes[i];
-      const nodeB = this.nodes[nextIdx];
-
-      // Draw dashed direct P2P link between remote nodes
-      this.ctx.beginPath();
-      this.ctx.moveTo(nodeA.x, nodeA.y);
-      this.ctx.lineTo(nodeB.x, nodeB.y);
-      this.ctx.stroke();
+    // Draw active links from local node to connected peers
+    for (const node of this.nodes) {
+      if (node !== localNode && node.connectedP2P) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(localNode.x, localNode.y);
+        this.ctx.lineTo(node.x, node.y);
+        this.ctx.stroke();
+      }
     }
     this.ctx.restore();
   }
@@ -271,10 +304,10 @@ class TopologyRenderer {
 
       this.ctx.save();
       this.ctx.beginPath();
-      this.ctx.arc(curX, curY, 4.5, 0, Math.PI * 2);
+      this.ctx.arc(curX, curY, 4, 0, Math.PI * 2);
       this.ctx.fillStyle = p.color;
       this.ctx.shadowColor = p.color;
-      this.ctx.shadowBlur = 10;
+      this.ctx.shadowBlur = 8;
       this.ctx.fill();
       this.ctx.restore();
     }
@@ -282,49 +315,46 @@ class TopologyRenderer {
 
   drawCoordinatorTower() {
     const c = this.coordinator;
-    c.pulse = (c.pulse + 0.03) % (Math.PI * 2);
+    c.pulse = (c.pulse + 0.035) % (Math.PI * 2);
 
     this.ctx.save();
 
-    // Concentric pulsing radar rings
     for (let r = 1; r <= 3; r++) {
-      const ringRadius = c.radius + r * 14 + Math.sin(c.pulse) * 4;
+      const waveRad = c.radius + r * 14 + Math.sin(c.pulse) * 3;
       this.ctx.beginPath();
-      this.ctx.arc(c.x, c.y, ringRadius, 0, Math.PI * 2);
-      this.ctx.strokeStyle = `rgba(0, 242, 254, ${0.15 / r})`;
+      this.ctx.arc(c.x, c.y, waveRad, 0, Math.PI * 2);
+      this.ctx.strokeStyle = `rgba(56, 189, 248, ${0.18 / r})`;
       this.ctx.lineWidth = 1;
       this.ctx.stroke();
     }
 
-    // Outer Hub Glow
     this.ctx.beginPath();
     this.ctx.arc(c.x, c.y, c.radius, 0, Math.PI * 2);
-    this.ctx.fillStyle = '#0F172A';
-    this.ctx.strokeStyle = '#00F2FE';
+    this.ctx.fillStyle = '#091326';
+    this.ctx.strokeStyle = '#38bdf8';
     this.ctx.lineWidth = 2.5;
-    this.ctx.shadowColor = '#00F2FE';
+    this.ctx.shadowColor = '#38bdf8';
     this.ctx.shadowBlur = 18;
     this.ctx.fill();
     this.ctx.stroke();
 
-    // Central Circle Labels matching architecture: HEALTH / CONN / COORDINATOR
-    this.ctx.font = '800 11px Inter, sans-serif';
-    this.ctx.fillStyle = '#10B981';
+    this.ctx.beginPath();
+    this.ctx.arc(c.x, c.y, c.radius - 8, 0, Math.PI * 2);
+    this.ctx.fillStyle = '#161f33';
+    this.ctx.fill();
+
+    this.ctx.font = '700 11px Inter, sans-serif';
+    this.ctx.fillStyle = '#8ed5ff';
     this.ctx.textAlign = 'center';
-    this.ctx.fillText('HEALTH', c.x, c.y - 12);
+    this.ctx.fillText('CENTRAL', c.x, c.y - 4);
 
-    this.ctx.font = '800 11px Inter, sans-serif';
-    this.ctx.fillStyle = '#00F2FE';
-    this.ctx.fillText('CONN', c.x, c.y + 2);
+    this.ctx.font = '600 10px JetBrains Mono, monospace';
+    this.ctx.fillStyle = '#d9e2fd';
+    this.ctx.fillText('HUB:4194', c.x, c.y + 11);
 
-    this.ctx.font = '700 9px JetBrains Mono, monospace';
-    this.ctx.fillStyle = '#94A3B8';
-    this.ctx.fillText('COORDINATOR', c.x, c.y + 17);
-
-    // Bottom Status Pill
-    this.ctx.font = '700 8.5px JetBrains Mono, monospace';
-    this.ctx.fillStyle = '#38BDF8';
-    this.ctx.fillText('RENDEZVOUS HUB', c.x, c.y + c.radius + 18);
+    this.ctx.font = '600 9px JetBrains Mono, monospace';
+    this.ctx.fillStyle = '#38bdf8';
+    this.ctx.fillText('[HEALTH & CONN]', c.x, c.y + c.radius + 16);
 
     this.ctx.restore();
   }
@@ -342,95 +372,100 @@ class TopologyRenderer {
       const halfW = w / 2;
       const halfH = h / 2;
 
-      // Aura on Hover / Selection / Connected
       if (isHovered || isSelected || node.connectedP2P) {
-        this.ctx.shadowColor = node.connectedP2P ? '#10B981' : '#00F2FE';
-        this.ctx.shadowBlur = isSelected ? 20 : 12;
+        this.ctx.shadowColor = node.connectedP2P ? '#10b981' : '#38bdf8';
+        this.ctx.shadowBlur = isSelected ? 18 : 10;
       }
 
-      // Outer Tag: REMOTE PC [ID]
-      this.ctx.font = '700 9px Inter, sans-serif';
-      this.ctx.fillStyle = '#94A3B8';
+      this.ctx.font = '700 10px JetBrains Mono, monospace';
+      this.ctx.fillStyle = isSelected ? '#8ed5ff' : (node.isLocal ? '#38bdf8' : '#bdc8d1');
       this.ctx.textAlign = 'center';
-      this.ctx.fillText(`REMOTE PC • ${node.id.length > 10 ? node.id.substring(0, 8) + '…' : node.id}`, x, y - halfH - 8);
 
-      // Chassis Body Background
+      let label = node.id;
+      if (node.isLocal) label += ' [LOCAL]';
+      if (label.length > 18) label = label.substring(0, 16) + '…';
+      this.ctx.fillText(label, x, y - halfH - 7);
+
       this.ctx.beginPath();
-      this.roundRect(x - halfW, y - halfH, w, h, 8);
-      this.ctx.fillStyle = '#0B1120';
+      this.roundRect(x - halfW, y - halfH, w, h, 6);
+      this.ctx.fillStyle = '#0d172a';
       this.ctx.fill();
 
-      // Border: Emerald if connected P2P, Cyan if selected, subtle slate otherwise
-      this.ctx.strokeStyle = node.connectedP2P ? '#10B981' : (isSelected ? '#00F2FE' : 'rgba(255, 255, 255, 0.18)');
+      this.ctx.strokeStyle = node.connectedP2P ? '#10b981' : (isSelected ? '#38bdf8' : '#1e293b');
       this.ctx.lineWidth = isSelected || node.connectedP2P ? 2 : 1;
       this.ctx.stroke();
 
-      // Horizontal Divider separating CODE compartment (top) and DATA compartment (bottom)
       this.ctx.beginPath();
       this.ctx.moveTo(x - halfW, y);
       this.ctx.lineTo(x + halfW, y);
-      this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      this.ctx.strokeStyle = '#1e293b';
       this.ctx.lineWidth = 1;
       this.ctx.stroke();
 
-      // ---- UPPER COMPARTMENT: CODE ----
-      this.ctx.font = '800 10px JetBrains Mono, monospace';
-      this.ctx.fillStyle = '#A78BFA'; // Violet
+      // Top Compartment
+      this.ctx.font = '700 9px JetBrains Mono, monospace';
+      this.ctx.fillStyle = '#e1bfff';
       this.ctx.textAlign = 'left';
       this.ctx.fillText('CODE', x - halfW + 10, y - halfH + 16);
 
-      // Compute tier badge
-      this.ctx.font = '700 8px Inter, sans-serif';
+      this.ctx.font = '600 8.5px JetBrains Mono, monospace';
       if (node.gpuActive) {
-        this.ctx.fillStyle = 'rgba(139, 92, 246, 0.25)';
+        this.ctx.fillStyle = 'rgba(56, 189, 248, 0.2)';
         this.roundRect(x + halfW - 48, y - halfH + 6, 40, 14, 3);
         this.ctx.fill();
-        this.ctx.fillStyle = '#DDD6FE';
+        this.ctx.fillStyle = '#8ed5ff';
         this.ctx.textAlign = 'center';
-        this.ctx.fillText('GPU T3', x + halfW - 28, y - halfH + 16);
+        this.ctx.fillText('TIER 3', x + halfW - 28, y - halfH + 16);
       } else {
-        this.ctx.fillStyle = 'rgba(59, 130, 246, 0.25)';
+        this.ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
         this.roundRect(x + halfW - 54, y - halfH + 6, 46, 14, 3);
         this.ctx.fill();
-        this.ctx.fillStyle = '#BFDBFE';
+        this.ctx.fillStyle = '#4edea3';
         this.ctx.textAlign = 'center';
-        this.ctx.fillText('CPU/DOCKER', x + halfW - 31, y - halfH + 16);
+        this.ctx.fillText('DOCKER', x + halfW - 31, y - halfH + 16);
       }
 
       this.ctx.font = '500 8.5px Inter, sans-serif';
-      this.ctx.fillStyle = '#94A3B8';
+      this.ctx.fillStyle = '#87929a';
       this.ctx.textAlign = 'left';
-      this.ctx.fillText('EXEC ENGINE • IDLE', x - halfW + 10, y - 7);
+      this.ctx.fillText(node.connectedP2P ? 'P2P Linked' : (node.isLocal ? 'Host Node' : 'Standby Peer'), x - halfW + 10, y - 7);
 
-      // ---- LOWER COMPARTMENT: DATA ----
-      this.ctx.font = '800 10px JetBrains Mono, monospace';
-      this.ctx.fillStyle = '#34D399'; // Emerald
+      // Bottom Compartment: Real Storage / Link info
+      this.ctx.font = '700 9px JetBrains Mono, monospace';
+      this.ctx.fillStyle = '#4edea3';
       this.ctx.fillText('DATA', x - halfW + 10, y + 16);
 
-      // Storage quota progress bar
-      const barW = w - 20;
-      const barH = 4;
-      const barX = x - halfW + 10;
-      const barY = y + 21;
-      this.ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-      this.roundRect(barX, barY, barW, barH, 2);
-      this.ctx.fill();
+      if (node.isLocal && node.quotaMB) {
+        const barW = w - 20;
+        const barH = 3;
+        const barX = x - halfW + 10;
+        const barY = y + 21;
+        this.ctx.fillStyle = '#1e293b';
+        this.roundRect(barX, barY, barW, barH, 1.5);
+        this.ctx.fill();
 
-      const pct = Math.min(1, node.storageMB / node.quotaMB);
-      this.ctx.fillStyle = '#10B981';
-      this.roundRect(barX, barY, barW * pct, barH, 2);
-      this.ctx.fill();
+        const pct = Math.min(1, (node.storageMB || 0) / node.quotaMB);
+        this.ctx.fillStyle = '#10b981';
+        this.roundRect(barX, barY, barW * pct, barH, 1.5);
+        this.ctx.fill();
 
-      // Storage text info
-      this.ctx.font = '600 8px JetBrains Mono, monospace';
-      this.ctx.fillStyle = '#94A3B8';
-      this.ctx.fillText(`${(node.storageMB / 1024).toFixed(1)}GB • ${node.blobs} Chunks`, x - halfW + 10, y + 33);
+        this.ctx.font = '600 8px JetBrains Mono, monospace';
+        this.ctx.fillStyle = '#87929a';
+        this.ctx.fillText(`${(node.storageMB / 1024).toFixed(1)} GB • ${node.blobs} Blobs`, x - halfW + 10, y + 32);
+      } else {
+        this.ctx.font = '600 8px JetBrains Mono, monospace';
+        this.ctx.fillStyle = node.connectedP2P ? '#10b981' : '#87929a';
+        if (node.metrics && node.metrics.rtt_ms) {
+          this.ctx.fillText(`RTT: ${node.metrics.rtt_ms}ms • Direct`, x - halfW + 10, y + 28);
+        } else {
+          this.ctx.fillText(node.connectedP2P ? 'SCTP DataChannel OK' : 'Signaling Only', x - halfW + 10, y + 28);
+        }
+      }
 
-      // P2P Connected Indicator Pill
       if (node.connectedP2P) {
-        this.ctx.fillStyle = '#10B981';
+        this.ctx.fillStyle = '#10b981';
         this.ctx.beginPath();
-        this.ctx.arc(x + halfW - 10, y + 27, 4, 0, Math.PI * 2);
+        this.ctx.arc(x + halfW - 10, y + 26, 3.5, 0, Math.PI * 2);
         this.ctx.fill();
       }
 
@@ -446,7 +481,7 @@ class TopologyRenderer {
     this.ctx.arcTo(x + w, y, x + w, y + h, r);
     this.ctx.arcTo(x + w, y + h, x, y + h, r);
     this.ctx.arcTo(x, y + h, x, y, r);
-    this.ctx.arcTo(x, y, x + w, y, r);
+    this.ctx.arcTo(x, y + w, y, r);
     this.ctx.closePath();
   }
 

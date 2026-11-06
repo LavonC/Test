@@ -43,8 +43,17 @@ This guide provides end-to-end instructions for installing prerequisites, config
     - [10.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)](#108-gpu-sample-warp-reduction-blocker-warp_reductioncu)
     - [10.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)](#109-gpu-sample-inline-ptx-assembly-blocker-inline_ptxcu)
     - [10.10 GPU Sample: Model Capsule & Checkpoint (`test_model.json`)](#1010-gpu-sample-model-capsule--checkpoint-test_modeljson)
+    - [10.11 Standalone Automated Sample Runner (`cmd/test-samples`)](#1011-standalone-automated-sample-runner-cmdtest-samples)
+    - [10.12 Python Matrix Multiplication Benchmark (`matrix_multiply.py`)](#1012-python-matrix-multiplication-benchmark-matrix_multiplypy)
+    - [10.13 C Memory & Hash Benchmark (`system_info.c`)](#1013-c-memory--hash-benchmark-system_infoc)
+    - [10.14 GPU Sample: Shared Memory Matrix Transpose (`matrix_transpose.cu`)](#1014-gpu-sample-shared-memory-matrix-transpose-matrix_transposecu)
+    - [10.15 Adding Custom Samples Dynamically](#1015-adding-custom-samples-dynamically)
 11. [Cross-Platform Interoperability (Ubuntu 20.04 <-> Modern Linux / Windows)](#11-cross-platform-interoperability-ubuntu-2004---modern-linux--windows)
 12. [Desktop GUI Control Room Operation on Ubuntu 20.04 LTS](#12-desktop-gui-control-room-operation-on-ubuntu-2004-lts)
+    - [12.1 Launching the Desktop Window (Local & Headless)](#121-launching-the-desktop-window-local--headless)
+    - [12.2 Five-Tab Workstation Layout](#122-five-tab-workstation-layout)
+    - [12.3 Standalone Single-Node Testing on Ubuntu 20.04 (1 Node)](#123-standalone-single-node-testing-on-ubuntu-2004-1-node)
+    - [12.4 Distributed Cluster Testing on Ubuntu 20.04 (2 Nodes)](#124-distributed-cluster-testing-on-ubuntu-2004-2-nodes)
 13. [Production Daemonization with Systemd](#13-production-daemonization-with-systemd)
 14. [Ubuntu 20.04 Specific Troubleshooting & Diagnostics](#14-ubuntu-2004-specific-troubleshooting--diagnostics)
 
@@ -1177,6 +1186,62 @@ go run ./cmd/test-samples
 
 ---
 
+### 10.12 Python Matrix Multiplication Benchmark (`matrix_multiply.py`)
+Floating-point matrix multiplication with validation and optional stdin dimension override.
+
+**File**: `samples/python/matrix_multiply.py`
+```bash
+# Run via CLI:
+./bin/unicompute-node -run node-B python samples/python/matrix_multiply.py
+```
+*Expected Output:*
+```text
+==================================================
+ UniCompute Worker: Matrix Multiplication (O2)   
+==================================================
+[INFO] Using default dimension: 64x64
+Allocating two 64x64 floating-point matrices...
+Matrix Dimension : 64 x 64
+Total Operations : 524,288 FLOPs
+Compute Duration : 12.40 ms
+Status: Matrix multiplication completed successfully.
+```
+
+---
+
+### 10.13 C Memory & Hash Benchmark (`system_info.c`)
+Heap buffer allocation, integer bit manipulation, and Murmur3-32 hashing in C17.
+
+**File**: `samples/c/system_info.c`
+```bash
+# Run via CLI:
+./bin/unicompute-node -run node-B c samples/c/system_info.c
+```
+*Expected Output:*
+```text
+==================================================
+   UniCompute Worker: C Memory & Hash Benchmark   
+==================================================
+Word Size     : 64 bits (8 bytes)
+Allocating    : 262144 bytes (256.00 KiB) heap buffer...
+Murmur3 Check : 0x7A14CF9B
+Status: C worker execution passed.
+```
+
+---
+
+### 10.14 GPU Sample: Shared Memory Matrix Transpose (`matrix_transpose.cu`)
+2D shared memory matrix transpose avoiding bank conflicts, ready for HIPIFY translation.
+
+**File**: `samples/gpu/matrix_transpose.cu`
+
+---
+
+### 10.15 Adding Custom Samples Dynamically
+Any `.py`, `.c`, `.cpp`, or `.cu` file placed anywhere inside the `samples/` directory is automatically indexed by the daemon's recursive scan. In the GUI, refreshed dropdowns will show the new scripts immediately without requiring a restart or recompilation.
+
+---
+
 ## 11. Cross-Platform Interoperability (Ubuntu 20.04 <-> Modern Linux / Windows)
 
 UniCompute nodes are fully interoperable across operating systems:
@@ -1196,7 +1261,7 @@ UniCompute nodes are fully interoperable across operating systems:
 
 The Desktop GUI Control Room is compiled as a static CGO-free ELF binary (`bin/unicompute-gui-linux`), running natively on Ubuntu 20.04 with zero glibc shared library dependencies.
 
-### 12.1 Launching the Desktop Window
+### 12.1 Launching the Desktop Window (Local & Headless)
 Start the GUI using the automated script:
 
 ```bash
@@ -1207,21 +1272,38 @@ chmod +x run-gui.sh
 On desktop systems, this starts the daemon on port 23080 and automatically launches Chromium in app mode (`chromium-browser --app="http://127.0.0.1:23080"`). On headless 20.04 servers, run with `-headless`:
 ```bash
 ./bin/unicompute-gui-linux -headless -port 23080
+# Or:
+go run ./cmd/unicompute-gui -headless -port 23080
 ```
 Then access `http://<server-ip>:23080` from any web browser on your network.
 
-### 12.2 Visual Topology Canvas & Controls
-- **Coordinator Mainframe Tower**: Visualizes active signaling heartbeat and connection to Render (`wss://unicompute-coordinator.onrender.com/ws`) or local coordinator.
-- **Workstation Rigs with Dual-Hemisphere Cores**:
-  - *Compute Core (Upper)*: Displays CPU container load and GPU hardware status.
-  - *Storage Core (Lower)*: Displays CAS vault quota and blob counts.
-- **Mutual P2P Laser DataChannels**: Pulsing, animated dashed conduits showing live WebRTC SCTP DataChannel transfers (`dc-ctrl` and `dc-bulk`).
-- **Hover HUD & Connection Drawer**: Hover over any rig to view public/private IP, NAT type, and GPU specs; click to send a P2P connection request.
-- **Dedicated Panels**:
-  - *CPU Containers (Obj 2)*: Code editor and container runner with pre-loaded samples.
-  - *GPU Acceleration (Obj 3)*: Real-time telemetry, 50 ms watchdog radar, and HIPIFY translator.
-  - *CAS Storage Vault (Obj 1)*: Content-addressed blob store and one-click SHA-256 scrub audit.
-  - *Fleet Console*: Real-time WebSocket event log and remote shell dispatcher.
+### 12.2 Five-Tab Workstation Layout
+- **1. P2P Topology Mesh**: Central coordinator node with orbiting rigs, dual-hemisphere telemetry (CPU/GPU and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and PC Inspector drawer with live SCTP ping and link controls.
+- **2. CPU Containers (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
+- **3. GPU Subsystem (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
+- **4. CAS Vault (Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
+- **5. Wire Logs & Diagnostics**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
+
+### 12.3 Standalone Single-Node Testing on Ubuntu 20.04 (1 Node)
+1. Start GUI: `./run-gui.sh` (or `./bin/unicompute-gui-linux -headless -port 23080`).
+2. Open `http://localhost:23080` (or `http://<server-ip>:23080`).
+3. In **CAS Vault**, stash a text string, verify the blob appears in the table, click **View** to inspect the SHA-256 modal, and click **Scrub Storage Vault** to test bit-rot detection.
+4. In **GPU Subsystem**, analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY.
+5. In **CPU Containers**, with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
+6. In **Topology**, click on the local PC rig to verify local CPU cores, GPU hardware, storage metrics, and loopback telemetry.
+7. In **Wire Logs**, observe live WebSocket events for all operations.
+
+### 12.4 Distributed Cluster Testing on Ubuntu 20.04 (2 Nodes)
+1. Terminal 1 (Worker Node B):
+   ```bash
+   ./bin/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A
+   ```
+2. Terminal 2 (GUI Node A):
+   ```bash
+   ./bin/unicompute-gui-linux -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
+   ```
+3. Open Topology tab: Click `node-B` -> click **Connect P2P** -> verify animated green photon laser -> click **Ping** to test SCTP latency.
+4. Click **Target for Docker Job (O2)** -> load `calc.py` -> click **Run Code in Sandbox** -> verify remote container execution over WebRTC DataChannel.
 
 ---
 

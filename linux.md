@@ -1156,11 +1156,45 @@ Portable model graph definition with initial weights and biases.
 ---
 
 ### 10.11 Standalone Automated Sample Runner (`cmd/test-samples`)
-Execute automated verification across all 10 sample files:
+Execute automated verification across sample files:
 
 ```bash
 go run ./cmd/test-samples
 ```
+
+---
+
+### 10.12 Python Matrix Multiplication Benchmark (`matrix_multiply.py`)
+Floating-point matrix multiplication with validation and optional stdin dimension override.
+
+**File**: `samples/python/matrix_multiply.py`
+```bash
+# Run via CLI:
+./bin/unicompute-node -run node-B python samples/python/matrix_multiply.py
+```
+
+---
+
+### 10.13 C Memory & Hash Benchmark (`system_info.c`)
+Heap buffer allocation, integer bit manipulation, and Murmur3-32 hashing in C17.
+
+**File**: `samples/c/system_info.c`
+```bash
+# Run via CLI:
+./bin/unicompute-node -run node-B c samples/c/system_info.c
+```
+
+---
+
+### 10.14 GPU Sample: Shared Memory Matrix Transpose (`matrix_transpose.cu`)
+2D shared memory matrix transpose avoiding bank conflicts, ready for HIPIFY translation.
+
+**File**: `samples/gpu/matrix_transpose.cu`
+
+---
+
+### 10.15 Adding Custom Samples Dynamically
+Any `.py`, `.c`, `.cpp`, or `.cu` file placed anywhere inside the `samples/` directory is automatically indexed by the daemon's recursive scan. In the GUI, refreshed dropdowns will show the new scripts immediately without requiring a restart or recompilation.
 
 ---
 
@@ -1191,23 +1225,41 @@ chmod +x run-gui.sh
 ./run-gui.sh
 ```
 
-This starts the static daemon (`bin/unicompute-gui-linux`) on port 23080 and automatically launches a borderless desktop app window using Chromium, Google Chrome, or Microsoft Edge (`chromium --app="http://127.0.0.1:23080"`). If running in a headless or SSH session, add the `-headless` flag:
+This starts the static daemon (`bin/unicompute-gui-linux` or `go run ./cmd/unicompute-gui`) on port 23080 and automatically launches a borderless desktop app window using Chromium, Google Chrome, or Microsoft Edge (`chromium --app="http://127.0.0.1:23080"`).
+
+If running in a headless server or remote SSH session:
 ```bash
 ./bin/unicompute-gui-linux -headless -port 23080
+# Or:
+go run ./cmd/unicompute-gui -headless -port 23080
 ```
+Then navigate to `http://<linux-host-ip>:23080` from any web browser on your local network.
 
-### 12.2 Visual Topology Canvas & Controls
-- **Coordinator Mainframe Tower**: Visualizes active signaling heartbeat and connection to Render (`wss://unicompute-coordinator.onrender.com/ws`) or local coordinator.
-- **Workstation Rigs with Dual-Hemisphere Cores**:
-  - *Compute Core (Upper)*: Displays CPU container load and GPU hardware status.
-  - *Storage Core (Lower)*: Displays CAS vault quota and blob counts.
-- **Mutual P2P Laser DataChannels**: Pulsing, animated dashed conduits showing live WebRTC SCTP DataChannel transfers (`dc-ctrl` and `dc-bulk`).
-- **Hover HUD & Connection Drawer**: Hover over any rig to view public/private IP, NAT type, and GPU specs; click to send a P2P connection request.
-- **Dedicated Panels**:
-  - *CPU Containers (Obj 2)*: Code editor and container runner with pre-loaded samples.
-  - *GPU Acceleration (Obj 3)*: Real-time telemetry, 50 ms watchdog radar, and HIPIFY translator.
-  - *CAS Storage Vault (Obj 1)*: Content-addressed blob store and one-click SHA-256 scrub audit.
-  - *Fleet Console*: Real-time WebSocket event log and remote shell dispatcher.
+### 12.2 Five-Tab Workstation Layout
+- **1. P2P Topology Mesh**: Central coordinator node with orbiting rigs, dual-hemisphere telemetry (CPU/GPU and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and PC Inspector drawer with live SCTP ping and link controls.
+- **2. CPU Containers (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
+- **3. GPU Subsystem (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
+- **4. CAS Vault (Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
+- **5. Wire Logs & Diagnostics**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
+
+### 12.3 Standalone Local Testing on Linux (1 Node)
+1. Start GUI: `./run-gui.sh` (or `go run ./cmd/unicompute-gui -headless`).
+2. Open `http://localhost:23080`.
+3. In **CAS Vault**, stash a text string, verify the blob appears in the table, click **View** to inspect the SHA-256 modal, and click **Scrub Storage Vault** to test bit-rot detection.
+4. In **GPU Subsystem**, analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY.
+5. In **CPU Containers**, with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
+
+### 12.4 Distributed Cluster Testing on Linux (2 Nodes)
+1. Terminal 1 (Worker Node B):
+   ```bash
+   ./bin/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A
+   ```
+2. Terminal 2 (GUI Node A):
+   ```bash
+   ./bin/unicompute-gui-linux -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
+   ```
+3. Open Topology tab: Click `node-B` -> click **Connect P2P** -> verify animated green photon laser -> click **Ping** to test SCTP latency.
+4. Click **Target for Docker Job (O2)** -> load `calc.py` -> click **Run Code in Sandbox** -> verify remote container execution over WebRTC DataChannel.
 
 ---
 

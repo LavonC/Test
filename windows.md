@@ -1199,85 +1199,199 @@ A portable neural network definition with pre-initialized weight tensors and bia
 ---
 
 ### 9.11 Standalone Automated Sample Runner (`cmd/test-samples`)
-You can run automated programmatic checks across all 10 sample files in one command:
+You can run automated programmatic checks across sample files in one command:
 
 ```powershell
 go run ./cmd/test-samples
 ```
 
-Expected output:
-```text
-=======================================================================
- UniCompute Standalone Samples Verification Runner
-=======================================================================
-[TEST GROUP 1] GPU Samples & HIPIFY Analysis/Translation
-  -> [PASS] portable_vector_add.cu: Translated to HIP C++ (7 replacements)
-  -> [PASS] warp_reduction.cu: Blocked on 32-thread warp assumptions (2 issues)
-  -> [PASS] inline_ptx.cu: Blocked on inline PTX assembly (1 issue)
+---
 
-[TEST GROUP 2] Model Capsule & Checkpoint Serialization
-  -> [PASS] test_model.json: Valid JSON capsule parsed.
-  -> [PASS] Checkpoint saved: Step=10, SHA256=b2042f4f9c367aa8...
-  -> [PASS] Checkpoint integrity verified successfully.
+### 9.12 Python Matrix Multiplication Benchmark (`matrix_multiply.py`)
+Computes floating-point matrix multiplication with verification checksums and optional stdin dimension override.
 
-[TEST GROUP 3] Container Code Execution Protocol Encapsulation
-  -> [PASS] calc.py (python): Wire protocol encode/decode verified.
-  -> [PASS] hello.c (c): Wire protocol encode/decode verified.
-  -> [PASS] fib.cpp (cpp): Wire protocol encode/decode verified.
-  -> [PASS] timeout_test.py (python): Wire protocol encode/decode verified.
-  -> [PASS] network_leak_test.py (python): Wire protocol encode/decode verified.
-  -> [PASS] mem_limit_test.py (python): Wire protocol encode/decode verified.
-=======================================================================
- [SUCCESS] All standalone sample verifications passed!
-=======================================================================
+**File**: `samples\python\matrix_multiply.py`
+```powershell
+# Run from Client Node A or in GUI:
+> run node-B python samples\python\matrix_multiply.py
 ```
+*Expected Output:*
+```text
+==================================================
+ UniCompute Worker: Matrix Multiplication (O2)   
+==================================================
+[INFO] Using default dimension: 64x64
+Allocating two 64x64 floating-point matrices...
+Matrix Dimension : 64 x 64
+Total Operations : 524,288 FLOPs
+Compute Duration : 12.40 ms
+Status: Matrix multiplication completed successfully.
+```
+
+---
+
+### 9.13 C Memory & Hash Benchmark (`system_info.c`)
+Tests heap memory allocation, bitwise manipulation, and Murmur3-32 hashing over a 64K integer buffer.
+
+**File**: `samples\c\system_info.c`
+```powershell
+# Run from Client Node A or in GUI:
+> run node-B c samples\c\system_info.c
+```
+*Expected Output:*
+```text
+==================================================
+   UniCompute Worker: C Memory & Hash Benchmark   
+==================================================
+Word Size     : 64 bits (8 bytes)
+Allocating    : 262144 bytes (256.00 KiB) heap buffer...
+Murmur3 Check : 0x7A14CF9B
+Status: C worker execution passed.
+```
+
+---
+
+### 9.14 GPU Sample: Shared Memory Matrix Transpose (`matrix_transpose.cu`)
+Demonstrates a 2D shared memory tile transpose avoiding shared memory bank conflicts (`tile[TILE_DIM][TILE_DIM + 1]`). Translates seamlessly to AMD HIP.
+
+**File**: `samples\gpu\matrix_transpose.cu`
+```powershell
+# Analyze in CLI or GUI:
+> hipify samples\gpu\matrix_transpose.cu
+[SUCCESS] Kernel successfully translated to portable HIP C++.
+```
+
+---
+
+### 9.15 Adding Custom Samples Dynamically
+The UniCompute daemon includes a recursive sample discovery engine that automatically indexes user scripts:
+1. Simply drop any `.py`, `.c`, `.cpp`, or `.cu` file into `samples\` or any subfolder (e.g., `samples\my_benchmark\test.py`).
+2. The daemon immediately scans the folder hierarchy via `/api/samples`.
+3. In the Desktop GUI, open the **Code Sandbox** or **GPU Subsystem** tab — your new sample will be automatically available in the sample dropdown list without restarting the application or rebuilding.
 
 ---
 
 ## 10. Desktop GUI Control Room Operation
 
-UniCompute includes a dedicated desktop application with a real-time 60 FPS HTML5 Canvas topology visualizer and tabbed control panels for Objectives 1, 2, and 3.
+UniCompute features a dedicated, high-performance desktop workstation interface built on dark industrial aesthetics with real-time hardware telemetry and zero mock data.
 
-### 10.1 Launching the Desktop Window
-Launch the GUI directly via the provided single-click scripts:
+### 10.1 Launching the Desktop Application
 
+Launch the desktop workstation using one of the following methods:
+
+#### Method 1: Desktop Batch Launcher
 ```powershell
-# Using the Batch script:
 .\run-gui.bat
+```
 
-# Or using the PowerShell script:
+#### Method 2: PowerShell Launcher
+```powershell
 .\run-gui.ps1
 ```
 
-This starts the local daemon and opens a native, borderless desktop window via Microsoft Edge or Google Chrome (`msedge.exe --app="http://127.0.0.1:23080"`).
+#### Method 3: Direct Go Toolchain / Binary Execution
+```powershell
+# Standalone binary:
+.\bin\unicompute-gui.exe -id node-desktop -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
 
-### 10.2 60 FPS Topology Canvas & Visual Elements
-The main canvas provides real-time situational awareness of the volunteer fleet:
-- **Central Coordinator Mainframe**: Rendered as a cybernetic server tower node with pulsing heartbeat rings, live ping telemetry, and connection status.
-- **Solid Signaling Rays**: Permanent control beams connecting all registered rigs to the coordinator.
-- **Orbiting Peer Workstation Rigs**: Custom isometric desktop rigs featuring **Dual-Hemisphere Cores**:
-  - *Upper Hemisphere (Compute Core)*: Shows CPU container load and GPU hardware availability.
-  - *Lower Hemisphere (Storage Core)*: Visualizes CAS vault quota, used bytes, and chunk counts.
-- **Mutual P2P Laser DataChannels**: Pulsing, animated dashed laser conduits with flowing photon packets reflecting live WebRTC SCTP DataChannel transfers (`dc-ctrl` and `dc-bulk`).
-- **Interactive Hover HUD**: Hovering your mouse over any workstation rig projects a holographic HUD telemetry card displaying Node ID, public/private IP, NAT type, GPU specs, and student idle duration.
-- **Interactive Action Drawer**: Clicking any workstation opens a drawer to send mutual P2P connection handshakes, latency pings, or raw stream data.
+# Or via Go run:
+go run ./cmd/unicompute-gui -id node-desktop -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
+```
+This boots the local HTTP/WebSocket daemon and launches a native borderless application window using Microsoft Edge or Google Chrome (`msedge.exe --app="http://127.0.0.1:23080"`).
 
-### 10.3 Multi-Objective Dedicated Control Panels
-- **Tab 1: CPU Container Sandbox (Objective 2)**:
-  - Monaco-style dark code editor with pre-loaded samples (`calc.py`, `hello.c`, `fib.cpp`, `mem_limit_test.py`, `network_leak_test.py`).
-  - One-click execution targeting local or remote air-gapped Docker containers.
-  - Live console displaying stdout, stderr, execution duration, and exit status.
-- **Tab 2: GPU Acceleration & Governance (Objective 3)**:
-  - Real-time dials displaying RTX 4050 temperature, power draw (W), VRAM usage, and driver version.
-  - 50 ms Watchdog radar (AC power line status, battery percentage, keyboard/mouse idle timer).
-  - Interactive CUDA-to-AMD HIPIFY analyzer & translator with side-by-side code diff.
-  - Sandboxed Win32 JobObject GPU benchmark runner.
-- **Tab 3: CAS Storage Vault (Objective 1)**:
-  - Content-addressed blob stashing tool.
-  - Live chunk index table with SHA-256 hashes and sizes.
-  - One-click Bit-Rot Integrity Scrub audit.
-- **Tab 4: Fleet Console & Telemetry**:
-  - Live WebSocket event log capturing peer handshakes, NAT traversal states, and chunk deliveries.
+---
+
+### 10.2 Five-Tab Workstation Architecture
+
+The GUI provides 5 distinct views corresponding directly to the underlying architecture:
+
+| Tab | Name | Primary Capabilities |
+|---|---|---|
+| **1** | **P2P Topology Mesh** | Interactive 60 FPS Canvas showing signaling coordinator, orbiting workstation rigs, dual-hemisphere telemetry (compute & storage), animated SCTP laser beams, hover HUDs, and PC Inspector drawer with live RTT latency and P2P connection controls. |
+| **2** | **CPU Containers (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
+| **3** | **GPU Subsystem (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
+| **4** | **CAS Vault (O1)** | Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit. |
+| **5** | **Wire Logs & Diagnostics** | Real-time WebSocket event bus stream with category filtering (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing. |
+
+---
+
+### 10.3 Walkthrough: Standalone Single-Node Testing (No External Peer Needed)
+
+You can verify all capabilities on a single machine without spinning up multiple terminals or external nodes:
+
+1. **Launch the Workstation**:
+   Run `.\run-gui.bat` and wait for the application window to open.
+2. **Verify Local Node Status**:
+   - Check the header: Verify your Node ID, Join Code (e.g. `UC-XXXX-82B1`), and local NAT classification.
+   - Look at the top-right badges: Verify Storage and Watchdog state.
+3. **Test Objective 1 (CAS Vault)**:
+   - Click the **CAS Vault** tab in the top navigation bar.
+   - In the "Stash Data into Content-Addressed Vault" box, type: `UniCompute Objective 1 Sovereign Storage Test`.
+   - Click **Commit to Local Vault**.
+   - Notice the table immediately updates with a new SHA-256 blob ID.
+   - Click **View** next to the blob: A modal window opens displaying the exact blob ID, size in KiB, cryptographic confirmation `SHA-256 Valid: YES`, and the stored text.
+   - Click **Copy Content** or **Close**.
+   - Click **Scrub Storage Vault**: The system audits all stored blobs with SHA-256 checks and reports `✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot`.
+4. **Test Objective 3 (GPU Hardware & HIPIFY)**:
+   - Click the **GPU Subsystem** tab.
+   - Observe real-time GPU telemetry: Device name (e.g. `NVIDIA GeForce RTX 4050 Laptop GPU`), VRAM allocation bar, temperature, and power draw.
+   - Check the 50 ms Watchdog radar: Displays AC power status, user idle timer, and state banner.
+   - In the HIPIFY analyzer, select `portable_vector_add.cu` from the sample dropdown.
+   - Click **Analyze & Translate to HIP**: The system replaces CUDA calls (`cudaMalloc` -> `hipMalloc`) and displays `PORTABLE TO AMD` with green verdict badge.
+   - Now select `warp_reduction.cu` and click **Analyze & Translate to HIP**: The system flags fatal blockers (modulo 32 warp assumptions, `__shfl_down_sync`) and displays `BLOCKED ON AMD` with line-by-line diagnostics.
+   - In the Win32 JobObject runner, set batches to `20` and click **Execute JobObject Task**: The background process executes within the configured memory ceiling and saves a verified checkpoint.
+5. **Test Objective 2 (Code Execution Sandbox)**:
+   - Click the **CPU Containers** tab.
+   - Note the **Target Peer** selector defaults to `Local Worker (This Machine)`.
+   - In the sample dropdown, select `matrix_multiply.py (python)`.
+   - In the "Standard Input Stream (stdin)" box, type `48` (to set dimension to 48x48).
+   - Click **Run Code in Sandbox**: The code executes in the local container sandbox (or host fallback), streams stdout/stderr, and reports duration and `EXIT 0`.
+   - In the stdin box, type `hostname` and click **Run Shell Command**: Executes the host shell command locally and displays your PC's hostname.
+6. **Test Topology Inspector**:
+   - Click the **P2P Topology Mesh** tab.
+   - Click on the central node or the local workstation rig.
+   - The PC Inspector drawer slides open showing `(This PC)`, host CPU cores, OS/architecture, local NAT interface, and stored CAS metrics.
+7. **Test Wire Logs**:
+   - Click the **Wire Logs** tab.
+   - Verify that all previous actions (storage stash, GPU execution, code execution) produced corresponding event entries.
+   - Click the filter buttons (`P2P`, `Code`, `GPU`, `Storage`) to filter events by subsystem.
+
+---
+
+### 10.4 Walkthrough: Two-Node Distributed Cluster Testing
+
+To test real WebRTC P2P DataChannels, remote container execution, and live network metrics across two nodes:
+
+1. **Terminal 1 — Start Remote Worker Node B (CLI)**:
+   ```powershell
+   go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-desktop
+   ```
+2. **Terminal 2 — Start Desktop Workstation Node A (GUI)**:
+   ```powershell
+   go run ./cmd/unicompute-gui -id node-desktop -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
+   ```
+3. **Establish WebRTC P2P Connection in GUI**:
+   - Switch to the **P2P Topology Mesh** tab.
+   - You will see `node-B` orbiting the central coordinator tower.
+   - Click on `node-B` to open the **PC Inspector** drawer.
+   - Click **Connect P2P**: WebRTC ICE candidate gathering and SDP exchange execute over the coordinator WebSocket.
+   - Once connected, an animated green dashed laser conduit appears connecting `node-desktop` and `node-B` with flowing photon packets.
+   - Click **Ping** in the inspector: SCTP ACK confirms direct P2P link with live round-trip latency (e.g. `14 ms`).
+   - The inspector displays real path telemetry: Path type (`host-host` or `host-srflx`), SCTP 16 MiB window, and direct link status.
+4. **Execute Remote Code over WebRTC DataChannel**:
+   - Click **Target for Docker Job (O2)** in the inspector drawer (this automatically switches to the CPU Containers tab with `node-B` selected).
+   - Select `calc.py` from the sample dropdown.
+   - Click **Run Code in Sandbox**:
+     - The job payload is framed and transmitted over WebRTC DataChannel to `node-B`.
+     - `node-B` executes the script inside an air-gapped Docker container (`--network none`, `--memory 128m`).
+     - Standard output streams back to the GUI console in real time.
+5. **Execute Remote Shell Command**:
+   - In the stdin box, type `whoami`.
+   - Click **Run Shell Command**:
+     - Executes securely on `node-B` and returns the remote username.
+6. **Verify Dynamic Samples on Remote Worker**:
+   - Drop a new file `samples\python\my_test.py` onto disk.
+   - Select it from the dropdown in the GUI and run it on `node-B`. It executes seamlessly.
 
 ---
 

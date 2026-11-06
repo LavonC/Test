@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +133,7 @@ func (s *ServerState) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/code/run", s.handleCodeRun)
 	mux.HandleFunc("/api/shell/exec", s.handleShellExec)
 	mux.HandleFunc("/api/storage/blobs", s.handleStorageBlobs)
+	mux.HandleFunc("/api/storage/get", s.handleStorageGet)
 	mux.HandleFunc("/api/storage/put", s.handleStoragePut)
 	mux.HandleFunc("/api/storage/del", s.handleStorageDel)
 	mux.HandleFunc("/api/storage/scrub", s.handleStorageScrub)
@@ -160,16 +163,21 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 	wdStat, _ := s.node.GPUWatchdogStatus()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_id":         s.nodeConfig.NodeID,
-		"pool_id":         s.nodeConfig.PoolID,
-		"coordinator_url": s.coordinatorURL,
-		"storage":         usage,
-		"nat":             natRep,
-		"fleet_count":     len(fleet),
-		"peer_count":      len(peers),
-		"gpu_enabled":     gpuActive,
-		"gpu_profile":     gpuProf,
-		"watchdog":        wdStat,
+		"node_id":          s.nodeConfig.NodeID,
+		"pool_id":          s.nodeConfig.PoolID,
+		"coordinator_url":  s.coordinatorURL,
+		"storage":          usage,
+		"nat":              natRep,
+		"fleet_count":      len(fleet),
+		"peer_count":       len(peers),
+		"gpu_enabled":      gpuActive,
+		"gpu_profile":      gpuProf,
+		"watchdog":         wdStat,
+		"os":               runtime.GOOS,
+		"arch":             runtime.GOARCH,
+		"cpus":             runtime.NumCPU(),
+		"go_version":       runtime.Version(),
+		"docker_available": s.node.HasCodeExecutor(),
 	})
 }
 
@@ -205,9 +213,9 @@ func (s *ServerState) handleFleet(w http.ResponseWriter, r *http.Request) {
 func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 	connectedPeers := s.node.GetConnectedPeers()
 	type PeerInfo struct {
-		PeerID     string                     `json:"peer_id"`
-		IsDirect   bool                       `json:"is_direct"`
-		Metrics    *instrumentation.PathMetrics `json:"metrics,omitempty"`
+		PeerID   string                       `json:"peer_id"`
+		IsDirect bool                         `json:"is_direct"`
+		Metrics  *instrumentation.PathMetrics `json:"metrics,omitempty"`
 	}
 
 	result := make([]PeerInfo, 0, len(connectedPeers))
@@ -245,9 +253,9 @@ func (s *ServerState) handlePeerConnect(w http.ResponseWriter, r *http.Request) 
 
 	metrics, _ := s.node.GetPathMetrics(body.PeerID)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "connected",
-		"peer_id":  body.PeerID,
-		"metrics":  metrics,
+		"status":  "connected",
+		"peer_id": body.PeerID,
+		"metrics": metrics,
 	})
 }
 
@@ -385,8 +393,8 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 		Stdin    string `json:"stdin"`
 		Timeout  int    `json:"timeout"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PeerID == "" || body.Source == "" {
-		http.Error(w, "peer_id, language, and source required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Source == "" {
+		http.Error(w, "language and source required", http.StatusBadRequest)
 		return
 	}
 
@@ -405,6 +413,29 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(body.Timeout+8)*time.Second)
 	defer cancel()
 
+	// If local node or local worker is selected:
+	if body.PeerID == "local" || body.PeerID == s.nodeConfig.NodeID || body.PeerID == "" {
+		if !s.node.HasCodeExecutor() {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"job_id":      req.JobID,
+				"language":    body.Language,
+				"exit_code":   -1,
+				"duration_ms": 0,
+				"error":       "Docker is not available or code execution is disabled on this worker. Start Docker Desktop (WSL2 backend) to execute Tier 2 containers locally, or target a connected fleet peer.",
+			})
+			return
+		}
+
+		resp, err := s.node.ExecuteCodeLocal(ctx, req)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "resp": resp})
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Remote peer execution over WebRTC DataChannel
 	resp, err := s.node.ExecuteRemoteCode(ctx, body.PeerID, req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "resp": resp})
@@ -419,7 +450,7 @@ func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
 		Command string `json:"command"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Command == "" {
-		http.Error(w, "peer_id and command required", http.StatusBadRequest)
+		http.Error(w, "command required", http.StatusBadRequest)
 		return
 	}
 
@@ -432,6 +463,16 @@ func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
 			ShellType: remoteshell.ShellAuto,
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"results": res})
+		return
+	}
+
+	if body.PeerID == "local" || body.PeerID == s.nodeConfig.NodeID || body.PeerID == "" {
+		executor := remoteshell.NewSystemExecutor()
+		res := executor.Execute(ctx, remoteshell.ShellRequest{
+			Command:   body.Command,
+			ShellType: remoteshell.ShellAuto,
+		})
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
 
@@ -454,6 +495,36 @@ func (s *ServerState) handleStorageBlobs(w http.ResponseWriter, r *http.Request)
 	}
 	usage := s.node.StorageUsage()
 	writeJSON(w, http.StatusOK, map[string]any{"blobs": blobs, "usage": usage})
+}
+
+func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
+	blobID := r.URL.Query().Get("id")
+	if blobID == "" {
+		http.Error(w, "blob id required", http.StatusBadRequest)
+		return
+	}
+
+	reader, err := s.node.GetBlob(blobID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	defer reader.Close()
+
+	// Read up to 512 KiB for viewer preview
+	buf := make([]byte, 512*1024)
+	n, _ := io.ReadFull(reader, buf)
+	content := string(buf[:n])
+
+	verified, verifyErr := s.node.VerifyBlob(blobID)
+	isValid := verified && verifyErr == nil
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"blob_id":  blobID,
+		"content":  content,
+		"size":     n,
+		"verified": isValid,
+	})
 }
 
 func (s *ServerState) handleStoragePut(w http.ResponseWriter, r *http.Request) {
@@ -517,33 +588,48 @@ func (s *ServerState) handleSamples(w http.ResponseWriter, r *http.Request) {
 	}
 
 	samples := []SampleItem{}
-	files := []struct {
-		path     string
-		cat      string
-		lang     string
-	}{
-		{"samples/python/calc.py", "CPU Container (O2)", "python"},
-		{"samples/c/hello.c", "CPU Container (O2)", "c"},
-		{"samples/cpp/fib.cpp", "CPU Container (O2)", "cpp"},
-		{"samples/security/timeout_test.py", "Security (O2)", "python"},
-		{"samples/security/network_leak_test.py", "Security (O2)", "python"},
-		{"samples/security/mem_limit_test.py", "Security (O2)", "python"},
-		{"samples/gpu/portable_vector_add.cu", "GPU HIPIFY (O3)", "cuda"},
-		{"samples/gpu/warp_reduction.cu", "GPU Warp Blocker (O3)", "cuda"},
-		{"samples/gpu/inline_ptx.cu", "GPU PTX Blocker (O3)", "cuda"},
-	}
 
-	for _, f := range files {
-		data, err := os.ReadFile(f.path)
-		if err == nil {
+	// Dynamically scan samples/ directory recursively
+	_ = filepath.Walk("samples", func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		var lang, cat string
+
+		switch ext {
+		case ".py":
+			lang = "python"
+			if strings.Contains(path, "security") {
+				cat = "Security (O2)"
+			} else {
+				cat = "Python Container (O2)"
+			}
+		case ".c":
+			lang = "c"
+			cat = "C Container (O2)"
+		case ".cpp", ".cc":
+			lang = "cpp"
+			cat = "C++ Container (O2)"
+		case ".cu":
+			lang = "cuda"
+			cat = "GPU Kernel (O3)"
+		default:
+			return nil
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr == nil {
 			samples = append(samples, SampleItem{
-				Name:     filepath.Base(f.path),
-				Category: f.cat,
-				Language: f.lang,
+				Name:     filepath.Base(path),
+				Category: cat,
+				Language: lang,
 				Content:  string(data),
 			})
 		}
-	}
+		return nil
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{"samples": samples})
 }

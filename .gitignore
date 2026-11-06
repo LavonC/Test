@@ -17,5 +17,7 @@ __pycache__/
 # Architecture output
 bin/
 
+ui_extracted/
+
 GEMINI.md
 
