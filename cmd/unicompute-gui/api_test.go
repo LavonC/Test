@@ -482,3 +482,32 @@ func TestStorageCAS_PutAndGet(t *testing.T) {
 		t.Errorf("expected valid == true, got %v", getRes["valid"])
 	}
 }
+
+func TestAPI_LocalShellBlockedByDefault(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	reqBody := `{"peer_id":"local","command":"echo hi"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/shell/exec", bytes.NewBufferString(reqBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when EnableRemoteShell is false, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	expectedErr := "local/remote shell execution is disabled (start with -enable-remote-shell to opt in)"
+	if res["error"] != expectedErr {
+		t.Errorf("expected error %q, got %v", expectedErr, res["error"])
+	}
+}
+

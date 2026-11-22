@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,12 +30,14 @@ func TestTransport_WebRTCConnectionAndChunkTransfer(t *testing.T) {
 	trackerA := instrumentation.NewTracker()
 	trackerB := instrumentation.NewTracker()
 
-	var mgrA, mgrB *Manager
+	var mgrAVal, mgrBVal atomic.Pointer[Manager]
 
 	// Signaling client for Node A
 	sigA, err := signaling.NewClient(wsURL, "node-A", func(env protocol.Envelope) {
-		if env.Type != protocol.MsgRegisterAck && mgrA != nil {
-			_ = mgrA.HandleSignalingEnvelope(env)
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrAVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
 		}
 	})
 	if err != nil {
@@ -44,8 +47,10 @@ func TestTransport_WebRTCConnectionAndChunkTransfer(t *testing.T) {
 
 	// Signaling client for Node B
 	sigB, err := signaling.NewClient(wsURL, "node-B", func(env protocol.Envelope) {
-		if env.Type != protocol.MsgRegisterAck && mgrB != nil {
-			_ = mgrB.HandleSignalingEnvelope(env)
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrBVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
 		}
 	})
 	if err != nil {
@@ -53,21 +58,23 @@ func TestTransport_WebRTCConnectionAndChunkTransfer(t *testing.T) {
 	}
 	defer sigB.Close()
 
-	mgrA, err = NewManager(Config{
+	mgrA, err := NewManager(Config{
 		NodeID: "node-A",
 	}, sigA, trackerA)
 	if err != nil {
 		t.Fatalf("failed to create mgrA: %v", err)
 	}
 	defer mgrA.Close()
+	mgrAVal.Store(mgrA)
 
-	mgrB, err = NewManager(Config{
+	mgrB, err := NewManager(Config{
 		NodeID: "node-B",
 	}, sigB, trackerB)
 	if err != nil {
 		t.Fatalf("failed to create mgrB: %v", err)
 	}
 	defer mgrB.Close()
+	mgrBVal.Store(mgrB)
 
 	// Capture incoming connection on Node B
 	connBChan := make(chan *PeerConnection, 1)

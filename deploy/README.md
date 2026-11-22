@@ -35,7 +35,7 @@ DOMAIN=coordinator.yourdomain.com
 PUBLIC_IP=$(curl -s https://api.ipify.org)
 REALM=unicompute.edu
 TURN_SECRET=campus-volunteer-secret-2026
-POSTGRES_PASSWORD=unicompute_secure_pass
+AUTH_TOKEN=<your-cluster-secret>
 EOF
 ```
 

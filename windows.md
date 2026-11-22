@@ -442,7 +442,6 @@ go run ./cmd/unicompute-node -id node-B -signaling ws://127.0.0.1:8080/ws -auth-
 # Method 2 (Go Toolchain):
 go run ./cmd/unicompute-node -id node-A -signaling ws://127.0.0.1:8080/ws -auth-token mysecrettoken
 ```
-```
 
 ---
 
@@ -1354,7 +1353,7 @@ The GUI features a unified 7-tab layout bridging Coordinator management and Work
 | **2** | **Coordinator Hub** | Dedicated control center for the signaling & daemon subsystem. Displays daemon uptime, listen socket, mTLS status, ED25519 join token presentation with QR preview and token rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, HEALTH \| CONN vitals matrix, and cryptographic keyring. |
 | **3** | **CPU Sandbox (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
 | **4** | **GPU Acceleration (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
-| **5** | **Storage & Shard Matrix** | Reed-Solomon RS(4,2) 6-cell striping matrix for distributed datasets (`open-llama-weights-v2`, `genomics-chm13-alignments`, and `local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification. |
+| **5** | **Storage & Shard Matrix** | Content-addressed storage vault (`local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification. |
 | **6** | **Cluster Task Queue** | Dynamic task queue tracking active, queued, and completed jobs across the fleet. Records real-time compute jobs dispatched via GPU DirectML and CPU code execution (honest runtime telemetry initialized with 0 fake seed tasks). |
 | **7** | **Cluster Wire Logs** | Real-time WebSocket event bus stream with category filtering (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing. |
 

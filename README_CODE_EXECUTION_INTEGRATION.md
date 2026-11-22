@@ -11,27 +11,20 @@ New files (extract these into the repository root so the paths below line up):
 - `pkg/codeexec/types_test.go` — protocol and size-limit tests.
 - `pkg/node/codeexec.go` — remote request/response routing, result correlation, worker opt-in and peer-ID allowlist.
 - `cmd/unicompute-node/console_args.go` — quoted path parsing for the interactive terminal.
-- `apply_integration.py` — adds the fields, imports, CLI flags, `run` command and reliable stream channel setting to existing files.
 
-Existing files changed by the installer:
+Existing files changed by the integration:
 
 - `pkg/node/node.go` — imports codeexec, stores executor/allowlist/pending job state, and dispatches code-job messages.
 - `cmd/unicompute-node/main.go` — adds `-enable-code-execution`, `-code-allowlist`, `-code-timeout`, help text and `run` command.
 - `pkg/transport/manager.go` — makes the stream DataChannel reliable. Code-job request/response messages must not be sent on the current lossy (three-retransmission) channel.
 
-## Apply the integration
+## Integration Status
 
-1. Commit or back up your current changes first.
-2. Extract this bundle directly into your `Test` repository root. The new `pkg/` and `cmd/` files should merge into the existing folders.
-3. From the repository root, run:
+Remote code execution is already integrated natively into `pkg/codeexec`, `pkg/node`, and `cmd/unicompute-node`. No patching scripts or external installers are required. All tests pass via standard Go toolchain commands:
 
-   ```bash
-   python apply_integration.py
-   gofmt -w pkg/codeexec/*.go pkg/node/codeexec.go cmd/unicompute-node/*.go
-   go test ./...
-   ```
-
-The script checks the expected source anchors and rolls back edits to existing files if an anchor does not match. Run it once. Inspect `git diff` before committing.
+```bash
+go test ./...
+```
 
 ## Prepare the worker
 

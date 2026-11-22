@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/webrtc/v3"
 	"github.com/unicompute/obj1/pkg/blobstore"
 	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/gpu"
@@ -236,6 +237,22 @@ func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
 
 func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 	peerID := pc.RemotePeerID
+
+	var discOnce sync.Once
+	pc.SetOnStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateDisconnected ||
+			state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateClosed {
+			discOnce.Do(func() {
+				n.mu.RLock()
+				cb := n.onPeerDisc
+				n.mu.RUnlock()
+				if cb != nil {
+					cb(peerID)
+				}
+			})
+		}
+	})
 
 	pc.SetOnChunkRequest(func(chunkID string) {
 		stat, err := n.store.Stat(chunkID)

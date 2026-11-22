@@ -3,6 +3,7 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -162,8 +163,11 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 		Simulated: true,
 	}
 
+	// AssignProcess only applies when an external child worker PID is supplied via req.ProcessID.
 	if req.ProcessID > 0 {
-		_ = m.AssignProcess(req.ProcessID)
+		if err := m.AssignProcess(req.ProcessID); err != nil {
+			log.Printf("[GPU Manager] Warning: failed to assign process %d to sandbox: %v", req.ProcessID, err)
+		}
 	}
 
 	// 1. Pre-flight check: if request is native CUDA code and this machine is AMD or Intel

@@ -1356,6 +1356,14 @@ html, body {
   font-size: 11px;
   transition: all 0.2s ease;
 }
+.merkle-badge-error {
+  background-color: rgba(244, 63, 94, 0.15);
+  border: 1px solid rgba(244, 63, 94, 0.4);
+  color: #fda4af;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all 0.2s ease;
+}
 .merkle-badge-verifying {
   background-color: rgba(56, 189, 248, 0.15);
   border: 1px solid rgba(56, 189, 248, 0.4);

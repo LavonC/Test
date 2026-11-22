@@ -7,7 +7,7 @@ def process_stream():
     print("==================================================")
     print("   UniCompute Worker: Python Data Processing Job  ")
     print("==================================================")
-    raw_input = sys.stdin.read()
+    raw_input = sys.stdin.read().lstrip('\ufeff')
     if not raw_input.strip():
         print("[WARN] No input received on stdin. Generating default test data.")
         numbers = [42.0, 17.5, 88.2, 9.1, 104.6, 55.0, 31.4, 76.9]

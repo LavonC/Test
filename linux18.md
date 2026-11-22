@@ -72,7 +72,7 @@ The project compiles into standalone, CGO-free Linux ELF executables in the `bin
 
 | Binary | Description |
 |---|---|
-| `bin/unicompute-gui-linux` | **Desktop GUI Control Room**. Static CGO-free ELF executable with embedded 60 FPS HTML5 Canvas topology engine, hardware dials, and multi-objective tabs. Protected with cryptographic session token auth and strict loopback Origin checks. Completely independent of host Glibc 2.27. |
+| `bin/unicompute-gui` | **Desktop GUI Control Room**. Static CGO-free ELF executable with embedded 60 FPS HTML5 Canvas topology engine, hardware dials, and multi-objective tabs. Protected with cryptographic session token auth and strict loopback Origin checks. Completely independent of host Glibc 2.27. |
 | `bin/unicompute-node` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, remote shell (opt-in + allowlist), and GPU acceleration. |
 | `bin/unicompute-coordinator` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. Protected via cluster auth tokens (`-auth-token`) and duplicate node ID hijacking rejection. |
 | `bin/unicompute-relay` | **Contributor Relay Daemon (Deprecated)**. Legacy byte relay fallback; modern deployments rely on native Pion ICE and embedded/external TURN. |
@@ -344,7 +344,7 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-coordinator ./cmd/unic
 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-relay ./cmd/unicompute-relay
 
 # 4. Compile Desktop GUI Control Room (Static CGO-Free Linux ELF)
-CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-gui-linux ./cmd/unicompute-gui
+CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/unicompute-gui ./cmd/unicompute-gui
 
 # Ensure executables have execution permissions
 chmod +x bin/*
@@ -355,10 +355,10 @@ chmod +x bin/*
 ### Binary Verification:
 ```bash
 ls -lh bin/
-file bin/unicompute-gui-linux
-# Output: bin/unicompute-gui-linux: ELF 64-bit LSB executable, x86-64, statically linked, stripped
+file bin/unicompute-gui
+# Output: bin/unicompute-gui: ELF 64-bit LSB executable, x86-64, statically linked, stripped
 
-ldd bin/unicompute-gui-linux
+ldd bin/unicompute-gui
 # Output: not a dynamic executable
 ```
 Because the binaries are completely static and independent of Glibc, they execute flawlessly on Ubuntu 18.04 kernels without library conflicts or glibc 2.27 upgrade requirements.
@@ -434,7 +434,7 @@ Open **two separate terminal tabs or windows**:
 >   curl -s http://127.0.0.1:8080/health
 >   curl -s http://127.0.0.1:8080/api/nodes
 >   ```
-> - **Visualizing the Coordinator in the Desktop GUI**: The visual representation of the coordinator lives inside the **Desktop GUI Control Room** (`unicompute-gui-linux`). When you launch the GUI, **Tab 1: P2P Topology Mesh** renders the coordinator as the central glowing mainframe tower, dynamically surrounded by orbiting worker rigs.
+> - **Visualizing the Coordinator in the Desktop GUI**: The visual representation of the coordinator lives inside the **Desktop GUI Control Room** (`unicompute-gui`). When you launch the GUI, **Tab 1: P2P Topology Mesh** renders the coordinator as the central glowing mainframe tower, dynamically surrounded by orbiting worker rigs.
 
 ### Option A: Public Live Coordinator on Render
 Both nodes connect over the Internet via the production coordinator on Render:
@@ -1242,8 +1242,8 @@ Floating-point matrix multiplication with validation and optional stdin dimensio
 
 **File**: `samples/python/matrix_multiply.py`
 ```bash
-# Run via CLI:
-./bin/unicompute-node -run node-B python samples/python/matrix_multiply.py
+# Run in interactive REPL:
+> run node-B python samples/python/matrix_multiply.py
 ```
 *Expected Output:*
 ```text
@@ -1265,8 +1265,8 @@ Heap buffer allocation, integer bit manipulation, and Murmur3-32 hashing in C17.
 
 **File**: `samples/c/system_info.c`
 ```bash
-# Run via CLI:
-./bin/unicompute-node -run node-B c samples/c/system_info.c
+# Run in interactive REPL:
+> run node-B c samples/c/system_info.c
 ```
 *Expected Output:*
 ```text
@@ -1310,7 +1310,7 @@ UniCompute nodes are fully interoperable across operating systems:
 
 ## 12. Desktop GUI Control Room Operation on Ubuntu 18.04 LTS
 
-The Desktop GUI Control Room is compiled as a static CGO-free ELF binary (`bin/unicompute-gui-linux`), allowing it to run natively on Ubuntu 18.04 without requiring glibc updates.
+The Desktop GUI Control Room is compiled as a static CGO-free ELF binary (`bin/unicompute-gui`), allowing it to run natively on Ubuntu 18.04 without requiring glibc updates.
 
 ### 12.1 Launching the Desktop Window (Local & Headless)
 Start the GUI using the automated script:
@@ -1322,7 +1322,7 @@ chmod +x run-gui.sh
 
 On desktop systems, this starts the daemon on port 23080 and automatically launches Chromium in app mode (`chromium-browser --app="http://127.0.0.1:23080"`). On headless 18.04 servers, run with `-headless`:
 ```bash
-./bin/unicompute-gui-linux -headless -port 23080
+./bin/unicompute-gui -headless -port 23080
 # Or:
 go run ./cmd/unicompute-gui -headless -port 23080
 ```
@@ -1342,7 +1342,7 @@ The GUI provides a comprehensive 7-tab control room uniting Coordinator administ
 - **7. Cluster Wire Logs**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
 
 ### 12.3 Standalone Single-Node Testing on Ubuntu 18.04 (1 Node)
-1. Start GUI: `./run-gui.sh` (or `./bin/unicompute-gui-linux -headless -port 23080`).
+1. Start GUI: `./run-gui.sh` (or `./bin/unicompute-gui -headless -port 23080`).
 2. Open `http://localhost:23080#token=<sessionToken>` (copy the `#token=...` session link printed in the startup banner).
 3. Click the **`[HEALTH & CONN]`** titlebar pill: Switches to **Coordinator Hub** (Tab 2). Observe daemon uptime, socket status, copy the join token, and adjust the blind relay fallback slider.
 4. In **Storage & Shard Matrix** (Tab 5), inspect the local CAS storage vault card, click **Verify All Merkle Roots** to audit Merkle trees via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
@@ -1359,7 +1359,7 @@ The GUI provides a comprehensive 7-tab control room uniting Coordinator administ
    ```
 2. Terminal 2 (GUI Node A):
    ```bash
-   ./bin/unicompute-gui-linux -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
+   ./bin/unicompute-gui -id node-A -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
    ```
 3. **P2P Connection Workflows (Automatic vs. Manual)**:
    - **Workflow A: Automatic On-Demand Connection (Zero-Friction - Recommended)**:
@@ -1417,7 +1417,7 @@ sudo journalctl -u unicompute-node.service -f
 
 ---
 
-## 13. Ubuntu 18.04 Specific Troubleshooting & Diagnostics
+## 14. Ubuntu 18.04 Specific Troubleshooting & Diagnostics
 
 ### 1. `apt-get 404 Not Found` when updating repositories
 - **Cause**: Ubuntu 18.04 is past its standard EOL (May 2023). Standard Ubuntu mirror servers no longer host Bionic repositories.

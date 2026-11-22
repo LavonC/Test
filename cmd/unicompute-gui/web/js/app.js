@@ -1041,12 +1041,29 @@ function initCoordinatorHub() {
   if (restartBtn) {
     restartBtn.addEventListener('click', () => {
       const orig = restartBtn.innerHTML;
-      restartBtn.innerHTML = '<span class="material-symbols-outlined text-base animate-spin">refresh</span><span>Restarting...</span>';
-      setTimeout(() => {
-        restartBtn.innerHTML = orig;
-        appendLog('DAEMON', 'Coordinator daemon restarted. mTLS handshake and QUIC socket verified.');
-        loadCoordinatorStatus();
-      }, 1200);
+      restartBtn.innerHTML = '<span class="material-symbols-outlined text-base animate-spin">refresh</span><span>Reconnecting...</span>';
+      fetch('/api/coordinator/status')
+        .then(r => r.json())
+        .then(st => {
+          const url = (st && st.coordinator_url) ? st.coordinator_url : (document.getElementById('coordinatorSelect')?.value || 'wss://unicompute-coordinator.onrender.com/ws');
+          return fetch('/api/coordinator/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+          });
+        })
+        .then(r => r.json())
+        .then(() => {
+          appendLog('DAEMON', 'Reconnecting to signaling coordinator...');
+          setTimeout(() => {
+            restartBtn.innerHTML = orig;
+            loadCoordinatorStatus();
+          }, 1000);
+        })
+        .catch(err => {
+          restartBtn.innerHTML = orig;
+          appendLog('DAEMON', `Coordinator reconnect error: ${err.message}`);
+        });
     });
   }
 
@@ -1138,7 +1155,7 @@ function loadCoordinatorStatus() {
       if (socketElem) socketElem.textContent = data.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)';
 
       const mtlsElem = document.getElementById('coordMtls');
-      if (mtlsElem) mtlsElem.textContent = 'DTLS 1.2 / SRTP';
+      if (mtlsElem) mtlsElem.textContent = 'DTLS / SCTP (WebRTC DataChannel)';
 
       const daemonStat = document.getElementById('coordDaemonStatus');
       if (daemonStat) daemonStat.textContent = data.status || 'RUNNING';
@@ -1274,7 +1291,6 @@ function initShardMatrix() {
         });
     });
   }
-}
 
   const shardBtn = document.getElementById('btnShardNewDataset');
   if (shardBtn) {

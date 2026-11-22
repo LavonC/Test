@@ -105,7 +105,8 @@ foreach ($pkg in $pkgs) {
     $sw.Stop()
     $dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
 
-    $passed = ($LASTEXITCODE -eq 0) -or (($out -join "`n") -like "*PASS*") -or (($out -join " ") -like "*Application Control policy*")
+    $outText = $out -join "`n"
+    $passed = ($LASTEXITCODE -eq 0) -and ($outText -cnotlike "*FAIL*")
     if ($passed) {
         Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $true -Duration $dur -Details "Go test passed"
     } else {
@@ -179,28 +180,8 @@ if ($LASTEXITCODE -eq 0 -and (Test-Path $cppExe)) {
     try { $cppOut = & ".\$cppExe" 2>&1 } catch {}
     Remove-Item $cppExe -Force -ErrorAction SilentlyContinue
 }
-if (-not $cppOut -or ($cppOut -join " ") -like "*Application Control policy*") {
-    $cppOut = python -c "
-print('==================================================')
-print('    UniCompute Worker: C++ Fibonacci Benchmark    ')
-print('==================================================')
-a, b = 0, 1
-for i in range(45):
-    print(f'{i:3d}: {a:20d}', end='')
-    if i > 1 and a > 0:
-        ratio = a / prev
-        print(f'  (Ratio: {ratio:.8f})')
-    else:
-        print()
-    prev = a
-    a, b = b, a + b
-print('==================================================')
-print('Approaching Golden Ratio (phi): 1.6180339887...')
-print('Status: C++ computation completed successfully.')
-" 2>&1
-}
 $sw.Stop()
-$passed = ($cppOut -join "`n") -like "*Approaching Golden Ratio (phi)*"
+$passed = ($null -ne $cppOut) -and (($cppOut -join "`n") -like "*Approaching Golden Ratio (phi)*")
 Record-Result -Category "Samples" -TestName "samples/cpp/fib.cpp" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s" -Details "Fibonacci 45 steps and Golden Ratio converged"
 
 # Sample 3: Python Data Processing (samples/python/calc.py + input.txt)
@@ -231,34 +212,6 @@ Record-Result -Category "Samples" -TestName "samples/security/timeout_test.py" -
 Write-Host "`n--> Running Standalone GPU & Model Capsule Suite (cmd/test-samples)..." -ForegroundColor Yellow
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $samplesOut = go run ./cmd/test-samples 2>&1
-if (($samplesOut -join " ") -like "*Application Control policy*") {
-    $samplesOut = python -c "
-import os, json, hashlib
-
-print('[TEST GROUP 1] GPU Samples & HIPIFY Analysis/Translation')
-with open('samples/gpu/portable_vector_add.cu', 'r') as f:
-    c = f.read()
-repl = c.count('cudaMalloc') + c.count('cudaMemcpy') + c.count('cudaFree')
-print(f'  -> [PASS] samples/gpu/portable_vector_add.cu: Translated to HIP C++ ({repl} replacements, Action=TRANSLATE_TO_HIP)')
-
-with open('samples/gpu/warp_reduction.cu', 'r') as f:
-    c = f.read()
-print('  -> [PASS] samples/gpu/warp_reduction.cu: Blocked on 32-thread warp assumptions (2 issues, Action=EXECUTE_NVIDIA_ONLY)')
-
-with open('samples/gpu/inline_ptx.cu', 'r') as f:
-    c = f.read()
-print('  -> [PASS] samples/gpu/inline_ptx.cu: Blocked on inline PTX assembly (1 issues, Action=REJECT_RECOMMEND_ONNX)')
-
-with open('samples/gpu/test_model.json', 'r') as f:
-    data = json.load(f)
-h = hashlib.sha256(json.dumps(data, separators=(',', ':')).encode()).hexdigest()
-print('  -> [PASS] samples/gpu/test_model.json: Valid JSON capsule parsed (LayerCount=3, WeightsBytes=122880)')
-print('  -> [PASS] Checkpoint integrity verified successfully (SHA-256: ' + h + ')')
-
-print('  -> [PASS] samples/security/network_leak_test.py: Wire protocol encode/decode verified (CodeTask payload integrity OK)')
-print('  -> [PASS] samples/security/mem_limit_test.py: Wire protocol encode/decode verified (128MB payload container config OK)')
-" 2>&1
-}
 $sw.Stop()
 $dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
 
@@ -324,7 +277,7 @@ try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $gpu = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu" -Headers $authHeaders
     $sw.Stop()
-    $passed = $gpu.enabled -and ($gpu.profile.vendor -eq "NVIDIA")
+    $passed = $gpu.enabled -and ($null -ne $gpu.profile)
     Record-Result -Category "GUI API" -TestName "/api/gpu" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Device=$($gpu.profile.device_name), Temp=$($gpu.profile.temperature_c)C"
 
     # 4.3 Samples API
@@ -375,6 +328,18 @@ try {
     }
     $sw.Stop()
     Record-Result -Category "GUI API" -TestName "/api/shell/exec (Unauthenticated 401)" -Passed $unauthBlocked -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Unauthenticated remote shell access rejected with 401 Unauthorized"
+
+    # 4.9 Frontend JavaScript Syntax Verification
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $nodeAppOut = node --check cmd/unicompute-gui/web/js/app.js 2>&1
+        $appExit = $LASTEXITCODE
+        $nodeTopoOut = node --check cmd/unicompute-gui/web/js/topology.js 2>&1
+        $topoExit = $LASTEXITCODE
+        $sw.Stop()
+        $jsPassed = ($appExit -eq 0) -and ($topoExit -eq 0)
+        Record-Result -Category "GUI API" -TestName "Frontend JS Syntax" -Passed $jsPassed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "node --check on app.js and topology.js"
+    }
 
 } finally {
     Write-Host "`n--> Stopping GUI test daemon..." -ForegroundColor Yellow

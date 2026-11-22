@@ -415,6 +415,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	startTime := s.startTime
 	relayThreshold := s.relayThreshold
 	joinToken := s.joinToken
+	authToken := s.nodeConfig.AuthToken
 	s.mu.RUnlock()
 
 	httpURL := coordURL
@@ -437,8 +438,8 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 		// Health succeeded; query coordinator /api/nodes
 		req, err := http.NewRequest("GET", httpURL+"/api/nodes", nil)
 		if err == nil {
-			if s.nodeConfig.AuthToken != "" {
-				req.Header.Set("Authorization", "Bearer "+s.nodeConfig.AuthToken)
+			if authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+authToken)
 			}
 			nodesResp, err := client.Do(req)
 			if err == nil && nodesResp.StatusCode == http.StatusOK {
@@ -1030,7 +1031,16 @@ func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.PeerID == "local" || body.PeerID == s.nodeConfig.NodeID || body.PeerID == "" {
+	s.mu.RLock()
+	enabled := s.nodeConfig.EnableRemoteShell
+	nodeID := s.nodeConfig.NodeID
+	s.mu.RUnlock()
+
+	if body.PeerID == "local" || body.PeerID == nodeID || body.PeerID == "" {
+		if !enabled {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "local/remote shell execution is disabled (start with -enable-remote-shell to opt in)"})
+			return
+		}
 		executor := remoteshell.NewSystemExecutor()
 		res := executor.Execute(ctx, remoteshell.ShellRequest{
 			Command:   body.Command,

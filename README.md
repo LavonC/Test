@@ -161,7 +161,7 @@ UniCompute provides an industrial-grade Desktop Workstation GUI (`cmd/unicompute
 
 ### Launching the Desktop Workstation
 - **Windows**: Run `.\run-gui.bat` or `.\run-gui.ps1`
-- **Linux**: Run `./run-gui.sh` (or `./bin/unicompute-gui-linux -headless -port 23080`)
+- **Linux**: Run `./run-gui.sh` (or `./bin/unicompute-gui -headless -port 23080`)
 - **Go Toolchain**: `go run ./cmd/unicompute-gui -port 23080`
 
 For complete platform-specific operational guides, multi-node deployment walkthroughs, and security test suites, refer to:

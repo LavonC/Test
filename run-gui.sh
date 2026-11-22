@@ -5,7 +5,7 @@ echo "  UniCompute Desktop Control Room (Linux: Ubuntu 18 / 20 / 24 LTS)"
 echo "======================================================================="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_PATH="$SCRIPT_DIR/bin/unicompute-gui-linux"
+BIN_PATH="$SCRIPT_DIR/bin/unicompute-gui"
 
 if [ -f "$BIN_PATH" ]; then
     echo "Running static ELF binary: $BIN_PATH"

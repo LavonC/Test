@@ -757,3 +757,87 @@ func TestNode_ConnectPeer_SingleOnPeerConnectedCallback(t *testing.T) {
 		t.Fatalf("expected SetOnPeerConnected to fire exactly 1 time, got %d", count)
 	}
 }
+
+func TestNode_SetOnPeerDisconnected(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "node-test-peer-disc-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeDir1 := filepath.Join(tempDir, "store1")
+	storeDir2 := filepath.Join(tempDir, "store2")
+
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "disc-cb-node-1",
+		PoolID:       "cb-pool",
+		StorageDir:   storeDir1,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 1: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "disc-cb-node-2",
+		PoolID:       "cb-pool",
+		StorageDir:   storeDir2,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 2: %v", err)
+	}
+	defer n2.Close()
+
+	discCh := make(chan string, 1)
+	n1.SetOnPeerDisconnected(func(peerID string) {
+		if peerID == "disc-cb-node-2" {
+			select {
+			case discCh <- peerID:
+			default:
+			}
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("node 1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("node 2 Start failed: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	conn1, err := n1.ConnectPeer(ctx, "disc-cb-node-2")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	_ = conn1.Close()
+
+	select {
+	case peerID := <-discCh:
+		if peerID != "disc-cb-node-2" {
+			t.Fatalf("expected disconnected peer 'disc-cb-node-2', got %q", peerID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for SetOnPeerDisconnected callback")
+	}
+}
+
