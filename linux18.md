@@ -72,10 +72,11 @@ The project compiles into standalone, CGO-free Linux ELF executables in the `bin
 
 | Binary | Description |
 |---|---|
-| `bin/unicompute-gui-linux` | **Desktop GUI Control Room**. Static CGO-free ELF executable with embedded 60 FPS HTML5 Canvas topology engine, hardware dials, and multi-objective tabs. Completely independent of host Glibc 2.27. |
-| `bin/unicompute-node` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, and GPU acceleration. |
-| `bin/unicompute-coordinator` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. |
-| `bin/unicompute-relay` | **Contributor Relay Daemon**. Blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
+| `bin/unicompute-gui-linux` | **Desktop GUI Control Room**. Static CGO-free ELF executable with embedded 60 FPS HTML5 Canvas topology engine, hardware dials, and multi-objective tabs. Protected with cryptographic session token auth and strict loopback Origin checks. Completely independent of host Glibc 2.27. |
+| `bin/unicompute-node` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, remote shell (opt-in + allowlist), and GPU acceleration. |
+| `bin/unicompute-coordinator` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. Protected via cluster auth tokens (`-auth-token`) and duplicate node ID hijacking rejection. |
+| `bin/unicompute-relay` | **Contributor Relay Daemon (Deprecated)**. Legacy byte relay fallback; modern deployments rely on native Pion ICE and embedded/external TURN. |
+| `bin/verify-obj3` | **Objective 3 Automated Hardware Verification Suite**. 7-point validation suite for physical GPU, watchdog, sandboxing, and simulated ONNX execution. |
 
 **Live Production Coordinator**: A central signaling coordinator is live on Render at:
 `wss://unicompute-coordinator.onrender.com/ws`
@@ -420,14 +421,15 @@ Open **two separate terminal tabs or windows**:
 - **Terminal 2 (Client Node A)**: Connects to Node B, transfers files into the CAS vault, issues shell commands, and submits jobs.
 
 > [!NOTE]
-> **Coordinator Architecture & GUI Visualization**:
+> **Coordinator Architecture & Authentication**:
 > - The Coordinator (`unicompute-coordinator` or the live Render cloud deployment) is a **headless signaling hub and embedded TURN server**. It intentionally has **no standalone web GUI**, ensuring zero footprint and maximum throughput on the signaling control plane.
+> - **Cluster Authentication (`-auth-token`)**: When exposed on non-loopback addresses, the coordinator enforces cluster secret token authentication to prevent unauthorized signaling, node hijacking, and enumeration. Pass `-auth-token <secret>` or set `UNICOMPUTE_AUTH_TOKEN`. (For offline local testing without authentication, pass `-insecure-no-auth`).
 > - **Verifying Coordinator Health via API**:
 >   ```bash
 >   # Health & Uptime Check (Live Render):
 >   curl -s https://unicompute-coordinator.onrender.com/health
->   # Discovered Fleet Registry (Live Render):
->   curl -s https://unicompute-coordinator.onrender.com/api/nodes
+>   # Discovered Fleet Registry (add Bearer header if auth is enabled):
+>   curl -s -H "Authorization: Bearer <token>" https://unicompute-coordinator.onrender.com/api/nodes
 >   # Local Coordinator:
 >   curl -s http://127.0.0.1:8080/health
 >   curl -s http://127.0.0.1:8080/api/nodes
@@ -439,12 +441,15 @@ Both nodes connect over the Internet via the production coordinator on Render:
 
 #### Terminal 1 — Start Worker Node B
 ```bash
+# Enables Docker code execution sandbox for node-A AND allows remote shell execution for node-A
 ./bin/unicompute-node \
   -id node-B \
   -signaling wss://unicompute-coordinator.onrender.com/ws \
   -enable-code-execution \
   -code-allowlist node-A \
-  -code-timeout 15
+  -code-timeout 15 \
+  -enable-remote-shell \
+  -shell-allowlist node-A
 ```
 
 *Worker Node B logs output:*
@@ -494,7 +499,9 @@ If testing offline or on an isolated local network:
   -signaling ws://127.0.0.1:8080/ws \
   -enable-code-execution \
   -code-allowlist node-A \
-  -code-timeout 15
+  -code-timeout 15 \
+  -enable-remote-shell \
+  -shell-allowlist node-A
 ```
 
 #### Terminal 2 — Start Client Node A
@@ -1330,25 +1337,25 @@ The GUI provides a comprehensive 7-tab control room uniting Coordinator administ
 - **2. Coordinator Hub**: Cluster signaling and daemon operations center with live daemon uptime counter, listen socket address, TLS/mTLS verification, ED25519 join token presentation with cryptographic QR preview and token rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, HEALTH | CONN vitals matrix, and cryptographic keyring.
 - **3. CPU Sandbox (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
 - **4. GPU Acceleration (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
-- **5. Storage & Shard Matrix**: Reed-Solomon RS(4,2) 6-cell striping layout for distributed dataset shards (`open-llama-weights-v2`, `genomics-chm13-alignments`, and `local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification.
-- **6. Cluster Task Queue**: Global ClassAd matchmaking task queue tracking active, queued, and completed DAG jobs across the fleet (`#JOB-8104` to `#JOB-8107`). Dynamically appends real-time compute jobs dispatched via GPU DirectML and CPU code execution.
+- **5. Storage & Shard Matrix**: Reed-Solomon RS(4,2) 6-cell striping layout for local CAS vault (`local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification.
+- **6. Cluster Task Queue**: Global ClassAd matchmaking task queue tracking active, queued, and completed DAG jobs across the fleet (honest runtime telemetry initialized with 0 fake seed tasks). Dynamically appends real-time compute jobs dispatched via GPU DirectML and CPU code execution.
 - **7. Cluster Wire Logs**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
 
 ### 12.3 Standalone Single-Node Testing on Ubuntu 18.04 (1 Node)
 1. Start GUI: `./run-gui.sh` (or `./bin/unicompute-gui-linux -headless -port 23080`).
-2. Open `http://localhost:23080` (or `http://<server-ip>:23080`).
+2. Open `http://localhost:23080#token=<sessionToken>` (copy the `#token=...` session link printed in the startup banner).
 3. Click the **`[HEALTH & CONN]`** titlebar pill: Switches to **Coordinator Hub** (Tab 2). Observe daemon uptime, socket status, copy the join token, and adjust the blind relay fallback slider.
-4. In **Storage & Shard Matrix** (Tab 5), inspect the Reed-Solomon RS(4,2) 6-cell striping table, click **Verify All Merkle Roots** to audit Merkle trees via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
+4. In **Storage & Shard Matrix** (Tab 5), inspect the local CAS storage vault card, click **Verify All Merkle Roots** to audit Merkle trees via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
 5. In **GPU Acceleration** (Tab 4), analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY, and run a JobObject batch.
 6. In **CPU Sandbox** (Tab 3), with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
-7. In **Cluster Task Queue** (Tab 6), verify that initial DAG tasks and your newly dispatched CPU/GPU tasks are listed with ClassAd criteria and completion status.
+7. In **Cluster Task Queue** (Tab 6), observe the live task queue table, dynamically recording real-time compute jobs dispatched via GPU and CPU code execution. (Starts with count: 0 and dynamically populates without fake seed entries).
 8. In **Topology Canvas** (Tab 1), inspect local PC rig telemetry and loopback metrics.
 9. In **Cluster Wire Logs** (Tab 7), observe live WebSocket events across all subsystems.
 
 ### 12.4 Distributed Cluster Testing on Ubuntu 18.04 (2 Nodes)
 1. Terminal 1 (Worker Node B):
    ```bash
-   ./bin/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A
+   ./bin/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A -enable-remote-shell -shell-allowlist node-A
    ```
 2. Terminal 2 (GUI Node A):
    ```bash
@@ -1461,7 +1468,9 @@ sudo journalctl -u unicompute-node.service -f
 - **Cause**: Installed Go version is 1.22 while `go.mod` references a higher toolchain.
 - **Fix**: Run `go mod edit -go 1.22` followed by `go mod tidy`.
 
-### 10. Render Coordinator Cold-Start Wait
-- **Cause**: Free Render instances sleep when idle. The first connection attempt may take 30–45 seconds while Render boots the container.
-- **Fix**: Keep the instance warm with a periodic health probe (`curl https://unicompute-coordinator.onrender.com/health`).
+### 10. Render Coordinator Cold-Start Delay & UDP TURN Limitations
+- **Cause**: Free Render instances sleep when idle. Additionally, Render's reverse proxy only supports TCP (HTTP/WSS) and does not route UDP packets.
+- **Fix**:
+  1. If connecting takes 30-45 seconds on the first attempt, wait for the container to wake up, or probe the health endpoint: `curl -s https://unicompute-coordinator.onrender.com/health`.
+  2. Because Render does not route UDP traffic, embedded UDP TURN servers cannot operate on Render; peers must establish direct WebRTC connections or configure external TURN relays.
 

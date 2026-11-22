@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -678,5 +680,80 @@ func TestNode_RemoteCommandExecution(t *testing.T) {
 	res2, ok := allResults["exec-node-2"]
 	if !ok || res2.ExitCode != 0 || !strings.Contains(strings.ToLower(res2.Stdout), "unicompute_remote_shell_ok") {
 		t.Fatalf("unexpected broadcast result: %+v", res2)
+	}
+}
+
+func TestNode_ConnectPeer_SingleOnPeerConnectedCallback(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "node-test-peer-conn-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeDir1 := filepath.Join(tempDir, "store1")
+	storeDir2 := filepath.Join(tempDir, "store2")
+
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "single-cb-node-1",
+		PoolID:       "cb-pool",
+		StorageDir:   storeDir1,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 1: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "single-cb-node-2",
+		PoolID:       "cb-pool",
+		StorageDir:   storeDir2,
+		StorageQuota: 50 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create node 2: %v", err)
+	}
+	defer n2.Close()
+
+	var n1ConnectedCount int32
+	n1.SetOnPeerConnected(func(peerID string) {
+		if peerID == "single-cb-node-2" {
+			atomic.AddInt32(&n1ConnectedCount, 1)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("node 1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("node 2 Start failed: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	conn1, err := n1.ConnectPeer(ctx, "single-cb-node-2")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer conn1.Close()
+
+	time.Sleep(300 * time.Millisecond)
+
+	count := atomic.LoadInt32(&n1ConnectedCount)
+	if count != 1 {
+		t.Fatalf("expected SetOnPeerConnected to fire exactly 1 time, got %d", count)
 	}
 }

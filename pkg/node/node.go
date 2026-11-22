@@ -302,7 +302,6 @@ func (n *Node) ConnectPeer(ctx context.Context, targetPeerID string) (*transport
 		return nil, err
 	}
 
-	n.bindIncomingPeerConnection(pc)
 	return pc, nil
 }
 

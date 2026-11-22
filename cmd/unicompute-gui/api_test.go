@@ -108,6 +108,43 @@ func TestCoordinatorStatus_WithLiveCoordinator(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStatus_AuthTokenHeader(t *testing.T) {
+	var receivedAuth string
+	mockCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy","service":"unicompute-coordinator"}`))
+		case "/api/nodes":
+			receivedAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"count":1,"nodes":["node-auth-test"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockCoord.Close()
+
+	coordWSURL := "ws://" + mockCoord.Listener.Addr().String() + "/ws"
+	s, mux, cleanup := setupTestServer(t, coordWSURL)
+	defer cleanup()
+
+	s.nodeConfig.AuthToken = "test-cluster-token-xyz"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator/status", nil)
+	req.Header.Set("Authorization", "Bearer "+s.SessionToken())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if receivedAuth != "Bearer test-cluster-token-xyz" {
+		t.Errorf("expected Authorization 'Bearer test-cluster-token-xyz', got '%s'", receivedAuth)
+	}
+}
+
 func TestCoordinatorStatus_UnreachableCoordinatorFallback(t *testing.T) {
 	// Unreachable coordinator port
 	unreachableURL := "ws://127.0.0.1:59999/ws"

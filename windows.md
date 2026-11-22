@@ -60,11 +60,11 @@ The project compiles into the following binaries in the `bin/` directory:
 
 | Binary | Description |
 |---|---|
-| `bin\unicompute-gui.exe` | **Desktop GUI Control Room**. Full interactive topology canvas, telemetry dials, peer connection drawer, and panels for Objectives 1, 2, and 3. |
-| `bin\unicompute-node.exe` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, and GPU acceleration. |
-| `bin\unicompute-coordinator.exe` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. |
-| `bin\unicompute-relay.exe` | **Contributor Relay Daemon**. Blind opaque byte relay fallback when symmetric NATs prevent direct hole punching. |
-| `bin\verify-obj3.exe` | **Objective 3 Automated Hardware Verification Suite**. 7-point validation suite for physical GPU, watchdog, and sandboxing. |
+| `bin\unicompute-gui.exe` | **Desktop GUI Control Room**. Full interactive topology canvas, telemetry dials, peer connection drawer, and panels for Objectives 1, 2, and 3. Protected with cryptographic session token auth and strict loopback Origin checks. |
+| `bin\unicompute-node.exe` | **Contributor Peer Node Daemon & CLI**. Manages local CAS vault, WebRTC SCTP connections, Docker sandbox execution, remote shell (opt-in + allowlist), and GPU acceleration. |
+| `bin\unicompute-coordinator.exe` | **Signaling Hub & Embedded TURN Server**. Relays WebSocket SDP offers/answers, ICE candidates, and fleet registry. Protected via cluster auth tokens (`-auth-token`) and duplicate node ID hijacking rejection. |
+| `bin\unicompute-relay.exe` | **Contributor Relay Daemon (Deprecated)**. Legacy byte relay fallback; modern deployments rely on native Pion ICE and embedded/external TURN. |
+| `bin\verify-obj3.exe` | **Objective 3 Automated Hardware Verification Suite**. 7-point validation suite for physical GPU, watchdog, sandboxing, and simulated ONNX execution. |
 
 **Live Deployment**: A production coordinator is hosted and live on Render at:
 `wss://unicompute-coordinator.onrender.com/ws`
@@ -348,14 +348,15 @@ To experience the full peer-to-peer distributed system, open **two separate Powe
 - **Window 2 (Client Node A)**: Connects to Node B, transfers files into the CAS vault, issues shell commands, and submits jobs.
 
 > [!NOTE]
-> **Coordinator Architecture & GUI Visualization**:
+> **Coordinator Architecture & Authentication**:
 > - The Coordinator (`unicompute-coordinator` or the live Render cloud deployment) is a **headless signaling hub and embedded TURN server**. It intentionally has **no standalone web GUI**, as volunteer compute networks require zero overhead on the signaling plane.
+> - **Cluster Authentication (`-auth-token`)**: When exposed on non-loopback addresses, the coordinator enforces cluster secret token authentication to prevent unauthorized signaling, node hijacking, and enumeration. Pass `-auth-token <secret>` or set `UNICOMPUTE_AUTH_TOKEN`. (For offline local testing without authentication, pass `-insecure-no-auth`).
 > - **Verifying Coordinator Health via API**:
 >   ```powershell
 >   # Health & Uptime Check (Live Render):
 >   curl.exe -s https://unicompute-coordinator.onrender.com/health
->   # Discovered Fleet Registry (Live Render):
->   curl.exe -s https://unicompute-coordinator.onrender.com/api/nodes
+>   # Discovered Fleet Registry (add Bearer header if auth is enabled):
+>   curl.exe -s -H "Authorization: Bearer <token>" https://unicompute-coordinator.onrender.com/api/nodes
 >   # Local Coordinator:
 >   curl.exe -s http://127.0.0.1:8080/health
 >   curl.exe -s http://127.0.0.1:8080/api/nodes
@@ -369,10 +370,11 @@ Both nodes connect over the Internet via the production coordinator on Render (`
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 # Method 1 (Compiled Binary):
-.\bin\unicompute-node.exe -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A -code-timeout 15
+# Enables Docker code execution sandbox for node-A AND allows remote shell execution for node-A
+.\bin\unicompute-node.exe -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A -code-timeout 15 -enable-remote-shell -shell-allowlist node-A
 
 # Method 2 (Go Toolchain - Use if Windows SAC blocks standalone binary):
-go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A -code-timeout 15
+go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-A -code-timeout 15 -enable-remote-shell -shell-allowlist node-A
 ```
 
 *Worker Node B logs output:*
@@ -387,6 +389,7 @@ go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.
  STUN Server(s): stun.l.google.com:19302
 ===================================================================
 [CODEEXEC] Docker sandbox enabled; allowed submitting peers: node-A
+[INFO] Remote shell execution enabled for peers: [node-A]
 [INFO] Starting node and classifying network topology...
 [FLEET] Connected to coordinator. Waiting for other laptops to connect...
 Interactive Mode Active! Type 'help' to see commands.
@@ -415,29 +418,30 @@ If you are developing completely offline without Internet access, run the local 
 
 #### Terminal 0 — Start Local Coordinator
 ```powershell
-# Method 1 (Compiled Binary):
-.\bin\unicompute-coordinator.exe -listen 0.0.0.0:8080
+# Method 1 (Compiled Binary - with explicit auth token):
+.\bin\unicompute-coordinator.exe -listen 0.0.0.0:8080 -auth-token mysecrettoken -insecure-no-auth=false
 
-# Method 2 (Go Toolchain):
-go run ./cmd/unicompute-coordinator -listen 0.0.0.0:8080
+# Method 2 (Go Toolchain - local dev without auth):
+go run ./cmd/unicompute-coordinator -listen 127.0.0.1:8080 -insecure-no-auth
 ```
 
 #### Terminal 1 — Start Worker Node B
 ```powershell
 # Method 1 (Compiled Binary):
-.\bin\unicompute-node.exe -id node-B -signaling ws://127.0.0.1:8080/ws -enable-code-execution -code-allowlist node-A -code-timeout 15
+.\bin\unicompute-node.exe -id node-B -signaling ws://127.0.0.1:8080/ws -auth-token mysecrettoken -enable-code-execution -code-allowlist node-A -code-timeout 15 -enable-remote-shell -shell-allowlist node-A
 
 # Method 2 (Go Toolchain):
-go run ./cmd/unicompute-node -id node-B -signaling ws://127.0.0.1:8080/ws -enable-code-execution -code-allowlist node-A -code-timeout 15
+go run ./cmd/unicompute-node -id node-B -signaling ws://127.0.0.1:8080/ws -auth-token mysecrettoken -enable-code-execution -code-allowlist node-A -code-timeout 15 -enable-remote-shell -shell-allowlist node-A
 ```
 
 #### Terminal 2 — Start Client Node A
 ```powershell
 # Method 1 (Compiled Binary):
-.\bin\unicompute-node.exe -id node-A -signaling ws://127.0.0.1:8080/ws
+.\bin\unicompute-node.exe -id node-A -signaling ws://127.0.0.1:8080/ws -auth-token mysecrettoken
 
 # Method 2 (Go Toolchain):
-go run ./cmd/unicompute-node -id node-A -signaling ws://127.0.0.1:8080/ws
+go run ./cmd/unicompute-node -id node-A -signaling ws://127.0.0.1:8080/ws -auth-token mysecrettoken
+```
 ```
 
 ---
@@ -472,8 +476,8 @@ WebRTC DataChannel connected to node-B!
 ```
 *Output:*
 ```text
-Ping sent to node-B...
-[PONG] Reply from node-B: Pong received!
+Ping sent to node-B (ping ID: 1732304859)...
+[PONG] Reply from node-B: Pong received! RTT = 4.2ms (ping ID: 1732304859)
 ```
 
 #### 4. Live Stream Control Message
@@ -535,8 +539,14 @@ Transferred blob 66a2cbdb... to node-B in 42ms
 ```
 
 #### 5. Fetch blob from Node B (`fetch`)
+Pulls a chunk from Node B over WebRTC DataChannel using the wire protocol `DataMsgChunkRequest` (0x10), writes it to the local CAS vault, and verifies its cryptographic SHA-256 hash:
 ```text
 > fetch node-B <blobID>
+```
+*Output:*
+```text
+Fetching chunk 66a2cbdb... from peer node-B...
+[EVENT] Chunk 66a2cbdb... fetched and stored successfully in 38ms (SHA-256 Verified).
 ```
 
 #### 6. Export blob back to a local file (`get`)
@@ -564,6 +574,14 @@ Scrub complete: all stored blobs passed cryptographic SHA-256 verification.
 ### 8.3 Remote Terminal Execution (`exec`)
 
 UniCompute provides secure host terminal command execution over WebRTC DataChannels using PowerShell on Windows targets.
+
+> [!IMPORTANT]
+> **Security Gate — Opt-In & Peer Allowlist Required**:
+> Remote shell execution is **disabled by default** to prevent unauthorized command execution by connected peers.
+> - The target node (Worker Node B) **must** be launched with:
+>   `-enable-remote-shell -shell-allowlist <peerID>[,<peerID>]` (or `-shell-allowlist "*"`).
+> - If remote shell is disabled or the calling peer is not allowlisted, the request is immediately rejected with:
+>   `remote shell disabled on this node` or `peer not in shell allowlist`.
 
 #### 1. Execute command on Worker Node B
 ```text
@@ -654,6 +672,7 @@ Objective 3 adds hardware acceleration discovery and background student governan
    ```
 
 3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes workloads governed by Win32 JobObject memory ceilings and `IDLE_PRIORITY_CLASS`.
+   *(Note: The pure-Go ONNX runner is an educational simulation/mock labeled `Simulated: true` that validates checkpoint serialization, preemption loops, and SHA-256 state hashing without requiring external CGO/ONNX Runtime C-bindings).*
 
 ---
 
@@ -1312,7 +1331,14 @@ Launch the desktop workstation using one of the following methods:
 # Or via Go run:
 go run ./cmd/unicompute-gui -id node-desktop -signaling wss://unicompute-coordinator.onrender.com/ws -port 23080
 ```
-This boots the local HTTP/WebSocket daemon and launches a native borderless application window using Microsoft Edge or Google Chrome (`msedge.exe --app="http://127.0.0.1:23080"`).
+This boots the local HTTP/WebSocket daemon and launches a native borderless application window using Microsoft Edge or Google Chrome (`msedge.exe --app="http://127.0.0.1:23080/#token=<sessionToken>"`).
+
+> [!NOTE]
+> **GUI Daemon Security Model**:
+> - At startup, `unicompute-gui` generates a 32-byte cryptographically random session token stored in memory and passed into the desktop app via `#token=<token>` URL fragment.
+> - The embedded UI frontend injects `Authorization: Bearer <token>` on all API requests and `?token=<token>` on WebSocket event streams.
+> - Mutating `/api/*` routes enforce strict loopback Origin validation (`http://127.0.0.1:<port>` or `http://localhost:<port>`), Bearer token validation, and `application/json` Content-Type requirements.
+> - Non-loopback `-listen` binds (e.g. `0.0.0.0`) are refused unless `-allow-remote-gui` is explicitly supplied.
 
 ---
 
@@ -1329,7 +1355,7 @@ The GUI features a unified 7-tab layout bridging Coordinator management and Work
 | **3** | **CPU Sandbox (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
 | **4** | **GPU Acceleration (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
 | **5** | **Storage & Shard Matrix** | Reed-Solomon RS(4,2) 6-cell striping matrix for distributed datasets (`open-llama-weights-v2`, `genomics-chm13-alignments`, and `local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification. |
-| **6** | **Cluster Task Queue** | Global ClassAd matchmaking task queue tracking active, queued, and completed DAG jobs across the fleet (`#JOB-8104` through `#JOB-8107`). Dynamically records real-time compute jobs dispatched via GPU DirectML and CPU code execution. |
+| **6** | **Cluster Task Queue** | Dynamic task queue tracking active, queued, and completed jobs across the fleet. Records real-time compute jobs dispatched via GPU DirectML and CPU code execution (honest runtime telemetry initialized with 0 fake seed tasks). |
 | **7** | **Cluster Wire Logs** | Real-time WebSocket event bus stream with category filtering (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing. |
 
 ---
@@ -1365,8 +1391,8 @@ You can verify all capabilities on a single machine without spinning up multiple
    - Click **Run Code in Sandbox**: The code executes, streams stdout/stderr, reports duration and `EXIT 0`.
 6. **Test Cluster Task Queue (Tab 6)**:
    - Click the **Cluster Task Queue** tab (Tab 6).
-   - Observe the live ClassAd matchmaking table: Initial seed DAG tasks (`#JOB-8104` to `#JOB-8107`) alongside the newly dispatched GPU and CPU tasks triggered in steps 4 and 5.
-   - Verify ClassAd criteria (`CUDA_ARCH >= 80`, `AVX512 == True`), priority tags (`P0_CRITICAL`, `P1_HIGH`), matched target nodes, and live completion statuses.
+   - Observe the live task queue table, dynamically recording real-time compute jobs dispatched via GPU and CPU code execution. (Starts with count: 0 and dynamically populates without fake seed entries).
+   - Verify task criteria, execution duration, target worker node, and live completion statuses.
 7. **Test Topology Inspector**:
    - Click the **Topology Canvas** tab (Tab 1).
    - Click on the central node or the local workstation rig.
@@ -1384,7 +1410,7 @@ To test real WebRTC P2P DataChannels, remote container execution, and live netwo
 
 1. **Terminal 1 — Start Remote Worker Node B (CLI)**:
    ```powershell
-   go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-desktop
+   go run ./cmd/unicompute-node -id node-B -signaling wss://unicompute-coordinator.onrender.com/ws -enable-code-execution -code-allowlist node-desktop -enable-remote-shell -shell-allowlist node-desktop
    ```
 2. **Terminal 2 — Start Desktop Workstation Node A (GUI)**:
    ```powershell
@@ -1406,7 +1432,8 @@ To test real WebRTC P2P DataChannels, remote container execution, and live netwo
 5. **Execute Remote Shell Command**:
    - In the stdin box, type `whoami`.
    - Click **Run Shell Command**:
-     - Executes securely on `node-B` and returns the remote username.
+     - Remote shell execution executes securely on `node-B` (gated by `node-B`'s `-enable-remote-shell -shell-allowlist node-desktop` configuration) and returns the remote username.
+     - *(Note: If `node-B` has not allowlisted `node-desktop`, the request will be rejected with an explicit security error)*.
 6. **Verify Dynamic Samples on Remote Worker**:
    - Drop a new file `samples\python\my_test.py` onto disk.
    - Select it from the dropdown in the GUI and run it on `node-B`. It executes seamlessly.
@@ -1440,19 +1467,17 @@ To test real WebRTC P2P DataChannels, remote container execution, and live netwo
   ```
 
 ### 5. "Connection to node-B failed: timeout"
-- **Cause**: Windows Defender Firewall blocked UDP hole-punching packets, or both nodes are behind strict symmetric CGNAT without a relay.
+- **Cause**: Windows Defender Firewall blocked UDP hole-punching packets, or both nodes are behind strict symmetric CGNAT without an accessible TURN relay.
 - **Fix**:
   1. In the Windows Firewall popup, click **Allow access** for `unicompute-node.exe` on Private networks.
-  2. If on mobile hotspot or university Wi-Fi with symmetric CGNAT, start a contributor relay:
-     ```powershell
-     .\bin\unicompute-relay.exe -listen 0.0.0.0:22067
-     ```
-     And start nodes with `-relay <relayIP>:22067`.
+  2. If on mobile hotspot or university Wi-Fi with symmetric CGNAT, configure an external TURN server (e.g. Coturn) or run an embedded TURN coordinator with a public UDP port.
 
-### 6. Render Coordinator Cold-Start Delay
-- **Cause**: Render free instances spin down after 15 minutes of inactivity.
-- **Fix**: If connecting to `wss://unicompute-coordinator.onrender.com/ws` takes 30-45 seconds on the very first attempt, wait for the container to wake up, or probe the health endpoint:
-  ```powershell
-  curl.exe -s https://unicompute-coordinator.onrender.com/health
-  ```
+### 6. Render Coordinator Cold-Start Delay & UDP TURN Limitations
+- **Cause**: Render free-tier instances spin down after 15 minutes of inactivity. Additionally, Render's reverse proxy only supports TCP (HTTP/WSS) and does not route UDP packets.
+- **Fix**:
+  1. If connecting to `wss://unicompute-coordinator.onrender.com/ws` takes 30-45 seconds on the first attempt, wait for the container to wake up, or probe the health endpoint:
+     ```powershell
+     curl.exe -s https://unicompute-coordinator.onrender.com/health
+     ```
+  2. Because Render does not route UDP traffic, embedded UDP TURN servers cannot operate on Render; peers must establish direct WebRTC connections or configure external TURN relays.
 

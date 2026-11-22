@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -170,12 +168,7 @@ func main() {
 
 	// Initialize GUI Server State & API Mux
 	state := NewServerState(n, nodeCfg, *enableGPU, gpuCfg)
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		log.Fatalf("[FATAL] Failed to generate session token: %v\n", err)
-	}
-	sessionToken := hex.EncodeToString(tokenBytes)
-	state.SetSessionToken(sessionToken)
+	sessionToken := state.SessionToken()
 	mux := http.NewServeMux()
 	state.SetupRoutes(mux)
 

@@ -348,24 +348,30 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	coordURL := s.coordinatorURL
+	joinToken := s.joinToken
+	nodeID := s.nodeConfig.NodeID
+	poolID := s.nodeConfig.PoolID
+	s.mu.RUnlock()
 
 	usage := s.node.StorageUsage()
 	natRep := s.node.NATReport()
 	if natRep == nil {
 		natRep = &nat.NATReport{NATType: nat.NATTypeUnknown}
 	}
-	fleet, _ := s.node.GetFleetNodes(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	fleet, _ := s.node.GetFleetNodes(ctx)
+	cancel()
 	peers := s.node.GetConnectedPeers()
 
 	gpuProf, gpuActive := s.node.GPUProfile()
 	wdStat, _ := s.node.GPUWatchdogStatus()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_id":          s.nodeConfig.NodeID,
-		"pool_id":          s.nodeConfig.PoolID,
-		"coordinator_url":  s.coordinatorURL,
-		"join_token":       s.joinToken,
+		"node_id":          nodeID,
+		"pool_id":          poolID,
+		"coordinator_url":  coordURL,
+		"join_token":       joinToken,
 		"storage":          usage,
 		"nat":              natRep,
 		"fleet_count":      len(fleet),
@@ -429,16 +435,24 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	if err == nil && healthResp.StatusCode == http.StatusOK {
 		healthResp.Body.Close()
 		// Health succeeded; query coordinator /api/nodes
-		nodesResp, err := client.Get(httpURL + "/api/nodes")
-		if err == nil && nodesResp.StatusCode == http.StatusOK {
-			defer nodesResp.Body.Close()
-			var nData struct {
-				Count int      `json:"count"`
-				Nodes []string `json:"nodes"`
+		req, err := http.NewRequest("GET", httpURL+"/api/nodes", nil)
+		if err == nil {
+			if s.nodeConfig.AuthToken != "" {
+				req.Header.Set("Authorization", "Bearer "+s.nodeConfig.AuthToken)
 			}
-			if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
-				fleetCount = nData.Count
-				nodeIDs = nData.Nodes
+			nodesResp, err := client.Do(req)
+			if err == nil && nodesResp.StatusCode == http.StatusOK {
+				defer nodesResp.Body.Close()
+				var nData struct {
+					Count int      `json:"count"`
+					Nodes []string `json:"nodes"`
+				}
+				if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
+					fleetCount = nData.Count
+					nodeIDs = nData.Nodes
+				}
+			} else if nodesResp != nil {
+				nodesResp.Body.Close()
 			}
 		}
 	} else {
@@ -837,9 +851,9 @@ func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.addTask(ClusterTask{
 		JobID:       req.JobID,
-		ClassAd:     fmt.Sprintf("CUDACapability >= 8.0 && Task == %q", body.TaskType),
+		ClassAd:     fmt.Sprintf("Simulated ONNX Runner && Task == %q", body.TaskType),
 		TargetMatch: fmt.Sprintf("Matched -> %s (DirectML Tier 3)", s.nodeConfig.NodeID),
-		StageDAG:    "DAG_STAGE_TENSOR_DISPATCH",
+		StageDAG:    "LOCAL_GPU_SIMULATION",
 		Priority:    "P0 CRITICAL",
 		Status:      status,
 		DurationMs:  durMs,

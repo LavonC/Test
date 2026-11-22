@@ -80,6 +80,7 @@ type inFlightChunk struct {
 	data      []byte
 	doneCh    chan []byte
 	errCh     chan error
+	hasWaiter bool
 }
 
 func newPeerConnection(sessionID, localPeerID, remotePeerID string, pc *webrtc.PeerConnection, tracker *instrumentation.Tracker) *PeerConnection {
@@ -329,6 +330,7 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 		if (flags&protocol.FlagEnd != 0) || (atomic.LoadUint64(&inflight.received) >= inflight.totalSize) {
 			c.inFlightMu.Lock()
 			delete(c.inFlight, chunkID)
+			hadWaiter := inflight.hasWaiter
 			c.inFlightMu.Unlock()
 
 			select {
@@ -336,11 +338,13 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 			default:
 			}
 
-			c.mu.RLock()
-			handler := c.OnChunkReceived
-			c.mu.RUnlock()
-			if handler != nil {
-				handler(chunkID, inflight.data)
+			if !hadWaiter {
+				c.mu.RLock()
+				handler := c.OnChunkReceived
+				c.mu.RUnlock()
+				if handler != nil {
+					handler(chunkID, inflight.data)
+				}
 			}
 		}
 
@@ -368,17 +372,9 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				inflight, ok := c.inFlight[chunkID]
 				if ok {
 					delete(c.inFlight, chunkID)
-				} else {
-					// Buffer error frame in inflight so an incoming FetchChunk/ReceiveChunk sees it immediately
-					inflight = &inFlightChunk{
-						chunkID: chunkID,
-						doneCh:  make(chan []byte, 1),
-						errCh:   make(chan error, 1),
-					}
-					c.inFlight[chunkID] = inflight
 				}
 				c.inFlightMu.Unlock()
-				if inflight != nil {
+				if ok && inflight != nil {
 					select {
 					case inflight.errCh <- errors.New(errMsg):
 					default:
@@ -536,8 +532,11 @@ func (c *PeerConnection) FetchChunk(ctx context.Context, chunkID string, totalSi
 			data:      buf,
 			doneCh:    make(chan []byte, 1),
 			errCh:     make(chan error, 1),
+			hasWaiter: true,
 		}
 		c.inFlight[chunkID] = inflight
+	} else {
+		inflight.hasWaiter = true
 	}
 	c.inFlightMu.Unlock()
 
@@ -581,8 +580,11 @@ func (c *PeerConnection) ReceiveChunk(ctx context.Context, chunkID string, total
 			data:      buf,
 			doneCh:    make(chan []byte, 1),
 			errCh:     make(chan error, 1),
+			hasWaiter: true,
 		}
 		c.inFlight[chunkID] = inflight
+	} else {
+		inflight.hasWaiter = true
 	}
 	c.inFlightMu.Unlock()
 

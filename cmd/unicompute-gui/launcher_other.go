@@ -8,5 +8,8 @@ import (
 
 func launchDesktopWindow(url string) (*exec.Cmd, error) {
 	cmd := exec.Command("open", url)
-	return cmd, cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }

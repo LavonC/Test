@@ -278,7 +278,10 @@ func (c *clientConn) readPump() {
 				TargetID: c.nodeID,
 			}
 			data, _ := json.Marshal(ackEnv)
-			c.sendChan <- data
+			select {
+			case c.sendChan <- data:
+			default:
+			}
 			continue
 		}
 
@@ -311,7 +314,10 @@ func (c *clientConn) readPump() {
 			target, ok := c.hub.clients[env.TargetID]
 			c.hub.mu.RUnlock()
 			if ok {
-				target.sendChan <- msg
+				select {
+				case target.sendChan <- msg:
+				default:
+				}
 			}
 		}
 	}

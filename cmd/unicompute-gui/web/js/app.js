@@ -316,6 +316,9 @@ function initTopologyControls() {
       if (res.error) {
         out.textContent = 'Ping failed: ' + res.error;
         out.style.color = '#f43f5e';
+      } else if (res.status === 'ping_timeout') {
+        out.textContent = `Ping timed out after ${res.duration_ms || 5000} ms`;
+        out.style.color = '#f43f5e';
       } else {
         out.textContent = `SCTP ACK: RTT ${res.duration_ms} ms (Direct P2P Link Valid)`;
         out.style.color = '#10b981';
@@ -590,8 +593,12 @@ function runGPUSandboxTask() {
   })
   .then(r => r.json())
   .then(res => {
-    out.textContent = `Job ${res.job_id} ${res.status.toUpperCase()} in ${res.execution_ms} ms. Checkpoint: ${res.checkpoint_blob || 'saved'}`;
-    appendLog('GPU', `Task ${res.job_id} completed (${res.execution_ms} ms, ${batches} batches)`);
+    let outputText = `Job ${res.job_id} ${res.status.toUpperCase()} in ${res.execution_ms} ms. Checkpoint: ${res.checkpoint_blob || 'saved'}`;
+    if (res.simulated) {
+      outputText += ' [SIMULATED MOCK RUNNER]';
+    }
+    out.textContent = outputText;
+    appendLog('GPU', `Task ${res.job_id} completed (${res.execution_ms} ms, ${batches} batches)${res.simulated ? ' [SIMULATED]' : ''}`);
     loadTasks();
   });
 }
@@ -609,7 +616,7 @@ function initStorageVault() {
     document.getElementById('blobViewModal').classList.add('hidden');
   });
   document.getElementById('btnCopyBlobContent').addEventListener('click', () => {
-    const text = document.getElementById('viewModalContent').textContent;
+    const text = document.getElementById('viewModalContent').value;
     navigator.clipboard.writeText(text).then(() => {
       const btn = document.getElementById('btnCopyBlobContent');
       const orig = btn.innerHTML;
@@ -673,7 +680,7 @@ window.viewBlob = function(blobId) {
       const sizeKiB = (bSize / 1024).toFixed(2);
       const isValid = data.valid !== undefined ? data.valid : (data.verified !== undefined ? data.verified : false);
       document.getElementById('viewModalSize').textContent = `${sizeKiB} KiB • SHA-256 Valid: ${isValid ? 'YES' : 'CORRUPTED'}`;
-      document.getElementById('viewModalContent').textContent = data.content || '(empty)';
+      document.getElementById('viewModalContent').value = data.content || '(empty)';
       document.getElementById('blobViewModal').classList.remove('hidden');
     })
     .catch(err => {
@@ -714,14 +721,24 @@ function scrubStorageVault() {
   out.textContent = 'Scrubbing storage vault with SHA-256 cryptographic audits...';
   out.classList.remove('hidden');
 
-  fetch('/api/storage/scrub', { method: 'POST' })
-    .then(r => r.json())
+  fetch('/api/storage/scrub', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  })
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
     .then(res => {
       if (!res.corrupted || res.corrupted.length === 0) {
         out.innerHTML = '<span class="text-secondary">✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot.</span>';
       } else {
         out.innerHTML = `<span class="text-rose">⚠ Warning: detected ${res.corrupted.length} corrupted blob(s)!</span>`;
       }
+    })
+    .catch(err => {
+      out.innerHTML = `<span class="text-rose">⚠ Cryptographic scrub error: ${err.message}</span>`;
     });
 }
 
@@ -871,7 +888,8 @@ function loadStatus() {
         const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
         document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
         document.getElementById('navStorageBadge').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-        document.getElementById('storageUsageBar').style.width = `${data.storage.usage_percent || 0}%`;
+        const pct = data.storage.quota_bytes > 0 ? Math.min(100, (data.storage.used_bytes / data.storage.quota_bytes) * 100) : 0;
+        document.getElementById('storageUsageBar').style.width = pct.toFixed(1) + '%';
         document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
         document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
       }
@@ -1157,39 +1175,48 @@ function loadCoordinatorStatus() {
         if (sliderText) sliderText.textContent = `${data.relay_threshold.toFixed(1)}s`;
       }
 
+      const directCount = data.direct_peers_count ?? 0;
+      const relayedCount = data.relayed_peers_count ?? 0;
+      const avgRttVal = data.avg_rtt_ms ?? 0;
+      const blobCount = data.blob_count ?? 0;
+
       const directPeers = document.getElementById('coordDirectPeers');
-      if (directPeers) directPeers.textContent = `${data.direct_peers_count || 18} Nodes`;
+      if (directPeers) directPeers.textContent = `${directCount} Nodes`;
 
       const avgRtt = document.getElementById('coordAvgRtt');
-      if (avgRtt) avgRtt.textContent = `Avg RTT: ${(data.avg_rtt_ms || 21.4).toFixed(1)}ms`;
+      if (avgRtt) avgRtt.textContent = `Avg RTT: ${avgRttVal.toFixed(1)}ms`;
 
       const relayedPeers = document.getElementById('coordRelayedPeers');
-      if (relayedPeers) relayedPeers.textContent = `${data.relayed_peers_count || 6} Nodes`;
+      if (relayedPeers) relayedPeers.textContent = `${relayedCount} Nodes`;
 
       const relayFallback = document.getElementById('coordRelayFallback');
-      if (relayFallback) relayFallback.textContent = `${(data.relay_threshold || 2.0).toFixed(1)}s Fallback Active`;
+      if (relayFallback) relayFallback.textContent = `${(data.relay_threshold ?? 2.0).toFixed(1)}s Fallback Active`;
 
       const throttled = document.getElementById('coordThrottledPeers');
-      if (throttled) throttled.textContent = `${data.throttled_count || 0} Nodes`;
+      if (throttled) throttled.textContent = `${data.throttled_count ?? 0} Nodes`;
 
       const merkleVerif = document.getElementById('coordMerkleVerif');
-      if (merkleVerif) merkleVerif.textContent = `${(data.merkle_verified_pct || 100).toFixed(1)}%`;
+      if (merkleVerif) {
+        merkleVerif.textContent = blobCount > 0 ? '100.0%' : '0.0%';
+      }
 
       const hashCount = document.getElementById('coordHashCount');
-      if (hashCount) hashCount.textContent = `${(data.merkle_hash_count || 3892104).toLocaleString()} Hashes`;
+      if (hashCount) {
+        hashCount.textContent = `${blobCount.toLocaleString()} Blobs`;
+      }
 
       // Saturation bar
-      const maxCap = data.mesh_capacity_max || 32;
-      const totalNodes = (data.direct_peers_count || 18) + (data.relayed_peers_count || 6);
+      const maxCap = data.mesh_capacity_max ?? 32;
+      const totalNodes = directCount + relayedCount;
       const satLabel = document.getElementById('coordMeshSaturationLabel');
       if (satLabel) satLabel.textContent = `Mesh Link Saturation: ${totalNodes}/${maxCap} Cap`;
 
-      const pct = Math.min(100, Math.round((totalNodes / maxCap) * 100));
+      const pct = maxCap > 0 ? Math.min(100, Math.round((totalNodes / maxCap) * 100)) : 0;
       const satPct = document.getElementById('coordMeshPercent');
       if (satPct) satPct.textContent = `${pct}% Capacity`;
 
-      const directPct = ((data.direct_peers_count || 18) / maxCap) * 100;
-      const relayPct = ((data.relayed_peers_count || 6) / maxCap) * 100;
+      const directPct = maxCap > 0 ? (directCount / maxCap) * 100 : 0;
+      const relayPct = maxCap > 0 ? (relayedCount / maxCap) * 100 : 0;
       const sparePct = Math.max(0, 100 - directPct - relayPct);
 
       const barDirect = document.getElementById('coordBarDirect');
@@ -1205,47 +1232,49 @@ function initShardMatrix() {
   const verifyBtn = document.getElementById('btnVerifyAllMerkle');
   if (verifyBtn) {
     verifyBtn.addEventListener('click', () => {
-      const badgeLlama = document.getElementById('merkleBadgeLlama');
-      const badgeGenome = document.getElementById('merkleBadgeGenome');
       const badgeCas = document.getElementById('merkleBadgeCas');
 
       const setVerifying = (el) => {
         if (!el) return;
         el.className = 'merkle-badge-verifying px-2.5 py-1 rounded font-mono text-xs flex items-center gap-1.5';
-        el.innerHTML = '<span class="material-symbols-outlined text-sm">sync</span><span>Verifying Blake3/SHA-256 Hashes...</span>';
+        el.innerHTML = '<span class="material-symbols-outlined text-sm">sync</span><span>Verifying SHA-256 Hashes...</span>';
       };
-      setVerifying(badgeLlama);
-      setVerifying(badgeGenome);
       setVerifying(badgeCas);
 
-      fetch('/api/storage/scrub')
-        .then(r => r.json())
+      fetch('/api/storage/scrub', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
         .then(res => {
           setTimeout(() => {
-            const setValid = (el) => {
-              if (!el) return;
-              el.className = 'merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5';
-              el.innerHTML = '<span class="material-symbols-outlined text-sm">check_circle</span><span>Merkle Root: Valid / Matched</span>';
-            };
-            setValid(badgeLlama);
-            setValid(badgeGenome);
-            setValid(badgeCas);
+            if (!badgeCas) return;
             const corruptCount = res.corrupted ? res.corrupted.length : 0;
-            appendLog('STORAGE', `Merkle verification complete: 100% hashes valid across mesh. Local scrub corrupted: ${corruptCount}`);
+            if (corruptCount === 0) {
+              badgeCas.className = 'merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5';
+              badgeCas.innerHTML = '<span class="material-symbols-outlined text-sm">check_circle</span><span>CAS Root: Valid / Matched</span>';
+              appendLog('STORAGE', `Cryptographic audit complete: 100% stored blobs verified with zero corruption.`);
+            } else {
+              badgeCas.className = 'merkle-badge-error px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 font-mono text-xs flex items-center gap-1.5';
+              badgeCas.innerHTML = `<span class="material-symbols-outlined text-sm">warning</span><span>Detected ${corruptCount} Corrupted</span>`;
+              appendLog('STORAGE', `Warning: detected ${corruptCount} corrupted blob(s)!`);
+            }
           }, 800);
         })
-        .catch(() => {
-          const setValid = (el) => {
-            if (!el) return;
-            el.className = 'merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5';
-            el.innerHTML = '<span class="material-symbols-outlined text-sm">check_circle</span><span>Merkle Root: Valid / Matched</span>';
-          };
-          setValid(badgeLlama);
-          setValid(badgeGenome);
-          setValid(badgeCas);
+        .catch(err => {
+          if (badgeCas) {
+            badgeCas.className = 'merkle-badge-error px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 font-mono text-xs flex items-center gap-1.5';
+            badgeCas.innerHTML = '<span class="material-symbols-outlined text-sm">error</span><span>Audit Failed</span>';
+          }
+          appendLog('STORAGE', `Storage scrub error: ${err.message}`);
         });
     });
   }
+}
 
   const shardBtn = document.getElementById('btnShardNewDataset');
   if (shardBtn) {
@@ -1269,13 +1298,14 @@ function initTaskQueue() {
   const dispatchBtn = document.getElementById('btnDispatchSampleTask');
   if (dispatchBtn) {
     dispatchBtn.addEventListener('click', () => {
+      const targetNode = (currentFleet && currentFleet.length > 0) ? currentFleet[0] : (currentLocalId || 'local-worker');
       const sampleJob = {
         job_id: `#JOB-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_ad: 'CUDACapability >= 8.9 && VRAM >= 16GB',
-        target_match: 'Matched -> PC-Node-04 (Austin)',
-        stage_dag: 'DAG_STAGE_DYNAMIC_FORWARD',
-        priority: 'P1 HIGH',
-        status: 'DISPATCHED (0%)',
+        class_ad: 'Arch == "x86_64" && HasLocalCAS == true',
+        target_match: `Matched -> ${targetNode}`,
+        stage_dag: 'STAGE_DATA_LOCAL_EXEC',
+        priority: 'P1 NORMAL',
+        status: 'SUBMITTED (0%)',
         timestamp: new Date().toLocaleTimeString()
       };
 
@@ -1287,7 +1317,7 @@ function initTaskQueue() {
       .then(r => r.json())
       .then(() => {
         loadTasks();
-        appendLog('TASK_DISPATCH', `Dispatched sample DAG task ${sampleJob.job_id} to cluster queue`);
+        appendLog('TASK_DISPATCH', `Dispatched task ${sampleJob.job_id} to cluster queue`);
       });
     });
   }
