@@ -142,13 +142,28 @@ func (m *Manager) WatchdogStatus() watchdog.Status {
 	return m.watchdog.Status()
 }
 
+// AssignProcess attaches an OS process to the GPU manager sandbox.
+func (m *Manager) AssignProcess(pid int) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.sandbox == nil {
+		return fmt.Errorf("sandbox not initialized")
+	}
+	return m.sandbox.AssignProcess(pid)
+}
+
 // ExecuteTask processes a GPU computation request with strict sandboxing and preemption support.
 func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskResponse {
 	start := time.Now()
 	resp := GPUTaskResponse{
-		JobID:    req.JobID,
-		Status:   "failed",
-		ExitCode: -1,
+		JobID:     req.JobID,
+		Status:    "failed",
+		ExitCode:  -1,
+		Simulated: true,
+	}
+
+	if req.ProcessID > 0 {
+		_ = m.AssignProcess(req.ProcessID)
 	}
 
 	// 1. Pre-flight check: if request is native CUDA code and this machine is AMD or Intel

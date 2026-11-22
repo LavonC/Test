@@ -4,6 +4,35 @@
  * Integrates Objectives 1, 2, and 3 with real Go backend APIs
  */
 
+// Parse session token from URL hash or existing session storage
+(function() {
+  const hash = window.location.hash || '';
+  const match = hash.match(/token=([a-fA-F0-9]+)/);
+  if (match && match[1]) {
+    sessionStorage.setItem('unicompute_gui_token', match[1]);
+  }
+})();
+
+function getAuthToken() {
+  return sessionStorage.getItem('unicompute_gui_token') || '';
+}
+
+// Intercept fetch to enforce Authorization and Content-Type on API calls
+const _originalFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  const token = getAuthToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', 'Bearer ' + token);
+  }
+  const method = (options.method || 'GET').toUpperCase();
+  if ((method === 'POST' || method === 'PUT' || method === 'DELETE') && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  options.headers = headers;
+  return _originalFetch(url, options);
+};
+
 let topology = null;
 let currentLocalId = '';
 let currentFleet = [];
@@ -19,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initUI();
   initWebSocket();
   loadStatus();
+  pollFleetAndPeers();
   loadSamples();
   loadBlobs();
   loadCoordinatorStatus();
@@ -209,6 +239,10 @@ function initTopologyControls() {
   topology.onNodeClick = (node) => {
     selectedPeer = node;
     openPCInspector(node);
+  };
+
+  topology.onCoordinatorClick = () => {
+    switchTab('tab-coordinator');
   };
 
   topology.onNodeHover = (node, mouseX, mouseY) => {
@@ -596,7 +630,7 @@ function loadBlobs() {
 
       // Update RS(4,2) local CAS dataset metrics
       let totalBytes = 0;
-      blobs.forEach(b => { totalBytes += (b.size_bytes || 0); });
+      blobs.forEach(b => { totalBytes += (b.size_bytes !== undefined ? b.size_bytes : (b.size || 0)); });
       const casSize = document.getElementById('rsCasTotalSize');
       if (casSize) casSize.textContent = formatBytes(totalBytes);
       const casHash = document.getElementById('rsCasRootHash');
@@ -609,17 +643,20 @@ function loadBlobs() {
         tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No blobs stored in local vault.</td></tr>`;
         return;
       }
-      tbody.innerHTML = blobs.map(b => `
+      tbody.innerHTML = blobs.map(b => {
+        const bSize = b.size_bytes !== undefined ? b.size_bytes : (b.size || 0);
+        const bDate = b.created_at || b.mod_time || new Date().toISOString();
+        return `
         <tr>
           <td><code class="text-primary font-mono text-xs">${b.id}</code></td>
-          <td>${(b.size_bytes / 1024).toFixed(1)} KiB</td>
-          <td>${new Date(b.created_at).toLocaleTimeString()}</td>
+          <td>${(bSize / 1024).toFixed(1)} KiB</td>
+          <td>${new Date(bDate).toLocaleTimeString()}</td>
           <td class="text-right space-x-2">
             <button class="btn-tool-text text-secondary hover:text-white" onclick="viewBlob('${b.id}')">View</button>
             <button class="btn-tool-text text-rose hover:text-white" onclick="deleteBlob('${b.id}')">Delete</button>
           </td>
         </tr>
-      `).join('');
+      `}).join('');
     });
 }
 
@@ -632,8 +669,10 @@ window.viewBlob = function(blobId) {
         return;
       }
       document.getElementById('viewModalBlobId').textContent = data.blob_id;
-      const sizeKiB = (data.size_bytes / 1024).toFixed(2);
-      document.getElementById('viewModalSize').textContent = `${sizeKiB} KiB • SHA-256 Valid: ${data.valid ? 'YES' : 'CORRUPTED'}`;
+      const bSize = data.size_bytes !== undefined ? data.size_bytes : (data.size || 0);
+      const sizeKiB = (bSize / 1024).toFixed(2);
+      const isValid = data.valid !== undefined ? data.valid : (data.verified !== undefined ? data.verified : false);
+      document.getElementById('viewModalSize').textContent = `${sizeKiB} KiB • SHA-256 Valid: ${isValid ? 'YES' : 'CORRUPTED'}`;
       document.getElementById('viewModalContent').textContent = data.content || '(empty)';
       document.getElementById('blobViewModal').classList.remove('hidden');
     })
@@ -726,7 +765,9 @@ function applyLogFilter() {
 
 function initWebSocket() {
   const loc = window.location;
-  const wsURL = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/api/events';
+  const token = getAuthToken();
+  const tokenParam = token ? '?token=' + encodeURIComponent(token) : '';
+  const wsURL = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/api/events' + tokenParam;
   const ws = new WebSocket(wsURL);
 
   ws.onopen = () => {
@@ -756,6 +797,15 @@ function handleLiveEvent(evt) {
   if (t.includes('storage') || t.includes('blob')) category = 'storage';
 
   appendLog(evt.type.toUpperCase(), evt.message, category);
+
+  // Spawn visual particle on real chunk and stream data events
+  if (topology) {
+    if (t === 'chunk_received' && evt.peer_id) {
+      topology.spawnEventPacket(evt.peer_id, currentLocalId, '#10b981');
+    } else if (t === 'stream_message' && evt.peer_id) {
+      topology.spawnEventPacket(evt.peer_id, currentLocalId, '#38bdf8');
+    }
+  }
 
   if (t.includes('peer') || t.includes('coordinator')) {
     pollFleetAndPeers();
@@ -825,18 +875,26 @@ function loadStatus() {
         document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
         document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
       }
+
+      // Immediately synchronize local node on topology canvas
+      if (topology) {
+        topology.updateFleet(currentFleet, connectedPeers, currentLocalId, data);
+      }
     });
 }
 
 function pollFleetAndPeers() {
   Promise.all([
-    fetch('/api/fleet').then(r => r.json()),
-    fetch('/api/peers').then(r => r.json()),
-    fetch('/api/status').then(r => r.json())
+    fetch('/api/fleet').then(r => r.json()).catch(() => ({ nodes: [] })),
+    fetch('/api/peers').then(r => r.json()).catch(() => ({ peers: [] })),
+    fetch('/api/status').then(r => r.json()).catch(() => lastStatusData || {})
   ]).then(([fleetData, peersData, statusData]) => {
-    lastStatusData = statusData;
-    currentFleet = fleetData.nodes || [];
-    connectedPeers = peersData.peers || [];
+    if (statusData && statusData.node_id) {
+      lastStatusData = statusData;
+      currentLocalId = statusData.node_id;
+    }
+    currentFleet = (fleetData && fleetData.nodes) || [];
+    connectedPeers = (peersData && peersData.peers) || [];
 
     document.getElementById('fleetCountBadge').textContent = `${currentFleet.length} Nodes`;
     document.getElementById('peerCountBadge').textContent = `${connectedPeers.length} Active`;
@@ -844,32 +902,36 @@ function pollFleetAndPeers() {
 
     // Populate Target Peer Dropdown in Code Tab
     const peerSelect = document.getElementById('codeTargetPeer');
-    const existingVal = peerSelect.value;
-    peerSelect.innerHTML = '';
+    if (peerSelect) {
+      const existingVal = peerSelect.value;
+      peerSelect.innerHTML = '';
 
-    const localOpt = document.createElement('option');
-    localOpt.value = 'local';
-    localOpt.textContent = 'Local Worker (This Machine)';
-    peerSelect.appendChild(localOpt);
+      const localOpt = document.createElement('option');
+      localOpt.value = 'local';
+      localOpt.textContent = 'Local Worker (This Machine)';
+      peerSelect.appendChild(localOpt);
 
-    currentFleet.forEach(nodeId => {
-      if (nodeId !== currentLocalId) {
-        const opt = document.createElement('option');
-        opt.value = nodeId;
-        const isConn = connectedPeers.some(p => (p.peer_id || p) === nodeId);
-        opt.textContent = `${nodeId} ${isConn ? '★ [P2P Direct]' : '[Coordinator]'}`;
-        peerSelect.appendChild(opt);
+      currentFleet.forEach(nodeId => {
+        if (nodeId !== currentLocalId) {
+          const opt = document.createElement('option');
+          opt.value = nodeId;
+          const isConn = connectedPeers.some(p => (p.peer_id || p) === nodeId);
+          opt.textContent = `${nodeId} ${isConn ? '★ [P2P Direct]' : '[Coordinator]'}`;
+          peerSelect.appendChild(opt);
+        }
+      });
+
+      if (existingVal && (existingVal === 'local' || currentFleet.includes(existingVal))) {
+        peerSelect.value = existingVal;
+      } else {
+        peerSelect.value = 'local';
       }
-    });
-
-    if (existingVal && (existingVal === 'local' || currentFleet.includes(existingVal))) {
-      peerSelect.value = existingVal;
-    } else {
-      peerSelect.value = 'local';
     }
 
-    // Refresh Canvas with real status
-    topology.updateFleet(currentFleet, connectedPeers, currentLocalId, statusData);
+    // Refresh Canvas with real status including operator local node
+    if (topology) {
+      topology.updateFleet(currentFleet, connectedPeers, currentLocalId, lastStatusData);
+    }
   }).catch(() => {});
 }
 
@@ -1052,16 +1114,32 @@ function loadCoordinatorStatus() {
     .then(data => {
       if (!data) return;
       const uptimeElem = document.getElementById('coordUptime');
-      if (uptimeElem) uptimeElem.textContent = data.uptime || '14h 22m 19s';
+      if (uptimeElem) uptimeElem.textContent = data.uptime || '0m 00s';
 
       const socketElem = document.getElementById('coordListenSocket');
-      if (socketElem) socketElem.textContent = data.quic_socket || '0.0.0.0:4194/quic';
+      if (socketElem) socketElem.textContent = data.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)';
 
       const mtlsElem = document.getElementById('coordMtls');
-      if (mtlsElem) mtlsElem.textContent = data.mtls_protocol || 'TLS_AES_256_GCM_SHA384';
+      if (mtlsElem) mtlsElem.textContent = 'DTLS 1.2 / SRTP';
 
       const daemonStat = document.getElementById('coordDaemonStatus');
       if (daemonStat) daemonStat.textContent = data.status || 'RUNNING';
+
+      if (topology) {
+        if (topology.coordinator) {
+          topology.coordinator.status = (data.status === 'RUNNING' || data.status === 'ONLINE') ? 'ONLINE' : 'OFFLINE';
+        }
+        if (data.coordinator_host) {
+          topology.coordinatorHost = data.coordinator_host;
+        } else if (data.coordinator_url) {
+          try {
+            const u = new URL(data.coordinator_url);
+            topology.coordinatorHost = u.host;
+          } catch (_) {
+            topology.coordinatorHost = data.coordinator_url.replace(/^wss?:\/\//, '').replace(/\/.*$/, '');
+          }
+        }
+      }
 
       const tokenElem = document.getElementById('coordDisplayedToken');
       if (tokenElem && data.join_token) {

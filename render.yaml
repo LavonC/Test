@@ -1,3 +1,10 @@
+# NOTE ON RENDER FREE-TIER LIMITATIONS:
+# 1. Free-tier web services spin down after 15 minutes of inactivity. When asleep, incoming P2P signaling
+#    connections will disconnect and require keep-alive pings or an initial warm-up HTTP ping to wake the service.
+# 2. Render's HTTP/TLS reverse proxy only exposes TCP ports (HTTP/HTTPS/WSS). It does NOT support UDP traffic,
+#    so embedded or standalone UDP TURN relays cannot function here. UNICOMPUTE_TURN must remain "false";
+#    peers must establish direct P2P connections or configure an external TURN server (e.g., Coturn).
+
 services:
   - type: web
     name: unicompute-coordinator

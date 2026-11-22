@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,16 +28,19 @@ var _ Substrate = (*Node)(nil)
 
 // NodeConfig specifies configuration parameters for an Objective 1 Peer Node.
 type NodeConfig struct {
-	NodeID          string
-	PoolID          string
-	StorageDir      string
-	StorageQuota    int64 // Quota in bytes
-	SignalingURL    string
-	STUNServersV4   []string
-	STUNServersV6   []string
-	TURNServers     []transport.TURNServerConfig
-	RelayAddr       string        // Optional contributor relay address
-	FallbackTimeout time.Duration // Fast fallback threshold (default 2s)
+	NodeID            string
+	PoolID            string
+	StorageDir        string
+	StorageQuota      int64 // Quota in bytes
+	SignalingURL      string
+	AuthToken         string // Cluster auth secret token
+	STUNServersV4     []string
+	STUNServersV6     []string
+	TURNServers       []transport.TURNServerConfig
+	RelayAddr         string        // Optional contributor relay address
+	FallbackTimeout   time.Duration // Fast fallback threshold (default 2s)
+	EnableRemoteShell bool          // Opt-in gate for remote shell execution
+	ShellAllowlist    []string      // Explicit peer IDs allowed to execute shell commands
 }
 
 // Node represents a full Objective 1 peer node combining storage substrate,
@@ -61,8 +65,9 @@ type Node struct {
 	onFleetPeerJoin func(peerID string)
 	onFleetPeerLeft func(peerID string)
 
-	shellExecutor    remoteshell.Executor
-	codeExecutor     codeexec.Executor
+	shellExecutor     remoteshell.Executor
+	shellAllowedPeers map[string]struct{}
+	codeExecutor      codeexec.Executor
 	codeAllowedPeers map[string]struct{}
 	pendingCodeMu    sync.Mutex
 	pendingCode      map[string]pendingCodeResult
@@ -95,17 +100,26 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	tracker := instrumentation.NewTracker()
 	classifier := nat.NewClassifier(cfg.STUNServersV4, cfg.STUNServersV6)
 
+	shellAllowed := make(map[string]struct{}, len(cfg.ShellAllowlist))
+	for _, id := range cfg.ShellAllowlist {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			shellAllowed[id] = struct{}{}
+		}
+	}
+
 	n := &Node{
-		cfg:              cfg,
-		store:            store,
-		tracker:          tracker,
-		classifier:       classifier,
-		relayClient:      &relay.RelayClient{},
-		fleetNodes:       make(map[string]bool),
-		shellExecutor:    remoteshell.NewSystemExecutor(),
-		codeAllowedPeers: make(map[string]struct{}),
-		pendingCode:      make(map[string]pendingCodeResult),
-		pendingExecs:     make(map[string]chan remoteshell.ShellResponse),
+		cfg:               cfg,
+		store:             store,
+		tracker:           tracker,
+		classifier:        classifier,
+		relayClient:       &relay.RelayClient{},
+		fleetNodes:        make(map[string]bool),
+		shellExecutor:     remoteshell.NewSystemExecutor(),
+		shellAllowedPeers: shellAllowed,
+		codeAllowedPeers:  make(map[string]struct{}),
+		pendingCode:       make(map[string]pendingCodeResult),
+		pendingExecs:      make(map[string]chan remoteshell.ShellResponse),
 	}
 
 	return n, nil
@@ -134,7 +148,7 @@ func (n *Node) Start(ctx context.Context) error {
 
 	// 2. Connect to signaling hub (if URL provided)
 	if n.cfg.SignalingURL != "" {
-		sigClient, err := signaling.NewClient(n.cfg.SignalingURL, n.cfg.NodeID, n.handleSignalingEnvelope)
+		sigClient, err := signaling.NewClient(n.cfg.SignalingURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
 		if err != nil {
 			// Invariant CP-1: Signaling failure must not prevent local operations,
 			// but we return the warning/error for awareness
@@ -222,6 +236,24 @@ func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
 
 func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 	peerID := pc.RemotePeerID
+
+	pc.SetOnChunkRequest(func(chunkID string) {
+		stat, err := n.store.Stat(chunkID)
+		if err != nil {
+			_ = pc.SendChunkError(chunkID, err.Error())
+			return
+		}
+		rc, err := n.store.Get(chunkID)
+		if err != nil {
+			_ = pc.SendChunkError(chunkID, err.Error())
+			return
+		}
+		defer rc.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = pc.SendChunk(ctx, chunkID, rc, stat.Size)
+	})
 
 	pc.SetOnChunkReceived(func(chunkID string, data []byte) {
 		// Save received chunk into local blob store
@@ -318,10 +350,10 @@ func (n *Node) FetchChunk(ctx context.Context, peerID string, chunkID string, ex
 		return fmt.Errorf("no active connection to peer %s", peerID)
 	}
 
-	// Wait for chunk over DataChannel
-	data, err := conn.ReceiveChunk(ctx, chunkID, expectedSize)
+	// Register in-flight waiter and transmit chunk request (0x10) end-to-end
+	data, err := conn.FetchChunk(ctx, chunkID, expectedSize)
 	if err != nil {
-		return fmt.Errorf("failed to receive chunk %s: %w", chunkID, err)
+		return fmt.Errorf("failed to fetch chunk %s: %w", chunkID, err)
 	}
 
 	// Commit to local store with SHA256 integrity check and quota accounting
@@ -365,8 +397,36 @@ func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
 
 		go func() {
 			n.mu.RLock()
+			enabled := n.cfg.EnableRemoteShell
+			_, inAllowlist := n.shellAllowedPeers[peerID]
+			_, wildcard := n.shellAllowedPeers["*"]
 			exec := n.shellExecutor
 			n.mu.RUnlock()
+
+			if !enabled {
+				errResp := remoteshell.ShellResponse{
+					ExecID:   req.ExecID,
+					ExitCode: -1,
+					Error:    "remote shell disabled on this node",
+				}
+				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
+					_ = n.SendStream(peerID, respBytes)
+				}
+				return
+			}
+
+			if !inAllowlist && !wildcard {
+				errResp := remoteshell.ShellResponse{
+					ExecID:   req.ExecID,
+					ExitCode: -1,
+					Error:    "peer not in shell allowlist",
+				}
+				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
+					_ = n.SendStream(peerID, respBytes)
+				}
+				return
+			}
+
 			if exec == nil {
 				exec = remoteshell.NewSystemExecutor()
 			}
@@ -706,9 +766,50 @@ func (n *Node) SetFallbackTimeout(d time.Duration) {
 	}
 }
 
+// SetRemoteShellConfig dynamically updates remote shell enablement and allowlist.
+func (n *Node) SetRemoteShellConfig(enabled bool, allowlist []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cfg.EnableRemoteShell = enabled
+	n.cfg.ShellAllowlist = allowlist
+	n.shellAllowedPeers = make(map[string]struct{})
+	for _, p := range allowlist {
+		n.shellAllowedPeers[p] = struct{}{}
+	}
+}
+
 // FallbackTimeout returns the active blind relay fallback timeout threshold.
 func (n *Node) FallbackTimeout() time.Duration {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.cfg.FallbackTimeout
+}
+
+// ReconnectSignaling closes the current signaling client (if any) and connects to newURL.
+func (n *Node) ReconnectSignaling(ctx context.Context, newURL string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.signaling != nil {
+		_ = n.signaling.Close()
+		n.signaling = nil
+	}
+
+	n.cfg.SignalingURL = newURL
+	if newURL == "" {
+		if n.transport != nil {
+			n.transport.SetSignalingClient(nil)
+		}
+		return nil
+	}
+
+	sigClient, err := signaling.NewClient(newURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
+	if err != nil {
+		return fmt.Errorf("failed to connect to signaling hub: %w", err)
+	}
+	n.signaling = sigClient
+	if n.transport != nil {
+		n.transport.SetSignalingClient(sigClient)
+	}
+	return nil
 }

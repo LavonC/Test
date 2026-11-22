@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,14 +23,14 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/gpu"
-	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
 	"github.com/unicompute/obj1/pkg/node"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+type wsClient struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 // ServerState encapsulates the active node and GUI runtime state.
@@ -35,10 +41,15 @@ type ServerState struct {
 	gpuEnabled     bool
 	gpuConfig      gpu.ManagerConfig
 	coordinatorURL string
-	wsClients      map[*websocket.Conn]bool
+	sessionToken   string
+	activePort     int
+	upgrader       websocket.Upgrader
+	wsClients      map[*wsClient]bool
 	wsMu           sync.Mutex
 	eventLog       []EventMessage
 	pendingReqs    map[string]string // peerID -> status
+	pendingPings   map[string]chan time.Duration
+	pingMu         sync.Mutex
 	startTime      time.Time
 	relayThreshold float64
 	joinToken      string
@@ -67,56 +78,74 @@ type EventMessage struct {
 	Payload   any       `json:"payload,omitempty"`
 }
 
+func shortID(id string, n int) string {
+	if len(id) <= n {
+		return id
+	}
+	return id[:n]
+}
+
+func (s *ServerState) SessionToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionToken
+}
+
+func (s *ServerState) SetSessionToken(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionToken = token
+}
+
+func (s *ServerState) SetActivePort(port int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activePort = port
+}
+
 func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gpu.ManagerConfig) *ServerState {
+	tokenBytes := make([]byte, 32)
+	_, _ = rand.Read(tokenBytes)
+
 	s := &ServerState{
 		node:           n,
 		nodeConfig:     nCfg,
 		gpuEnabled:     gpuEnabled,
 		gpuConfig:      gCfg,
 		coordinatorURL: nCfg.SignalingURL,
+		sessionToken:   hex.EncodeToString(tokenBytes),
 		startTime:      time.Now(),
 		relayThreshold: 2.0,
 		joinToken:      "UC-9F4A-82B1",
-		wsClients:      make(map[*websocket.Conn]bool),
+		wsClients:      make(map[*wsClient]bool),
 		eventLog:       make([]EventMessage, 0, 100),
 		pendingReqs:    make(map[string]string),
-		tasks: []ClusterTask{
-			{
-				JobID:       "#JOB-8104",
-				ClassAd:     "CUDACapability >= 8.9 && VRAM >= 16GB",
-				TargetMatch: "Matched -> PC-Node-04 (Austin)",
-				StageDAG:    "DAG_STAGE_TENSOR_FORWARD",
-				Priority:    "P0 CRITICAL",
-				Status:      "RUNNING (48%)",
-				Timestamp:   time.Now().Add(-2 * time.Minute).Format("15:04:05"),
-			},
-			{
-				JobID:       "#JOB-8105",
-				ClassAd:     "SandboxTier == Tier2 && Arch == \"x86_64\"",
-				TargetMatch: "Matched -> PC-Node-02 (Tokyo)",
-				StageDAG:    "DAG_STAGE_GENOME_INDEX",
-				Priority:    "P2 NORMAL",
-				Status:      "STAGE_DISPATCHED",
-				Timestamp:   time.Now().Add(-5 * time.Minute).Format("15:04:05"),
-			},
-			{
-				JobID:       "#JOB-8106",
-				ClassAd:     "WASI_Compliant && RAM >= 8GB",
-				TargetMatch: "Matched -> PC-Node-03 (Frankfurt)",
-				StageDAG:    "DAG_STAGE_REDUCE_MERKLE",
-				Priority:    "P3 LOW",
-				Status:      "QUEUED (Slot 2)",
-				Timestamp:   time.Now().Add(-8 * time.Minute).Format("15:04:05"),
-			},
-			{
-				JobID:       "#JOB-8107",
-				ClassAd:     "CUDACapability >= 8.0 && ShardLoc == D1",
-				TargetMatch: "Matched -> PC-Node-01 (Seattle)",
-				StageDAG:    "DAG_STAGE_EMBED_GEN",
-				Priority:    "P1 HIGH",
-				Status:      "RUNNING (12%)",
-				Timestamp:   time.Now().Add(-11 * time.Minute).Format("15:04:05"),
-			},
+		pendingPings:   make(map[string]chan time.Duration),
+		tasks:          []ClusterTask{}, // Real empty task queue; no fake seed tasks
+	}
+
+	s.upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			host := u.Hostname()
+			if host != "127.0.0.1" && host != "localhost" {
+				return false
+			}
+			port := u.Port()
+			s.mu.RLock()
+			expectedPort := s.activePort
+			s.mu.RUnlock()
+			if expectedPort != 0 && port != "" && port != fmt.Sprintf("%d", expectedPort) {
+				return false
+			}
+			return true
 		},
 	}
 
@@ -140,11 +169,35 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 
 	n.SetOnStreamMessage(func(peerID string, data []byte) {
 		msg := string(data)
+		if strings.HasPrefix(msg, "__PING__:") {
+			ts := strings.TrimPrefix(msg, "__PING__:")
+			_ = n.SendStream(peerID, []byte("__PONG__:"+ts))
+			return
+		}
+		if strings.HasPrefix(msg, "__PONG__:") {
+			parts := strings.Split(strings.TrimPrefix(msg, "__PONG__:"), ":")
+			if len(parts) >= 2 {
+				pingID := parts[1]
+				s.pingMu.Lock()
+				ch, ok := s.pendingPings[pingID]
+				s.pingMu.Unlock()
+				if ok && ch != nil {
+					if tsNano, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+						rtt := time.Duration(time.Now().UnixNano() - tsNano)
+						select {
+						case ch <- rtt:
+						default:
+						}
+					}
+				}
+			}
+			return
+		}
 		s.Broadcast("stream_message", peerID, msg, map[string]string{"from": peerID, "text": msg})
 	})
 
 	n.SetOnChunkReceived(func(peerID, chunkID string, size int64) {
-		s.Broadcast("chunk_received", peerID, fmt.Sprintf("Received chunk %s (%d bytes) from %s", chunkID[:8], size, peerID), map[string]any{
+		s.Broadcast("chunk_received", peerID, fmt.Sprintf("Received chunk %s (%d bytes) from %s", shortID(chunkID, 8), size, peerID), map[string]any{
 			"chunk_id": chunkID,
 			"size":     size,
 		})
@@ -180,37 +233,111 @@ func (s *ServerState) Broadcast(eventType, peerID, message string, payload any) 
 	}
 	s.eventLog = append(s.eventLog, evt)
 
-	for conn := range s.wsClients {
-		_ = conn.WriteJSON(evt)
+	clients := make([]*wsClient, 0, len(s.wsClients))
+	for client := range s.wsClients {
+		clients = append(clients, client)
 	}
 	s.wsMu.Unlock()
+
+	for _, client := range clients {
+		client.writeMu.Lock()
+		_ = client.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		err := client.conn.WriteJSON(evt)
+		client.writeMu.Unlock()
+
+		if err != nil {
+			s.wsMu.Lock()
+			delete(s.wsClients, client)
+			s.wsMu.Unlock()
+			_ = client.conn.Close()
+		}
+	}
 }
 
-// SetupRoutes registers all REST and WebSocket API endpoints.
+// authMiddleware enforces Origin checks, constant-time bearer token auth, and Content-Type validation.
+func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Origin header validation (if present)
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil {
+				http.Error(w, "invalid origin", http.StatusForbidden)
+				return
+			}
+			host := u.Hostname()
+			if host != "127.0.0.1" && host != "localhost" {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			port := u.Port()
+			s.mu.RLock()
+			expectedPort := s.activePort
+			s.mu.RUnlock()
+			if expectedPort != 0 && port != "" && port != fmt.Sprintf("%d", expectedPort) {
+				http.Error(w, "forbidden origin port", http.StatusForbidden)
+				return
+			}
+		}
+
+		// 2. Token validation (Authorization: Bearer <token> or ?token=<token>)
+		s.mu.RLock()
+		expectedToken := s.sessionToken
+		s.mu.RUnlock()
+
+		if expectedToken != "" {
+			token := ""
+			authHdr := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHdr, "Bearer ") {
+				token = strings.TrimPrefix(authHdr, "Bearer ")
+			} else {
+				token = r.URL.Query().Get("token")
+			}
+
+			if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		// 3. Content-Type validation for mutating requests (POST, PUT, DELETE)
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			ct := r.Header.Get("Content-Type")
+			if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+				http.Error(w, "unsupported media type: application/json required", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+
+		next(w, r)
+	}
+}
+
+// SetupRoutes registers all REST and WebSocket API endpoints wrapped in auth middleware.
 func (s *ServerState) SetupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/coordinator/connect", s.handleCoordinatorConnect)
-	mux.HandleFunc("/api/coordinator/status", s.handleCoordinatorStatus)
-	mux.HandleFunc("/api/coordinator/settings", s.handleCoordinatorSettings)
-	mux.HandleFunc("/api/tasks", s.handleTasks)
-	mux.HandleFunc("/api/fleet", s.handleFleet)
-	mux.HandleFunc("/api/peers", s.handlePeers)
-	mux.HandleFunc("/api/peer/connect", s.handlePeerConnect)
-	mux.HandleFunc("/api/peer/disconnect", s.handlePeerDisconnect)
-	mux.HandleFunc("/api/peer/ping", s.handlePeerPing)
-	mux.HandleFunc("/api/peer/stream", s.handlePeerStream)
-	mux.HandleFunc("/api/gpu", s.handleGPU)
-	mux.HandleFunc("/api/gpu/hipify", s.handleGPUHipify)
-	mux.HandleFunc("/api/gpu/run", s.handleGPURun)
-	mux.HandleFunc("/api/code/run", s.handleCodeRun)
-	mux.HandleFunc("/api/shell/exec", s.handleShellExec)
-	mux.HandleFunc("/api/storage/blobs", s.handleStorageBlobs)
-	mux.HandleFunc("/api/storage/get", s.handleStorageGet)
-	mux.HandleFunc("/api/storage/put", s.handleStoragePut)
-	mux.HandleFunc("/api/storage/del", s.handleStorageDel)
-	mux.HandleFunc("/api/storage/scrub", s.handleStorageScrub)
-	mux.HandleFunc("/api/samples", s.handleSamples)
-	mux.HandleFunc("/api/events", s.handleEventsWS)
+	mux.HandleFunc("/api/status", s.authMiddleware(s.handleStatus))
+	mux.HandleFunc("/api/coordinator/connect", s.authMiddleware(s.handleCoordinatorConnect))
+	mux.HandleFunc("/api/coordinator/status", s.authMiddleware(s.handleCoordinatorStatus))
+	mux.HandleFunc("/api/coordinator/settings", s.authMiddleware(s.handleCoordinatorSettings))
+	mux.HandleFunc("/api/tasks", s.authMiddleware(s.handleTasks))
+	mux.HandleFunc("/api/fleet", s.authMiddleware(s.handleFleet))
+	mux.HandleFunc("/api/peers", s.authMiddleware(s.handlePeers))
+	mux.HandleFunc("/api/peer/connect", s.authMiddleware(s.handlePeerConnect))
+	mux.HandleFunc("/api/peer/disconnect", s.authMiddleware(s.handlePeerDisconnect))
+	mux.HandleFunc("/api/peer/ping", s.authMiddleware(s.handlePeerPing))
+	mux.HandleFunc("/api/peer/stream", s.authMiddleware(s.handlePeerStream))
+	mux.HandleFunc("/api/gpu", s.authMiddleware(s.handleGPU))
+	mux.HandleFunc("/api/gpu/hipify", s.authMiddleware(s.handleGPUHipify))
+	mux.HandleFunc("/api/gpu/run", s.authMiddleware(s.handleGPURun))
+	mux.HandleFunc("/api/code/run", s.authMiddleware(s.handleCodeRun))
+	mux.HandleFunc("/api/shell/exec", s.authMiddleware(s.handleShellExec))
+	mux.HandleFunc("/api/storage/blobs", s.authMiddleware(s.handleStorageBlobs))
+	mux.HandleFunc("/api/storage/get", s.authMiddleware(s.handleStorageGet))
+	mux.HandleFunc("/api/storage/put", s.authMiddleware(s.handleStoragePut))
+	mux.HandleFunc("/api/storage/del", s.authMiddleware(s.handleStorageDel))
+	mux.HandleFunc("/api/storage/scrub", s.authMiddleware(s.handleStorageScrub))
+	mux.HandleFunc("/api/samples", s.authMiddleware(s.handleSamples))
+	mux.HandleFunc("/api/events", s.authMiddleware(s.handleEventsWS))
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -263,12 +390,17 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	url := strings.TrimSpace(body.URL)
 	s.mu.Lock()
-	s.coordinatorURL = strings.TrimSpace(body.URL)
+	s.coordinatorURL = url
 	s.mu.Unlock()
 
-	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", s.coordinatorURL), body.URL)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "reconnecting", "url": s.coordinatorURL})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.node.ReconnectSignaling(ctx, url)
+
+	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), body.URL)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reconnecting", "url": url})
 }
 
 func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Request) {
@@ -290,7 +422,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	client := &http.Client{Timeout: 1200 * time.Millisecond}
 	status := "RUNNING"
 	fleetCount := 0
-	var nodeIDs []string
+	nodeIDs := []string{}
 
 	// Query coordinator /health
 	healthResp, err := client.Get(httpURL + "/health")
@@ -322,7 +454,9 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 			nodeIDs = fleet
 			status = "CONNECTED"
 		} else {
-			status = "RUNNING (LOCAL)"
+			status = "DISCONNECTED"
+			fleetCount = 0
+			nodeIDs = []string{}
 		}
 	}
 
@@ -330,8 +464,8 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	directCount := 0
 	relayedCount := 0
 	var totalDirectRTT int64
-	var directNodes []string
-	var relayedNodes []string
+	directNodes := []string{}
+	relayedNodes := []string{}
 
 	for _, p := range connectedPeers {
 		if m, ok := s.node.GetPathMetrics(p); ok && m.IsDirect {
@@ -344,37 +478,43 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	avgRTT := 21.4
+	avgRTT := 0.0
 	if directCount > 0 {
 		avgRTT = float64(totalDirectRTT) / float64(directCount)
-		if avgRTT < 1.0 {
-			avgRTT = 1.0
-		}
-	}
-
-	// If standalone/demo with zero peers, provide realistic baseline counts for UI inspection
-	if fleetCount == 0 && len(nodeIDs) == 0 {
-		fleetCount = 24
-		nodeIDs = []string{
-			"PC-Node-01 (Seattle)", "PC-Node-02 (Tokyo)", "PC-Node-03 (Frankfurt)",
-			"PC-Node-04 (Austin)", "PC-Node-05 (Singapore)", "PC-Node-06 (London)",
-		}
-	}
-	if len(connectedPeers) == 0 {
-		directCount = 18
-		relayedCount = 6
 	}
 
 	uptimeDur := time.Since(startTime)
 	uptimeStr := fmt.Sprintf("%dh %02dm %02ds", int(uptimeDur.Hours()), int(uptimeDur.Minutes())%60, int(uptimeDur.Seconds())%60)
 
+	usage := s.node.StorageUsage()
+	natRep := s.node.NATReport()
+	natType := "Unknown"
+	if natRep != nil {
+		natType = string(natRep.NATType)
+	}
+
+	coordHost := ""
+	if u, err := url.Parse(coordURL); err == nil && u.Host != "" {
+		coordHost = u.Host
+	} else {
+		trimmed := strings.TrimPrefix(strings.TrimPrefix(coordURL, "wss://"), "ws://")
+		if idx := strings.Index(trimmed, "/"); idx != -1 {
+			coordHost = trimmed[:idx]
+		} else {
+			coordHost = trimmed
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              status,
 		"uptime":              uptimeStr,
 		"coordinator_url":     coordURL,
+		"coordinator_host":    coordHost,
 		"http_url":            httpURL,
-		"quic_socket":         "0.0.0.0:4194/quic",
-		"mtls_protocol":       "TLS_AES_256_GCM_SHA384",
+		"transport":           "WebRTC DataChannel (ICE/DTLS/SCTP)",
+		"blob_count":          usage.BlobCount,
+		"storage_bytes":       usage.UsedBytes,
+		"nat_type":            natType,
 		"fleet_count":         fleetCount,
 		"node_ids":            nodeIDs,
 		"join_token":          joinToken,
@@ -385,15 +525,6 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 		"direct_nodes":        directNodes,
 		"relayed_nodes":       relayedNodes,
 		"throttled_count":     0,
-		"merkle_verified_pct": 100.0,
-		"merkle_hash_count":   3892104,
-		"mesh_capacity_used":  fleetCount,
-		"mesh_capacity_max":   32,
-		"coordinator_key":     "ed25519-sk-0x9F4A82B14C00EA1",
-		"cipher_suite":        "CHACHA20_POLY1305_SHA256",
-		"nat_hole_punch":      "STUN/TURN RFC-8489 Active",
-		"concurrency_policy":  "EPOLL_WORKER_FAIR_QUEUING",
-		"x509_cert_sha256":    "7f8a...c931",
 	})
 }
 
@@ -493,10 +624,17 @@ func (s *ServerState) handleFleet(w http.ResponseWriter, r *http.Request) {
 
 func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 	connectedPeers := s.node.GetConnectedPeers()
+	type PeerMetrics struct {
+		IsDirect        bool    `json:"is_direct"`
+		RTTMs           float64 `json:"rtt_ms"`
+		LocalCandidate  string  `json:"local_candidate,omitempty"`
+		RemoteCandidate string  `json:"remote_candidate,omitempty"`
+		PairType        string  `json:"pair_type,omitempty"`
+	}
 	type PeerInfo struct {
-		PeerID   string                       `json:"peer_id"`
-		IsDirect bool                         `json:"is_direct"`
-		Metrics  *instrumentation.PathMetrics `json:"metrics,omitempty"`
+		PeerID   string       `json:"peer_id"`
+		IsDirect bool         `json:"is_direct"`
+		Metrics  *PeerMetrics `json:"metrics,omitempty"`
 	}
 
 	result := make([]PeerInfo, 0, len(connectedPeers))
@@ -504,7 +642,14 @@ func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 		info := PeerInfo{PeerID: p}
 		if m, ok := s.node.GetPathMetrics(p); ok {
 			info.IsDirect = m.IsDirect
-			info.Metrics = &m
+			rttMs := float64(m.RTT.Microseconds()) / 1000.0
+			info.Metrics = &PeerMetrics{
+				IsDirect:        m.IsDirect,
+				RTTMs:           rttMs,
+				LocalCandidate:  m.LocalCandidate,
+				RemoteCandidate: m.RemoteCandidate,
+				PairType:        string(m.PairType),
+			}
 		}
 		result = append(result, info)
 	}
@@ -566,19 +711,43 @@ func (s *ServerState) handlePeerPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start := time.Now()
+	pingID := uuid.New().String()[:8]
+	respCh := make(chan time.Duration, 1)
+
+	s.pingMu.Lock()
+	s.pendingPings[pingID] = respCh
+	s.pingMu.Unlock()
+
+	defer func() {
+		s.pingMu.Lock()
+		delete(s.pendingPings, pingID)
+		s.pingMu.Unlock()
+	}()
+
 	nowNano := fmt.Sprintf("%d", time.Now().UnixNano())
-	err := s.node.SendStream(body.PeerID, []byte("__PING__:"+nowNano))
+	err := s.node.SendStream(body.PeerID, []byte(fmt.Sprintf("__PING__:%s:%s", nowNano, pingID)))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "ping_sent",
-		"peer_id":     body.PeerID,
-		"duration_ms": time.Since(start).Milliseconds(),
-	})
+	select {
+	case rtt := <-respCh:
+		rttMs := float64(rtt.Microseconds()) / 1000.0
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "pong_received",
+			"peer_id":     body.PeerID,
+			"duration_ms": rtt.Milliseconds(),
+			"rtt_ms":      rttMs,
+		})
+	case <-time.After(5 * time.Second):
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "ping_timeout",
+			"peer_id":     body.PeerID,
+			"duration_ms": 5000,
+			"rtt_ms":      5000.0,
+		})
+	}
 }
 
 func (s *ServerState) handlePeerStream(w http.ResponseWriter, r *http.Request) {
@@ -890,8 +1059,25 @@ func (s *ServerState) handleStorageBlobs(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	type enrichedBlob struct {
+		ID        string    `json:"id"`
+		Size      int64     `json:"size"`
+		SizeBytes int64     `json:"size_bytes"`
+		ModTime   time.Time `json:"mod_time"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	enriched := make([]enrichedBlob, 0, len(blobs))
+	for _, b := range blobs {
+		enriched = append(enriched, enrichedBlob{
+			ID:        b.ID,
+			Size:      b.Size,
+			SizeBytes: b.Size,
+			ModTime:   b.ModTime,
+			CreatedAt: b.ModTime,
+		})
+	}
 	usage := s.node.StorageUsage()
-	writeJSON(w, http.StatusOK, map[string]any{"blobs": blobs, "usage": usage})
+	writeJSON(w, http.StatusOK, map[string]any{"blobs": enriched, "usage": usage})
 }
 
 func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
@@ -917,10 +1103,12 @@ func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 	isValid := verified && verifyErr == nil
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"blob_id":  blobID,
-		"content":  content,
-		"size":     n,
-		"verified": isValid,
+		"blob_id":    blobID,
+		"content":    content,
+		"size":       n,
+		"size_bytes": n,
+		"verified":   isValid,
+		"valid":      isValid,
 	})
 }
 
@@ -933,9 +1121,9 @@ func (s *ServerState) handleStoragePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute hash as blobID
-	hasher := uuid.New().String()[:12]
-	blobID := "blob-" + hasher
+	// Compute real SHA-256 hash as blobID (64 hex characters)
+	h := sha256.Sum256([]byte(body.Content))
+	blobID := hex.EncodeToString(h[:])
 	size, err := s.node.PutBlob(blobID, strings.NewReader(body.Content))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -943,10 +1131,15 @@ func (s *ServerState) handleStoragePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.Broadcast("storage_put", "", fmt.Sprintf("Stored blob %s (%d bytes)", blobID, size), map[string]any{
-		"blob_id": blobID,
-		"size":    size,
+		"blob_id":    blobID,
+		"size":       size,
+		"size_bytes": size,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"blob_id": blobID, "size": size})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"blob_id":    blobID,
+		"size":       size,
+		"size_bytes": size,
+	})
 }
 
 func (s *ServerState) handleStorageDel(w http.ResponseWriter, r *http.Request) {
@@ -1032,24 +1225,38 @@ func (s *ServerState) handleSamples(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleEventsWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	client := &wsClient{conn: conn}
 
 	s.wsMu.Lock()
-	s.wsClients[conn] = true
-	// Send recent backlog
-	for _, evt := range s.eventLog {
-		_ = conn.WriteJSON(evt)
-	}
+	s.wsClients[client] = true
+	backlog := make([]EventMessage, len(s.eventLog))
+	copy(backlog, s.eventLog)
 	s.wsMu.Unlock()
+
+	// Send recent backlog without holding wsMu
+	for _, evt := range backlog {
+		client.writeMu.Lock()
+		_ = client.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		err := client.conn.WriteJSON(evt)
+		client.writeMu.Unlock()
+		if err != nil {
+			s.wsMu.Lock()
+			delete(s.wsClients, client)
+			s.wsMu.Unlock()
+			_ = conn.Close()
+			return
+		}
+	}
 
 	defer func() {
 		s.wsMu.Lock()
-		delete(s.wsClients, conn)
+		delete(s.wsClients, client)
 		s.wsMu.Unlock()
+		_ = conn.Close()
 	}()
 
 	// Read pump to detect close

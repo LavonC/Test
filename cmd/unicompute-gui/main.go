@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -31,16 +33,28 @@ func main() {
 	storageDir := flag.String("storage", "", "Storage directory for chunk blobs")
 	quotaGB := flag.Int64("quota-gb", 10, "Contributed storage quota in GiB")
 	signalingURL := flag.String("signaling", "wss://unicompute-coordinator.onrender.com/ws", "Coordinator signaling WebSocket URL")
+	authToken := flag.String("auth-token", os.Getenv("UNICOMPUTE_AUTH_TOKEN"), "Coordinator signaling authentication token")
 	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address")
 	stunServer6 := flag.String("stun6", "", "IPv6 STUN server address")
 	enableGPU := flag.Bool("enable-gpu", true, "Enable Objective 3 GPU acceleration and resource governance")
 	enableCode := flag.Bool("enable-code-execution", true, "Enable Docker sandbox code execution if available")
-	codeAllowlist := flag.String("code-allowlist", "*", "Comma-separated peer IDs allowed to submit code jobs (* for any)")
+	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated peer IDs allowed to submit code jobs (* for any)")
+	enableRemoteShell := flag.Bool("enable-remote-shell", false, "Enable remote shell execution on this node (requires allowlist)")
+	shellAllowlist := flag.String("shell-allowlist", "", "Comma-separated peer IDs allowed to execute remote shell commands")
 	headless := flag.Bool("headless", false, "Run in headless server mode without launching desktop window")
 	port := flag.Int("port", 23080, "Port for GUI web server")
 	listenHost := flag.String("listen", "127.0.0.1", "Host interface to bind the GUI server to (use 0.0.0.0 for LAN)")
+	allowRemoteGUI := flag.Bool("allow-remote-gui", false, "Allow binding GUI server to non-loopback interfaces")
 
 	flag.Parse()
+
+	if *enableRemoteShell && strings.TrimSpace(*shellAllowlist) == "" {
+		log.Fatalf("[FATAL] -enable-remote-shell is true but -shell-allowlist is empty; remote shell startup refused for security")
+	}
+
+	if *listenHost != "127.0.0.1" && *listenHost != "localhost" && *listenHost != "::1" && !*allowRemoteGUI {
+		log.Fatalf("[FATAL] Refusing to bind GUI server to non-loopback interface '%s' without -allow-remote-gui flag\n", *listenHost)
+	}
 
 	if *nodeID == "" {
 		*nodeID = "node-" + uuid.New().String()[:8]
@@ -72,16 +86,28 @@ func main() {
 		}
 	}
 
+	var shellList []string
+	if *shellAllowlist != "" {
+		for _, s := range strings.Split(*shellAllowlist, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				shellList = append(shellList, s)
+			}
+		}
+	}
+
 	quotaBytes := *quotaGB * 1024 * 1024 * 1024
 	nodeCfg := node.NodeConfig{
-		NodeID:          *nodeID,
-		PoolID:          *poolID,
-		StorageDir:      *storageDir,
-		StorageQuota:    quotaBytes,
-		SignalingURL:    *signalingURL,
-		STUNServersV4:   stunListV4,
-		STUNServersV6:   stunListV6,
-		FallbackTimeout: 2000 * time.Millisecond,
+		NodeID:            *nodeID,
+		PoolID:            *poolID,
+		StorageDir:        *storageDir,
+		StorageQuota:      quotaBytes,
+		SignalingURL:      *signalingURL,
+		AuthToken:         *authToken,
+		STUNServersV4:     stunListV4,
+		STUNServersV6:     stunListV6,
+		FallbackTimeout:   2000 * time.Millisecond,
+		EnableRemoteShell: *enableRemoteShell,
+		ShellAllowlist:    shellList,
 	}
 
 	n, err := node.NewNode(nodeCfg)
@@ -115,8 +141,12 @@ func main() {
 		dockerCtx, cancelDocker := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := codeexec.CheckDocker(dockerCtx); err == nil {
 			var allowedPeers []string
-			if *codeAllowlist != "" && *codeAllowlist != "*" {
-				allowedPeers = strings.Split(*codeAllowlist, ",")
+			if *codeAllowlist != "" {
+				for _, p := range strings.Split(*codeAllowlist, ",") {
+					if p = strings.TrimSpace(p); p != "" {
+						allowedPeers = append(allowedPeers, p)
+					}
+				}
 			}
 			n.SetCodeExecutor(codeexec.NewDockerExecutor(codeexec.Config{
 				DefaultTimeout: 10 * time.Second,
@@ -140,15 +170,43 @@ func main() {
 
 	// Initialize GUI Server State & API Mux
 	state := NewServerState(n, nodeCfg, *enableGPU, gpuCfg)
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		log.Fatalf("[FATAL] Failed to generate session token: %v\n", err)
+	}
+	sessionToken := hex.EncodeToString(tokenBytes)
+	state.SetSessionToken(sessionToken)
 	mux := http.NewServeMux()
 	state.SetupRoutes(mux)
 
-	// Serve embedded web frontend assets
-	subFS, err := fs.Sub(embeddedWebFS, "web")
-	if err != nil {
-		log.Fatalf("[FATAL] Failed to access embedded web files: %v\n", err)
+	// Serve web frontend assets: prefer live disk directory if present, fallback to embedded assets
+	var fileHandler http.Handler
+	candidates := []string{
+		"cmd/unicompute-gui/web",
+		"web",
+		filepath.Join(filepath.Dir(os.Args[0]), "web"),
+		filepath.Join(filepath.Dir(os.Args[0]), "cmd", "unicompute-gui", "web"),
 	}
-	mux.Handle("/", http.FileServer(http.FS(subFS)))
+	var diskDir string
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			if _, err := os.Stat(filepath.Join(c, "index.html")); err == nil {
+				diskDir = c
+				break
+			}
+		}
+	}
+	if diskDir != "" {
+		log.Printf("[GUI] Serving live web frontend assets from disk: %s\n", diskDir)
+		fileHandler = http.FileServer(http.Dir(diskDir))
+	} else {
+		subFS, err := fs.Sub(embeddedWebFS, "web")
+		if err != nil {
+			log.Fatalf("[FATAL] Failed to access embedded web files: %v\n", err)
+		}
+		fileHandler = http.FileServer(http.FS(subFS))
+	}
+	mux.Handle("/", fileHandler)
 
 	// Find free port if default is occupied
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *listenHost, *port))
@@ -160,7 +218,9 @@ func main() {
 		}
 	}
 	actualPort := listener.Addr().(*net.TCPAddr).Port
+	state.SetActivePort(actualPort)
 	guiURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
+	desktopURL := fmt.Sprintf("%s/#token=%s", guiURL, sessionToken)
 
 	srv := &http.Server{Handler: mux}
 	go func() {
@@ -173,31 +233,35 @@ func main() {
 	fmt.Println(" UniCompute Native Desktop Application Active")
 	fmt.Printf(" Node ID:        %s\n", *nodeID)
 	fmt.Printf(" Coordinator:    %s\n", *signalingURL)
-	fmt.Printf(" Local GUI URL:  %s\n", guiURL)
+	fmt.Printf(" Local GUI URL:  %s\n", desktopURL)
 	fmt.Println("=========================================================================")
+
+	shutdownCh := make(chan struct{})
 
 	// Launch dedicated native desktop app window unless headless
 	if !*headless {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
-			log.Printf("[GUI] Launching native desktop window for %s...\n", guiURL)
-			cmd, err := launchDesktopWindow(guiURL)
+			log.Printf("[GUI] Launching native desktop window for %s...\n", desktopURL)
+			cmd, err := launchDesktopWindow(desktopURL)
 			if err != nil {
-				log.Printf("[WARN] Could not spawn desktop window (%v). Access GUI via: %s\n", err, guiURL)
+				log.Printf("[WARN] Could not spawn desktop window (%v). Access GUI via: %s\n", err, desktopURL)
 			} else if cmd != nil {
 				_ = cmd.Wait() // When user closes desktop window, trigger graceful exit
 				log.Println("[GUI] Desktop window closed by user. Exiting daemon...")
-				p, _ := os.FindProcess(os.Getpid())
-				_ = p.Signal(os.Interrupt)
+				close(shutdownCh)
 			}
 		}()
 	} else {
-		log.Printf("[HEADLESS] Running in headless mode. Open %s in your browser.\n", guiURL)
+		log.Printf("[HEADLESS] Running in headless mode. Open %s in your browser.\n", desktopURL)
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
+	select {
+	case <-sigCh:
+	case <-shutdownCh:
+	}
 
 	log.Println("[INFO] Shutting down UniCompute GUI gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)

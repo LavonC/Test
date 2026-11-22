@@ -21,6 +21,7 @@ func main() {
 	fmt.Println("===================================================================")
 	fmt.Println(" UniCompute Contributor Relay (Syncthing Relay-v1 Model)")
 	fmt.Printf(" Listening on: %s\n", *listenAddr)
+	fmt.Println(" [DEPRECATED] Contributor relay is deprecated; use embedded/external TURN for WebRTC NAT traversal.")
 	fmt.Println(" Opaque byte forwarding with blind end-to-end encryption")
 	fmt.Println("===================================================================")
 

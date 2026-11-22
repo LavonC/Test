@@ -25,6 +25,7 @@ const (
 	DataMsgChunkResponse byte = 0x11
 	DataMsgChunkAnnounce byte = 0x12
 	DataMsgChunkAck      byte = 0x13
+	DataMsgChunkError    byte = 0x14
 	DataMsgStreamLog     byte = 0x20
 	DataMsgKeepalive     byte = 0x30
 

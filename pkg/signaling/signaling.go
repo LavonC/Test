@@ -2,6 +2,7 @@ package signaling
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type Hub struct {
 	httpServer *http.Server
 	listener   net.Listener
 	addr       string
+	authToken  string
 	closed     bool
 }
 
@@ -38,11 +40,12 @@ type clientConn struct {
 	nodeID   string
 	conn     *websocket.Conn
 	sendChan chan []byte
+	writeMu  sync.Mutex
 	hub      *Hub
 }
 
-// NewHub starts a signaling hub HTTP server on the given address.
-func NewHub(listenAddr string) (*Hub, error) {
+// NewHub starts a signaling hub HTTP server on the given address, optionally requiring an auth token.
+func NewHub(listenAddr string, authTokens ...string) (*Hub, error) {
 	if listenAddr == "" {
 		listenAddr = "127.0.0.1:0"
 	}
@@ -57,6 +60,9 @@ func NewHub(listenAddr string) (*Hub, error) {
 		listener: ln,
 		addr:     ln.Addr().String(),
 	}
+	if len(authTokens) > 0 {
+		h.authToken = authTokens[0]
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.handleWebSocket)
@@ -66,6 +72,24 @@ func NewHub(listenAddr string) (*Hub, error) {
 		_, _ = w.Write([]byte(`{"status":"healthy","service":"unicompute-coordinator"}`))
 	})
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.RLock()
+		token := h.authToken
+		h.mu.RUnlock()
+
+		if token != "" {
+			reqToken := ""
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				reqToken = strings.TrimPrefix(authHeader, "Bearer ")
+			} else if qToken := r.URL.Query().Get("token"); qToken != "" {
+				reqToken = qToken
+			}
+			if subtle.ConstantTimeCompare([]byte(reqToken), []byte(token)) != 1 {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
 		h.mu.RLock()
 		nodes := make([]string, 0, len(h.clients))
 		for id := range h.clients {
@@ -117,7 +141,32 @@ func (h *Hub) Close() error {
 	return h.httpServer.Close()
 }
 
+// SetAuthToken configures or updates the cluster auth token for the hub.
+func (h *Hub) SetAuthToken(token string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.authToken = token
+}
+
 func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	token := h.authToken
+	h.mu.RUnlock()
+
+	if token != "" {
+		reqToken := ""
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			reqToken = strings.TrimPrefix(authHeader, "Bearer ")
+		} else if qToken := r.URL.Query().Get("token"); qToken != "" {
+			reqToken = qToken
+		}
+		if subtle.ConstantTimeCompare([]byte(reqToken), []byte(token)) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -177,11 +226,33 @@ func (c *clientConn) readPump() {
 		if env.Type == protocol.MsgRegister {
 			var reg protocol.RegisterPayload
 			_ = json.Unmarshal(env.Payload, &reg)
-			c.nodeID = reg.NodeID
-			if c.nodeID == "" {
-				c.nodeID = env.SenderID
+			targetNodeID := reg.NodeID
+			if targetNodeID == "" {
+				targetNodeID = env.SenderID
 			}
+
 			c.hub.mu.Lock()
+			if existing, exists := c.hub.clients[targetNodeID]; exists && existing != c {
+				c.hub.mu.Unlock()
+				// Reject duplicate registration to prevent silent session hijacking
+				errMsg, _ := json.Marshal(protocol.Envelope{
+					Type:     protocol.MsgRegisterAck,
+					SenderID: "coordinator",
+					TargetID: targetNodeID,
+					Payload:  []byte(`{"error":"duplicate nodeID registration rejected"}`),
+				})
+				select {
+				case c.sendChan <- errMsg:
+				default:
+				}
+				time.Sleep(50 * time.Millisecond)
+				c.writeMu.Lock()
+				_ = c.conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "duplicate nodeID registration rejected"))
+				c.writeMu.Unlock()
+				return
+			}
+			c.nodeID = targetNodeID
 			c.hub.clients[c.nodeID] = c
 
 			// Broadcast peer joined notification to all OTHER nodes
@@ -250,23 +321,32 @@ func (c *clientConn) writePump() {
 	ticker := time.NewTicker(20 * time.Second) // 20s ping ticker as specified in Section 6.3
 	defer func() {
 		ticker.Stop()
+		c.writeMu.Lock()
 		_ = c.conn.Close()
+		c.writeMu.Unlock()
 	}()
 
 	for {
 		select {
 		case msg, ok := <-c.sendChan:
+			c.writeMu.Lock()
 			if !ok {
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.writeMu.Unlock()
 				return
 			}
 			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			err := c.conn.WriteMessage(websocket.TextMessage, msg)
+			c.writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		case <-ticker.C:
+			c.writeMu.Lock()
 			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			err := c.conn.WriteMessage(websocket.PingMessage, nil)
+			c.writeMu.Unlock()
+			if err != nil {
 				return
 			}
 		}
@@ -279,6 +359,7 @@ type Client struct {
 	writeMu      sync.Mutex // Serializes all writes to WebSocket connection
 	url          string
 	nodeID       string
+	authToken    string
 	conn         *websocket.Conn
 	handler      func(protocol.Envelope)
 	reconnectCtx context.Context
@@ -288,7 +369,7 @@ type Client struct {
 }
 
 // NewClient initializes a signaling client with auto-reconnection and keepalive.
-func NewClient(wsURL string, nodeID string, handler func(protocol.Envelope)) (*Client, error) {
+func NewClient(wsURL string, nodeID string, handler func(protocol.Envelope), authTokens ...string) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		url:          wsURL,
@@ -297,6 +378,9 @@ func NewClient(wsURL string, nodeID string, handler func(protocol.Envelope)) (*C
 		reconnectCtx: ctx,
 		cancel:       cancel,
 		sendQueue:    make(chan []byte, 100),
+	}
+	if len(authTokens) > 0 {
+		c.authToken = authTokens[0]
 	}
 
 	if err := c.connect(); err != nil {
@@ -314,7 +398,12 @@ func (c *Client) connect() error {
 		HandshakeTimeout: 5 * time.Second,
 	}
 
-	conn, _, err := dialer.DialContext(c.reconnectCtx, c.url, nil)
+	header := make(http.Header)
+	if c.authToken != "" {
+		header.Set("Authorization", "Bearer "+c.authToken)
+	}
+
+	conn, _, err := dialer.DialContext(c.reconnectCtx, c.url, header)
 	if err != nil {
 		return err
 	}
@@ -511,6 +600,9 @@ func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", httpURL+"/api/nodes", nil)
 	if err == nil {
+		if c.authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+c.authToken)
+		}
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {

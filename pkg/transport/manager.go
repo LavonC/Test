@@ -223,7 +223,13 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	m.mu.Lock()
 	m.connections[sessionID] = conn
 	m.peerSessions[targetPeerID] = sessionID
+	onConnHandler := m.onNewConn
 	m.mu.Unlock()
+
+	// Register event callbacks (storage, streams) before creating DataChannels and Offer
+	if onConnHandler != nil {
+		onConnHandler(conn)
+	}
 
 	// ICE Candidate gathering & Trickle signaling
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -367,7 +373,13 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	m.mu.Lock()
 	m.connections[sdp.SessionID] = conn
 	m.peerSessions[remotePeerID] = sdp.SessionID
+	onConnHandler := m.onNewConn
 	m.mu.Unlock()
+
+	// Register event callbacks (storage, streams) synchronously before receiving early DataChannel messages
+	if onConnHandler != nil {
+		onConnHandler(conn)
+	}
 
 	// Answerer listens for DataChannels created by the offerer
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -430,14 +442,6 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 			TargetID: remotePeerID,
 			Payload:  answerPayload,
 		})
-	}
-
-	m.mu.Lock()
-	handler := m.onNewConn
-	m.mu.Unlock()
-
-	if handler != nil {
-		go handler(conn)
 	}
 
 	return nil
@@ -539,6 +543,13 @@ func (m *Manager) Close() error {
 	m.mu.Unlock()
 
 	return nil
+}
+
+// SetSignalingClient dynamically updates the signaling client instance.
+func (m *Manager) SetSignalingClient(sig *signaling.Client) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sigClient = sig
 }
 
 // SetFallbackTimeout dynamically updates the blind relay fallback timeout threshold.

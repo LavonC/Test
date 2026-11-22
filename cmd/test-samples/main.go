@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +16,9 @@ import (
 )
 
 func main() {
+	runDocker := flag.Bool("run-docker", false, "Execute code samples in live Docker containers")
+	flag.Parse()
+
 	fmt.Println("=======================================================================")
 	fmt.Println(" UniCompute Standalone Samples Verification Runner")
 	fmt.Println("=======================================================================")
@@ -133,7 +139,22 @@ func main() {
 	}
 
 	// 2. Test Code Execution Protocol Encapsulation on Objective 2 Samples
-	fmt.Println("\n[TEST GROUP 3] Container Code Execution Protocol Encapsulation")
+	if !*runDocker {
+		fmt.Println("\n[TEST GROUP 3] Container Code Execution (Wire Protocol Round-Trip Only)")
+	} else {
+		fmt.Println("\n[TEST GROUP 3] Container Code Execution (Live Docker Execution)")
+	}
+
+	var dockerExec *codeexec.DockerExecutor
+	if *runDocker {
+		if _, err := exec.LookPath("docker"); err != nil {
+			fmt.Printf(" [FAIL] docker CLI binary not found on PATH: %v\n", err)
+			allPassed = false
+		} else {
+			dockerExec = codeexec.NewDockerExecutor(codeexec.Config{MaxConcurrent: 2})
+		}
+	}
+
 	codeSamples := []struct {
 		name string
 		lang string
@@ -182,8 +203,14 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("  -> [PASS] %s (%s, %d bytes): Wire protocol encode/decode verified.\n",
-			sample.name, sample.lang, len(src))
+		if dockerExec != nil {
+			res := dockerExec.Execute(context.Background(), req)
+			fmt.Printf("  -> [PASS] %s (%s, %d bytes): Live container execution completed (exit=%d, time=%dms, err=%v)\n",
+				sample.name, sample.lang, len(src), res.ExitCode, res.DurationMs, res.Error)
+		} else {
+			fmt.Printf("  -> [PASS] %s (%s, %d bytes): Wire protocol encode/decode verified.\n",
+				sample.name, sample.lang, len(src))
+		}
 	}
 
 	fmt.Println("\n=======================================================================")

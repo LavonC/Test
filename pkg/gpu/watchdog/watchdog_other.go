@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+func isInputTelemetrySupported() bool {
+	return false
+}
+
 // Start begins the polling loop on Linux/macOS.
 func (w *Watchdog) Start() {
 	go w.pollLoop()
@@ -25,6 +29,7 @@ func (w *Watchdog) pollLoop() {
 		case <-ticker.C:
 			onBattery := w.queryLinuxBattery()
 			w.mu.Lock()
+			w.status.InputTelemetryAvailable = false
 			w.status.OnBattery = onBattery
 			if onBattery && !w.cfg.IgnoreBattery {
 				if w.state == StateRunning {

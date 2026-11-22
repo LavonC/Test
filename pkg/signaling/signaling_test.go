@@ -2,6 +2,7 @@ package signaling
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,5 +67,75 @@ func TestSignaling_HubAndClientDispatch(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for message at clientB")
+	}
+}
+
+func TestSignaling_AuthTokenEnforcement(t *testing.T) {
+	authToken := "test-secret-token-12345"
+	hub, err := NewHub("127.0.0.1:0", authToken)
+	if err != nil {
+		t.Fatalf("failed to start hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	// 1. Connection without token must fail
+	_, err = NewClient(wsURL, "node-unauth", func(env protocol.Envelope) {})
+	if err == nil {
+		t.Fatalf("expected NewClient without token to fail against protected hub")
+	}
+
+	// 2. Connection with wrong token must fail
+	_, err = NewClient(wsURL, "node-wrong", func(env protocol.Envelope) {}, "wrong-token")
+	if err == nil {
+		t.Fatalf("expected NewClient with wrong token to fail against protected hub")
+	}
+
+	// 3. Connection with valid token must succeed
+	clientAuth, err := NewClient(wsURL, "node-valid", func(env protocol.Envelope) {}, authToken)
+	if err != nil {
+		t.Fatalf("expected NewClient with valid token to succeed, got: %v", err)
+	}
+	defer clientAuth.Close()
+}
+
+func TestSignaling_DuplicateNodeIDRejected(t *testing.T) {
+	hub, err := NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	// First client registers "node-alpha"
+	c1, err := NewClient(wsURL, "node-alpha", func(env protocol.Envelope) {})
+	if err != nil {
+		t.Fatalf("failed to create c1: %v", err)
+	}
+	defer c1.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Second client attempts to register "node-alpha"
+	c2Ack := make(chan protocol.Envelope, 5)
+	c2, err := NewClient(wsURL, "node-alpha", func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			c2Ack <- env
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create c2: %v", err)
+	}
+	defer c2.Close()
+
+	select {
+	case ack := <-c2Ack:
+		if !strings.Contains(string(ack.Payload), "duplicate nodeID registration rejected") {
+			t.Errorf("expected duplicate registration rejection error, got payload: %s", string(ack.Payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for duplicate rejection ack")
 	}
 }

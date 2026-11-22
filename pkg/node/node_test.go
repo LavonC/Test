@@ -279,6 +279,50 @@ func TestNode_EndToEndChunkExchange(t *testing.T) {
 		t.Fatalf("short payload mismatch on Node 2")
 	}
 
+	// 5c. Test FetchChunk (0x10) pull from Node 2 to Node 1
+	fetchPayload := []byte("UniCompute FetchChunk 0x10 protocol verification data payload!")
+	hFetch := sha256.Sum256(fetchPayload)
+	fetchCID := hex.EncodeToString(hFetch[:])
+
+	_, err = n1.Store().Put(fetchCID, bytes.NewReader(fetchPayload))
+	if err != nil {
+		t.Fatalf("Put on Node 1 failed: %v", err)
+	}
+
+	err = n2.FetchChunk(ctx, "peer-node-1", fetchCID, int64(len(fetchPayload)))
+	if err != nil {
+		t.Fatalf("FetchChunk failed: %v", err)
+	}
+
+	if !n2.Store().Has(fetchCID) {
+		t.Fatalf("Node 2 did not store fetched chunk %s", fetchCID)
+	}
+	validFetch, err := n2.Store().Verify(fetchCID)
+	if err != nil || !validFetch {
+		t.Fatalf("Node 2 VerifyBlob failed on fetched chunk: valid=%v, err=%v", validFetch, err)
+	}
+	rcFetch, err := n2.Store().Get(fetchCID)
+	if err != nil {
+		t.Fatalf("Get fetched chunk on Node 2 failed: %v", err)
+	}
+	defer rcFetch.Close()
+	readFetch, _ := io.ReadAll(rcFetch)
+	if !bytes.Equal(readFetch, fetchPayload) {
+		t.Fatalf("fetched data mismatch on Node 2")
+	}
+
+	// 5d. Test FetchChunk for non-existent chunk returns fast error without stalling
+	nonExistentCID := "0000000000000000000000000000000000000000000000000000000000000000"
+	fetchStart := time.Now()
+	err = n2.FetchChunk(ctx, "peer-node-1", nonExistentCID, 100)
+	fetchDur := time.Since(fetchStart)
+	if err == nil {
+		t.Fatalf("expected FetchChunk for non-existent chunk to fail")
+	}
+	if fetchDur > 5*time.Second {
+		t.Fatalf("FetchChunk took %v, expected fast failure (< 5s)", fetchDur)
+	}
+
 	// 6. Test Path Metrics & Fleet Telemetry
 	metrics, ok := n1.GetPathMetrics("peer-node-2")
 	if !ok {
@@ -584,12 +628,33 @@ func TestNode_RemoteCommandExecution(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// 3. Node 1 executes shell command on Node 2
+	// 3. Security gating verification: remote shell is disabled by default on Node 2
 	req := remoteshell.ShellRequest{
 		Command:   "echo unicompute_remote_shell_ok",
 		ShellType: remoteshell.ShellAuto,
 		TimeoutMs: 10000,
 	}
+
+	blockedResp, err := n1.ExecuteRemoteCommand(ctx, "exec-node-2", req)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCommand expected response, got err: %v", err)
+	}
+	if blockedResp.ExitCode != -1 || !strings.Contains(blockedResp.Error, "remote shell disabled") {
+		t.Fatalf("expected remote shell to be blocked on disabled node, got: %+v", blockedResp)
+	}
+
+	// 4. Test remote shell enabled but caller not in allowlist
+	n2.SetRemoteShellConfig(true, []string{"untrusted-node-99"})
+	notAllowedResp, err := n1.ExecuteRemoteCommand(ctx, "exec-node-2", req)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCommand expected response, got err: %v", err)
+	}
+	if notAllowedResp.ExitCode != -1 || !strings.Contains(notAllowedResp.Error, "peer not in shell allowlist") {
+		t.Fatalf("expected remote shell to be rejected for unlisted peer, got: %+v", notAllowedResp)
+	}
+
+	// 5. Opt-in with allowlist on Node 2 and verify successful execution
+	n2.SetRemoteShellConfig(true, []string{"exec-node-1"})
 
 	resp, err := n1.ExecuteRemoteCommand(ctx, "exec-node-2", req)
 	if err != nil {
@@ -604,7 +669,7 @@ func TestNode_RemoteCommandExecution(t *testing.T) {
 		t.Fatalf("expected stdout to contain test string, got: %q", resp.Stdout)
 	}
 
-	// 4. Test ExecuteRemoteCommandAll
+	// 5. Test ExecuteRemoteCommandAll
 	allResults := n1.ExecuteRemoteCommandAll(ctx, req)
 	if len(allResults) != 1 {
 		t.Fatalf("expected 1 result from ExecuteRemoteCommandAll, got %d", len(allResults))

@@ -18,6 +18,7 @@ echo "[INFO] Configuring firewall rules..."
 sudo ufw allow 22/tcp comment 'SSH'
 sudo ufw allow 80/tcp comment 'HTTP (ACME)'
 sudo ufw allow 443/tcp comment 'HTTPS / WSS Signaling'
+sudo ufw allow 8080/tcp comment 'Coordinator Direct WS/HTTP'
 sudo ufw allow 3478/udp comment 'STUN / Embedded TURN'
 sudo ufw --force enable
 

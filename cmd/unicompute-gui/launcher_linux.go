@@ -47,7 +47,10 @@ func launchDesktopWindow(url string) (*exec.Cmd, error) {
 	// Fallback to xdg-open on standard desktop environments
 	if path, err := exec.LookPath("xdg-open"); err == nil {
 		cmd := exec.Command(path, url)
-		return cmd, cmd.Start()
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	return nil, nil

@@ -26,14 +26,15 @@ type Config struct {
 
 // Status snapshot returned by Watchdog.
 type Status struct {
-	State               State         `json:"state"`
-	OnBattery           bool          `json:"on_battery"`
-	BatteryPercent      uint8         `json:"battery_percent"`
-	UserActive          bool          `json:"user_active"`
-	UserIdleDuration    time.Duration `json:"user_idle_duration"`
-	SustainedIdlePeriod time.Duration `json:"sustained_idle_period"`
-	LastPauseReason     string        `json:"last_pause_reason,omitempty"`
-	LastPauseTime       time.Time     `json:"last_pause_time,omitempty"`
+	State                   State         `json:"state"`
+	OnBattery               bool          `json:"on_battery"`
+	BatteryPercent          uint8         `json:"battery_percent"`
+	UserActive              bool          `json:"user_active"`
+	UserIdleDuration        time.Duration `json:"user_idle_duration"`
+	SustainedIdlePeriod     time.Duration `json:"sustained_idle_period"`
+	LastPauseReason         string        `json:"last_pause_reason,omitempty"`
+	LastPauseTime           time.Time     `json:"last_pause_time,omitempty"`
+	InputTelemetryAvailable bool          `json:"input_telemetry_available"`
 }
 
 // Watchdog monitors power and user input to protect student laptop responsiveness.
@@ -64,6 +65,7 @@ func NewWatchdog(cfg Config, onPause func(reason string), onResume func()) *Watc
 	return &Watchdog{
 		cfg:        cfg,
 		state:      StateRunning,
+		status:     Status{State: StateRunning, InputTelemetryAvailable: isInputTelemetrySupported()},
 		onPause:    onPause,
 		onResume:   onResume,
 		stopChan:   make(chan struct{}),

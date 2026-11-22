@@ -85,3 +85,45 @@ __device__ unsigned int getSmId() {
 		t.Errorf("Expected HasInlinePTX to be true")
 	}
 }
+
+func TestAnalyzeCUDASource_HostKernelLaunchNotDynamicParallelism(t *testing.T) {
+	source := `
+__global__ void myKernel(float *d_out) {
+    int idx = threadIdx.x;
+    d_out[idx] = 1.0f;
+}
+
+int main() {
+    float *d_out;
+    cudaMalloc(&d_out, 128 * sizeof(float));
+    myKernel<<<1, 128>>>(d_out);
+    cudaDeviceSynchronize();
+    cudaFree(d_out);
+    return 0;
+}
+`
+	report := AnalyzeCUDASource(source)
+	if report.HasDynamicLaunch {
+		t.Errorf("Expected HasDynamicLaunch to be false for host kernel launch in main()")
+	}
+	if !report.TargetAMDSupported {
+		t.Errorf("Expected TargetAMDSupported to be true for clean host kernel launch")
+	}
+}
+
+func TestAnalyzeCUDASource_DeviceKernelLaunchDetectedAsDynamicParallelism(t *testing.T) {
+	source := `
+__global__ void childKernel() {
+    // child work
+}
+
+__global__ void parentKernel() {
+    childKernel<<<1, 16>>>();
+}
+`
+	report := AnalyzeCUDASource(source)
+	if !report.HasDynamicLaunch {
+		t.Errorf("Expected HasDynamicLaunch to be true when kernel launched inside parentKernel")
+	}
+}
+

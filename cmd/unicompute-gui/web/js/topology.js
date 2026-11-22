@@ -56,9 +56,13 @@ class TopologyRenderer {
     this.canvas.addEventListener('mousedown', (e) => {
       const pos = this.getCanvasPos(e);
       const clicked = this.hitTest(pos.x, pos.y);
-      if (clicked && clicked !== this.coordinator) {
-        this.selectedNode = clicked;
-        if (this.onNodeClick) this.onNodeClick(clicked);
+      if (clicked) {
+        if (clicked === this.coordinator) {
+          if (this.onCoordinatorClick) this.onCoordinatorClick();
+        } else {
+          this.selectedNode = clicked;
+          if (this.onNodeClick) this.onNodeClick(clicked);
+        }
       } else {
         this.isDragging = true;
         this.dragStartX = e.clientX - this.panX;
@@ -104,7 +108,6 @@ class TopologyRenderer {
 
   updateFleet(fleetNodes, connectedPeers, localId, localStatus = null) {
     const orbitRadius = Math.min(this.width, this.height) * 0.36;
-    const count = fleetNodes.length;
 
     // Build map of connected peer objects
     const peerMetricsMap = new Map();
@@ -113,15 +116,28 @@ class TopologyRenderer {
       peerMetricsMap.set(pid, p);
     });
 
+    // Ensure operator's local workstation node is always represented on the topology canvas
+    const activeLocalId = localId || (localStatus && localStatus.node_id) || '';
+    const allNodeIds = [];
+    if (activeLocalId) {
+      allNodeIds.push(activeLocalId);
+    }
+    (fleetNodes || []).forEach(nodeId => {
+      if (nodeId && !allNodeIds.includes(nodeId)) {
+        allNodeIds.push(nodeId);
+      }
+    });
+
+    const count = allNodeIds.length;
     const existingMap = new Map(this.nodes.map(n => [n.id, n]));
     const updated = [];
 
-    fleetNodes.forEach((nodeId, idx) => {
+    allNodeIds.forEach((nodeId, idx) => {
       const angle = (idx / Math.max(1, count)) * Math.PI * 2 - Math.PI / 2;
       const targetX = this.coordinator.x + Math.cos(angle) * orbitRadius;
       const targetY = this.coordinator.y + Math.sin(angle) * orbitRadius;
 
-      const isLocal = nodeId === localId;
+      const isLocal = nodeId === activeLocalId;
       const peerData = peerMetricsMap.get(nodeId);
       const connectedP2P = !!peerData;
 
@@ -159,23 +175,21 @@ class TopologyRenderer {
 
     this.nodes = updated;
     this.peers = connectedPeers;
+  }
 
-    // Spawn packets only along genuinely established P2P connections
-    const connectedList = this.nodes.filter(n => n.connectedP2P);
-    if (connectedList.length > 0 && Math.random() < 0.25) {
-      const nodeA = this.nodes.find(n => n.isLocal) || this.coordinator;
-      const nodeB = connectedList[Math.floor(Math.random() * connectedList.length)];
-      if (nodeA && nodeB && nodeA !== nodeB) {
-        this.particles.push({
-          x: nodeA.x,
-          y: nodeA.y,
-          targetX: nodeB.x,
-          targetY: nodeB.y,
-          progress: 0,
-          color: '#10b981',
-          speed: 0.024
-        });
-      }
+  spawnEventPacket(fromId, toId, color = '#10b981') {
+    const nodeA = this.nodes.find(n => n.id === fromId) || (fromId === 'coordinator' ? this.coordinator : null);
+    const nodeB = this.nodes.find(n => n.id === toId) || (toId === 'coordinator' ? this.coordinator : null);
+    if (nodeA && nodeB && nodeA !== nodeB) {
+      this.particles.push({
+        x: nodeA.x,
+        y: nodeA.y,
+        targetX: nodeB.x,
+        targetY: nodeB.y,
+        progress: 0,
+        color: color,
+        speed: 0.03
+      });
     }
   }
 
@@ -350,7 +364,8 @@ class TopologyRenderer {
 
     this.ctx.font = '600 10px JetBrains Mono, monospace';
     this.ctx.fillStyle = '#d9e2fd';
-    this.ctx.fillText('HUB:4194', c.x, c.y + 11);
+    const hubLabel = (this.coordinatorHost && this.coordinatorHost !== '') ? this.coordinatorHost : 'COORDINATOR';
+    this.ctx.fillText(hubLabel, c.x, c.y + 11);
 
     this.ctx.font = '600 9px JetBrains Mono, monospace';
     this.ctx.fillStyle = '#38bdf8';
@@ -382,8 +397,11 @@ class TopologyRenderer {
       this.ctx.textAlign = 'center';
 
       let label = node.id;
-      if (node.isLocal) label += ' [LOCAL]';
-      if (label.length > 18) label = label.substring(0, 16) + '…';
+      if (node.isLocal) {
+        label = (node.id.length > 13 ? node.id.substring(0, 11) + '…' : node.id) + ' [LOCAL]';
+      } else if (label.length > 18) {
+        label = label.substring(0, 16) + '…';
+      }
       this.ctx.fillText(label, x, y - halfH - 7);
 
       this.ctx.beginPath();
@@ -416,13 +434,20 @@ class TopologyRenderer {
         this.ctx.fillStyle = '#8ed5ff';
         this.ctx.textAlign = 'center';
         this.ctx.fillText('TIER 3', x + halfW - 28, y - halfH + 16);
-      } else {
+      } else if (node.isLocal && node.dockerActive) {
         this.ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
         this.roundRect(x + halfW - 54, y - halfH + 6, 46, 14, 3);
         this.ctx.fill();
         this.ctx.fillStyle = '#4edea3';
         this.ctx.textAlign = 'center';
         this.ctx.fillText('DOCKER', x + halfW - 31, y - halfH + 16);
+      } else {
+        this.ctx.fillStyle = 'rgba(148, 163, 184, 0.2)';
+        this.roundRect(x + halfW - 46, y - halfH + 6, 38, 14, 3);
+        this.ctx.fill();
+        this.ctx.fillStyle = '#94a3b8';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('PEER', x + halfW - 27, y - halfH + 16);
       }
 
       this.ctx.font = '500 8.5px Inter, sans-serif';
@@ -455,8 +480,9 @@ class TopologyRenderer {
       } else {
         this.ctx.font = '600 8px JetBrains Mono, monospace';
         this.ctx.fillStyle = node.connectedP2P ? '#10b981' : '#87929a';
-        if (node.metrics && node.metrics.rtt_ms) {
-          this.ctx.fillText(`RTT: ${node.metrics.rtt_ms}ms • Direct`, x - halfW + 10, y + 28);
+        if (node.metrics && node.metrics.rtt_ms !== undefined) {
+          const directLabel = node.metrics.is_direct ? 'Direct' : 'Relayed';
+          this.ctx.fillText(`RTT: ${node.metrics.rtt_ms.toFixed(1)}ms • ${directLabel}`, x - halfW + 10, y + 28);
         } else {
           this.ctx.fillText(node.connectedP2P ? 'SCTP DataChannel OK' : 'Signaling Only', x - halfW + 10, y + 28);
         }
@@ -474,6 +500,11 @@ class TopologyRenderer {
   }
 
   roundRect(x, y, w, h, r) {
+    if (this.ctx.roundRect) {
+      this.ctx.beginPath();
+      this.ctx.roundRect(x, y, w, h, r);
+      return;
+    }
     if (w < 2 * r) r = w / 2;
     if (h < 2 * r) r = h / 2;
     this.ctx.beginPath();
@@ -481,7 +512,7 @@ class TopologyRenderer {
     this.ctx.arcTo(x + w, y, x + w, y + h, r);
     this.ctx.arcTo(x + w, y + h, x, y + h, r);
     this.ctx.arcTo(x, y + h, x, y, r);
-    this.ctx.arcTo(x, y + w, y, r);
+    this.ctx.arcTo(x, y, x + r, y, r);
     this.ctx.closePath();
   }
 

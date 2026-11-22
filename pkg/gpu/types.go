@@ -56,14 +56,15 @@ type GPUProfile struct {
 
 // WatchdogStatus reports real-time power, battery, and student activity state.
 type WatchdogStatus struct {
-	State               string        `json:"state"` // "running", "paused_battery", "paused_user_active", "stopped"
-	OnBattery           bool          `json:"on_battery"`
-	BatteryPercent      uint8         `json:"battery_percent"`
-	UserActive          bool          `json:"user_active"`
-	UserIdleDuration    time.Duration `json:"user_idle_duration"`
-	SustainedIdlePeriod time.Duration `json:"sustained_idle_period"`
-	LastPauseReason     string        `json:"last_pause_reason,omitempty"`
-	LastPauseTime       time.Time     `json:"last_pause_time,omitempty"`
+	State                   string        `json:"state"` // "running", "paused_battery", "paused_user_active", "stopped"
+	OnBattery               bool          `json:"on_battery"`
+	BatteryPercent          uint8         `json:"battery_percent"`
+	UserActive              bool          `json:"user_active"`
+	UserIdleDuration        time.Duration `json:"user_idle_duration"`
+	SustainedIdlePeriod     time.Duration `json:"sustained_idle_period"`
+	LastPauseReason         string        `json:"last_pause_reason,omitempty"`
+	LastPauseTime           time.Time     `json:"last_pause_time,omitempty"`
+	InputTelemetryAvailable bool          `json:"input_telemetry_available"`
 }
 
 // TaskCapsuleManifest describes a signed GPU workload archive.
@@ -91,6 +92,7 @@ type GPUTaskRequest struct {
 	InputTensors   map[string][]float32 `json:"input_tensors,omitempty"`
 	CheckpointBlob string              `json:"checkpoint_blob,omitempty"` // Blob ID of initial checkpoint
 	TimeoutSeconds int                 `json:"timeout_seconds"`
+	ProcessID      int                 `json:"process_id,omitempty"`
 }
 
 // GPUTaskResponse represents the execution output of a GPU task.
@@ -98,6 +100,7 @@ type GPUTaskResponse struct {
 	JobID             string               `json:"job_id"`
 	Status            string               `json:"status"` // "completed", "preempted", "failed", "rejected"
 	ExitCode          int                  `json:"exit_code"`
+	Simulated         bool                 `json:"simulated"`
 	OutputTensors     map[string][]float32 `json:"output_tensors,omitempty"`
 	CheckpointBlob    string               `json:"checkpoint_blob,omitempty"` // Stored updated checkpoint blob ID
 	ProcessedBatches  int                  `json:"processed_batches"`

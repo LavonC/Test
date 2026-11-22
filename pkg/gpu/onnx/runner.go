@@ -1,3 +1,6 @@
+// Package onnx provides a pure-Go mock/simulation of an ONNX Runtime execution engine.
+// This engine is an educational pure-Go simulation of ONNX runtime training and inference loops
+// for testing and verification without native CGO dependencies (ONNX Runtime, DirectML, CUDA).
 package onnx
 
 import (
@@ -40,6 +43,7 @@ type TrainingResult struct {
 	CheckpointPath string
 	CheckpointHash string
 	UpdatedWeights map[string][]float32
+	Simulated      bool
 }
 
 // SessionEngine handles execution of an ONNX task.
@@ -128,6 +132,7 @@ func (e *SessionEngine) RunTrainingLoop(
 	result := TrainingResult{
 		TotalSteps: e.currentStep,
 		FinalLoss:  e.currentLoss,
+		Simulated:  true,
 	}
 
 	if checkpointEvery <= 0 {

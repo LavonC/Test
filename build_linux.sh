@@ -16,4 +16,4 @@ chmod +x bin/*
 
 echo -e "\033[32m[SUCCESS] Static Linux binaries compiled successfully in ./bin/\033[0m"
 echo -e "\033[33mTo run Desktop GUI on Linux with a display: ./bin/unicompute-gui\033[0m"
-echo -e "\033[33mTo run Desktop GUI in headless server mode: ./bin/unicompute-gui -headless -listen 0.0.0.0\033[0m"
+echo -e "\033[33mTo run Desktop GUI in headless server mode: ./bin/unicompute-gui -headless\033[0m"

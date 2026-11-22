@@ -24,13 +24,16 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /unicompute-coordinator /app/unicompute-coordinator
 
+# Create unprivileged application user
+RUN adduser -D unicompute
+USER unicompute
+
 # Expose HTTP/WSS signaling port (8080) and TURN relay UDP port (3478)
 EXPOSE 8080/tcp
 EXPOSE 3478/udp
 
 # Environment defaults
 ENV UNICOMPUTE_LISTEN="0.0.0.0:8080" \
-    UNICOMPUTE_PUBLIC_IP="127.0.0.1" \
     UNICOMPUTE_REALM="unicompute.edu"
 
 ENTRYPOINT ["/app/unicompute-coordinator"]

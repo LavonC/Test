@@ -74,6 +74,8 @@ func AnalyzeCUDASource(source string) CompatibilityReport {
 	scanner := bufio.NewScanner(strings.NewReader(source))
 	lineNum := 0
 	inDeviceFunc := false
+	deviceBraceDepth := 0
+	deviceBraceSeen := false
 
 	for scanner.Scan() {
 		lineNum++
@@ -88,9 +90,17 @@ func AnalyzeCUDASource(source string) CompatibilityReport {
 		// Track device / global function contexts
 		if strings.Contains(line, "__device__") || strings.Contains(line, "__global__") {
 			inDeviceFunc = true
+			deviceBraceSeen = false
+			deviceBraceDepth = 0
 		}
-		if strings.Contains(line, "}") && inDeviceFunc {
-			// Basic brace depth can be expanded, but heuristic works well for single/simple kernels
+
+		if inDeviceFunc {
+			openCount := strings.Count(line, "{")
+			closeCount := strings.Count(line, "}")
+			if openCount > 0 {
+				deviceBraceSeen = true
+			}
+			deviceBraceDepth += openCount - closeCount
 		}
 
 		// 1. Check for Warp-level intrinsics (Critical blocker on AMD 64-thread wavefronts)
@@ -154,6 +164,12 @@ func AnalyzeCUDASource(source string) CompatibilityReport {
 				Reason:      "Dynamic parallelism (kernel launching kernel) has vendor-specific runtime overhead on ROCm.",
 				Remediation: "Launch child kernels from host or flatten execution into single multi-pass grid.",
 			})
+		}
+
+		if inDeviceFunc && deviceBraceSeen && deviceBraceDepth <= 0 {
+			inDeviceFunc = false
+			deviceBraceSeen = false
+			deviceBraceDepth = 0
 		}
 	}
 

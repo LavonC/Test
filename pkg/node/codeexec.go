@@ -130,6 +130,9 @@ func (n *Node) handleCodeStreamMessage(peerID string, data []byte) bool {
 		n.mu.RLock()
 		executor := n.codeExecutor
 		_, allowed := n.codeAllowedPeers[peerID]
+		if _, wildcard := n.codeAllowedPeers["*"]; wildcard {
+			allowed = true
+		}
 		n.mu.RUnlock()
 
 		resp := codeexec.Response{

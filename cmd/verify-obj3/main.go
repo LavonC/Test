@@ -166,7 +166,7 @@ func main() {
 	}
 
 	// 6. Interruptible Training Loop & Preemption Migration Verification
-	fmt.Println("\n[TEST 6] Testing Interruptible Training Loop & Preemption Resumption...")
+	fmt.Println("\n[TEST 6] Testing Interruptible Training Loop & Preemption Resumption [SIMULATED / MOCK ONNX RUNNER]...")
 	engine := onnx.NewSessionEngine(onnx.ModelConfig{BatchSize: 8}, originalCkpt)
 	migrationCkpt := filepath.Join(tmpDir, "migrated_checkpoint.ckpt")
 
@@ -180,8 +180,11 @@ func main() {
 	if !trainRes.Preempted {
 		fmt.Println("  [FAIL] Expected training to be preempted by watchdog.")
 		allPassed = false
+	} else if !trainRes.Simulated {
+		fmt.Println("  [FAIL] Expected trainRes.Simulated to be true for educational mock runner.")
+		allPassed = false
 	} else {
-		fmt.Printf("  -> Preempted at Step:   %d with reason: %q\n", trainRes.TotalSteps, trainRes.PreemptReason)
+		fmt.Printf("  -> Preempted at Step:   %d with reason: %q (Simulated: %v)\n", trainRes.TotalSteps, trainRes.PreemptReason, trainRes.Simulated)
 		fmt.Printf("  -> Checkpoint Flushed:  %s (SHA-256: %s)\n", trainRes.CheckpointPath, trainRes.CheckpointHash)
 
 		// Resume on second node engine
@@ -203,7 +206,7 @@ func main() {
 	}
 
 	// 7. Full GPUManager Unified Orchestration Test
-	fmt.Println("\n[TEST 7] Testing Unified GPUManager Orchestration...")
+	fmt.Println("\n[TEST 7] Testing Unified GPUManager Orchestration [SIMULATED / MOCK ONNX RUNNER]...")
 	mgr, err := gpu.NewManager(gpu.ManagerConfig{
 		StorageDir:       tmpDir,
 		MaxMemoryBytes:   512 * 1024 * 1024,
@@ -230,9 +233,12 @@ func main() {
 		if taskResp.Status != "completed" && taskResp.Status != "preempted" {
 			fmt.Printf("  [FAIL] Task execution status: %s, error: %s\n", taskResp.Status, taskResp.Error)
 			allPassed = false
+		} else if !taskResp.Simulated {
+			fmt.Printf("  [FAIL] Expected taskResp.Simulated to be true, got %v\n", taskResp.Simulated)
+			allPassed = false
 		} else {
-			fmt.Printf("  -> Task ID:             %s (Status: %s, Time: %d ms, Batches: %d)\n",
-				taskResp.JobID, taskResp.Status, taskResp.ExecutionMs, taskResp.ProcessedBatches)
+			fmt.Printf("  -> Task ID:             %s (Status: %s, Time: %d ms, Batches: %d, Simulated: %v)\n",
+				taskResp.JobID, taskResp.Status, taskResp.ExecutionMs, taskResp.ProcessedBatches, taskResp.Simulated)
 			fmt.Println("  [PASS] Unified GPUManager orchestrated execution successfully.")
 		}
 	}

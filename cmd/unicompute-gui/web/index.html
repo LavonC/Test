@@ -412,8 +412,8 @@
                   <span class="text-on-surface font-semibold" id="coordUptime">14h 22m 19s</span>
                 </div>
                 <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">QUIC Listen Socket</span>
-                  <span class="text-primary font-semibold" id="coordListenSocket">0.0.0.0:4194/quic</span>
+                  <span class="text-outline">Transport Socket</span>
+                  <span class="text-primary font-semibold" id="coordListenSocket">WebRTC DataChannel (ICE/DTLS/SCTP)</span>
                 </div>
                 <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
                   <span class="text-outline">Heartbeat Ping Frequency</span>
@@ -601,7 +601,7 @@
         <!-- Split-Pane Editor & Console Layout -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
           <!-- Left Column: Code Editor & Controls (7 Cols) -->
-          <div class="lg:col-span-7 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
+          <div class="lg:col-span-7 min-w-0 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
             <!-- Toolbar -->
             <div class="editor-toolbar-grid">
               <div class="toolbar-item">
@@ -662,7 +662,7 @@
           </div>
 
           <!-- Right Column: Terminal Execution Console & Telemetry (5 Cols) -->
-          <div class="lg:col-span-5 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
+          <div class="lg:col-span-5 min-w-0 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
             <div class="flex items-center justify-between border-b border-outline-variant/30 pb-3">
               <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-primary text-base">terminal</span>
@@ -953,7 +953,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-01</div>
-                <div class="text-[10px] text-outline font-mono">Seattle • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 01 • 3.55 GB</div>
               </div>
               <!-- D2 -->
               <div class="shard-box shard-data">
@@ -963,7 +963,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-04</div>
-                <div class="text-[10px] text-outline font-mono">Austin • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 04 • 3.55 GB</div>
               </div>
               <!-- D3 -->
               <div class="shard-box shard-data">
@@ -973,7 +973,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-07</div>
-                <div class="text-[10px] text-outline font-mono">Toronto • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 07 • 3.55 GB</div>
               </div>
               <!-- D4 -->
               <div class="shard-box shard-data">
@@ -983,7 +983,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-12</div>
-                <div class="text-[10px] text-outline font-mono">Chicago • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 12 • 3.55 GB</div>
               </div>
               <!-- P1 (Parity) -->
               <div class="shard-box shard-parity">
@@ -993,7 +993,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-02</div>
-                <div class="text-[10px] text-outline font-mono">Tokyo • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 02 • 3.55 GB</div>
               </div>
               <!-- P2 (Parity) -->
               <div class="shard-box shard-parity">
@@ -1003,7 +1003,7 @@
                   <span class="text-[10px] text-secondary">OK</span>
                 </div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-03</div>
-                <div class="text-[10px] text-outline font-mono">Frankfurt • 3.55 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 03 • 3.55 GB</div>
               </div>
             </div>
           </div>
@@ -1062,7 +1062,7 @@
                 <div class="shard-top-bar bg-tertiary"></div>
                 <div class="text-xs font-bold text-tertiary font-mono">P1 (Parity)</div>
                 <div class="text-[11px] font-mono text-on-surface mt-1 truncate">PC-Node-01</div>
-                <div class="text-[10px] text-outline font-mono">Seattle • 1.2 GB</div>
+                <div class="text-[10px] text-outline font-mono">Node 01 • 1.2 GB</div>
               </div>
               <div class="shard-box shard-parity">
                 <div class="shard-top-bar bg-tertiary"></div>

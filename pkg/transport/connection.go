@@ -59,6 +59,7 @@ type PeerConnection struct {
 	// Event callbacks
 	OnChunkReceived func(chunkID string, data []byte)
 	OnStreamMessage func(msg []byte)
+	OnChunkRequest  func(chunkID string)
 	OnStateChange   func(state webrtc.PeerConnectionState)
 
 	// Instrumentation
@@ -106,6 +107,18 @@ func newPeerConnection(sessionID, localPeerID, remotePeerID string, pc *webrtc.P
 	return conn
 }
 
+func (c *PeerConnection) cleanupInFlight(err error) {
+	c.inFlightMu.Lock()
+	defer c.inFlightMu.Unlock()
+	for id, inflight := range c.inFlight {
+		select {
+		case inflight.errCh <- err:
+		default:
+		}
+		delete(c.inFlight, id)
+	}
+}
+
 func (c *PeerConnection) setupHandlers() {
 	c.PC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		c.mu.Lock()
@@ -121,6 +134,7 @@ func (c *PeerConnection) setupHandlers() {
 			default:
 				close(c.stopKeep)
 			}
+			go c.cleanupInFlight(ErrConnectionClosed)
 		}
 		handler := c.OnStateChange
 		c.mu.Unlock()
@@ -135,6 +149,13 @@ func (c *PeerConnection) setupHandlers() {
 func (c *PeerConnection) SetOnChunkReceived(fn func(chunkID string, data []byte)) {
 	c.mu.Lock()
 	c.OnChunkReceived = fn
+	c.mu.Unlock()
+}
+
+// SetOnChunkRequest safely sets the chunk request callback.
+func (c *PeerConnection) SetOnChunkRequest(fn func(chunkID string)) {
+	c.mu.Lock()
+	c.OnChunkRequest = fn
 	c.mu.Unlock()
 }
 
@@ -290,6 +311,9 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				errCh:     make(chan error, 1),
 			}
 			c.inFlight[chunkID] = inflight
+		} else if ok && len(inflight.data) == 0 {
+			inflight.totalSize = totalSize
+			inflight.data = make([]byte, totalSize)
 		}
 		c.inFlightMu.Unlock()
 
@@ -321,7 +345,47 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 		}
 
 	case protocol.DataMsgChunkRequest:
-		// Chunk request handling (handled by higher level manager or node)
+		if len(data) >= 2 {
+			idLen := int(data[1])
+			if len(data) >= 2+idLen {
+				reqID := string(data[2 : 2+idLen])
+				c.mu.RLock()
+				handler := c.OnChunkRequest
+				c.mu.RUnlock()
+				if handler != nil {
+					go handler(reqID)
+				}
+			}
+		}
+
+	case protocol.DataMsgChunkError:
+		if len(data) >= 2 {
+			idLen := int(data[1])
+			if len(data) >= 2+idLen {
+				chunkID := string(data[2 : 2+idLen])
+				errMsg := string(data[2+idLen:])
+				c.inFlightMu.Lock()
+				inflight, ok := c.inFlight[chunkID]
+				if ok {
+					delete(c.inFlight, chunkID)
+				} else {
+					// Buffer error frame in inflight so an incoming FetchChunk/ReceiveChunk sees it immediately
+					inflight = &inFlightChunk{
+						chunkID: chunkID,
+						doneCh:  make(chan []byte, 1),
+						errCh:   make(chan error, 1),
+					}
+					c.inFlight[chunkID] = inflight
+				}
+				c.inFlightMu.Unlock()
+				if inflight != nil {
+					select {
+					case inflight.errCh <- errors.New(errMsg):
+					default:
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -406,20 +470,70 @@ func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Rea
 	return nil
 }
 
-// ReceiveChunk registers an in-flight expectation and blocks until full chunk bytes are received.
-func (c *PeerConnection) ReceiveChunk(ctx context.Context, chunkID string, totalSize int64) ([]byte, error) {
+// RequestChunk transmits a DataMsgChunkRequest (0x10) frame over ChunkDC.
+func (c *PeerConnection) RequestChunk(chunkID string) error {
+	c.mu.RLock()
+	dc := c.ChunkDC
+	c.mu.RUnlock()
+
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return ErrChannelNotReady
+	}
+
+	idBytes := []byte(chunkID)
+	if len(idBytes) > 255 {
+		return fmt.Errorf("chunkID too long: %d", len(idBytes))
+	}
+
+	frame := make([]byte, 2+len(idBytes))
+	frame[0] = protocol.DataMsgChunkRequest
+	frame[1] = byte(len(idBytes))
+	copy(frame[2:], idBytes)
+	return dc.Send(frame)
+}
+
+// SendChunkError transmits a DataMsgChunkError (0x14) frame over ChunkDC.
+func (c *PeerConnection) SendChunkError(chunkID string, errMsg string) error {
+	c.mu.RLock()
+	dc := c.ChunkDC
+	c.mu.RUnlock()
+
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return ErrChannelNotReady
+	}
+
+	idBytes := []byte(chunkID)
+	if len(idBytes) > 255 {
+		idBytes = idBytes[:255]
+	}
+	errBytes := []byte(errMsg)
+	frame := make([]byte, 2+len(idBytes)+len(errBytes))
+	frame[0] = protocol.DataMsgChunkError
+	frame[1] = byte(len(idBytes))
+	copy(frame[2:2+len(idBytes)], idBytes)
+	copy(frame[2+len(idBytes):], errBytes)
+	return dc.Send(frame)
+}
+
+// FetchChunk registers an in-flight expectation, transmits a chunk request (0x10),
+// and waits for chunk completion, error frame, or context cancellation.
+func (c *PeerConnection) FetchChunk(ctx context.Context, chunkID string, totalSize int64) ([]byte, error) {
 	const MaxAllowedChunkSize int64 = 64 * 1024 * 1024
-	if totalSize <= 0 || totalSize > MaxAllowedChunkSize {
+	if totalSize < 0 || totalSize > MaxAllowedChunkSize {
 		return nil, fmt.Errorf("invalid chunk size: %d", totalSize)
 	}
 
 	c.inFlightMu.Lock()
 	inflight, ok := c.inFlight[chunkID]
 	if !ok {
+		var buf []byte
+		if totalSize > 0 {
+			buf = make([]byte, totalSize)
+		}
 		inflight = &inFlightChunk{
 			chunkID:   chunkID,
 			totalSize: uint64(totalSize),
-			data:      make([]byte, totalSize),
+			data:      buf,
 			doneCh:    make(chan []byte, 1),
 			errCh:     make(chan error, 1),
 		}
@@ -427,15 +541,63 @@ func (c *PeerConnection) ReceiveChunk(ctx context.Context, chunkID string, total
 	}
 	c.inFlightMu.Unlock()
 
+	defer func() {
+		c.inFlightMu.Lock()
+		delete(c.inFlight, chunkID)
+		c.inFlightMu.Unlock()
+	}()
+
+	if err := c.RequestChunk(chunkID); err != nil {
+		return nil, err
+	}
+
 	select {
 	case data := <-inflight.doneCh:
 		return data, nil
 	case err := <-inflight.errCh:
 		return nil, err
 	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// ReceiveChunk registers an in-flight expectation and blocks until full chunk bytes are received.
+func (c *PeerConnection) ReceiveChunk(ctx context.Context, chunkID string, totalSize int64) ([]byte, error) {
+	const MaxAllowedChunkSize int64 = 64 * 1024 * 1024
+	if totalSize < 0 || totalSize > MaxAllowedChunkSize {
+		return nil, fmt.Errorf("invalid chunk size: %d", totalSize)
+	}
+
+	c.inFlightMu.Lock()
+	inflight, ok := c.inFlight[chunkID]
+	if !ok {
+		var buf []byte
+		if totalSize > 0 {
+			buf = make([]byte, totalSize)
+		}
+		inflight = &inFlightChunk{
+			chunkID:   chunkID,
+			totalSize: uint64(totalSize),
+			data:      buf,
+			doneCh:    make(chan []byte, 1),
+			errCh:     make(chan error, 1),
+		}
+		c.inFlight[chunkID] = inflight
+	}
+	c.inFlightMu.Unlock()
+
+	defer func() {
 		c.inFlightMu.Lock()
 		delete(c.inFlight, chunkID)
 		c.inFlightMu.Unlock()
+	}()
+
+	select {
+	case data := <-inflight.doneCh:
+		return data, nil
+	case err := <-inflight.errCh:
+		return nil, err
+	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
@@ -508,6 +670,7 @@ func (c *PeerConnection) Close() error {
 	if c.ChunkDC != nil {
 		_ = c.ChunkDC.Close()
 	}
+	c.cleanupInFlight(ErrConnectionClosed)
 	if c.PC != nil {
 		return c.PC.Close()
 	}

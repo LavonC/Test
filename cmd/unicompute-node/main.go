@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,13 +32,16 @@ func main() {
 	storageDir := flag.String("storage", "", "Storage directory for chunk blobs (default: ./unicompute_data)")
 	quotaGB := flag.Int64("quota-gb", 10, "Contributed storage quota in GiB")
 	signalingURL := flag.String("signaling", "ws://127.0.0.1:8080/ws", "Coordinator signaling WebSocket URL")
+	authToken := flag.String("auth-token", os.Getenv("UNICOMPUTE_AUTH_TOKEN"), "Coordinator signaling authentication token")
+	enableRemoteShell := flag.Bool("enable-remote-shell", false, "Enable remote shell execution on this node (requires allowlist)")
+	shellAllowlist := flag.String("shell-allowlist", "", "Comma-separated peer IDs allowed to execute remote shell commands")
 	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address (comma-separated for multiple)")
 	stunServer6 := flag.String("stun6", "", "IPv6 STUN server address (comma-separated for multiple)")
 	turnServer := flag.String("turn", "", "TURN server address (e.g., turn:relay.example.com:3478, comma-separated for multiple)")
 	turnUser := flag.String("turn-user", "", "TURN server username")
 	turnCred := flag.String("turn-cred", "", "TURN server credential / password")
-	relayAddr := flag.String("relay", "", "Contributor relay address (optional)")
-	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (runs local contributor relay)")
+	relayAddr := flag.String("relay", "", "Contributor relay address (deprecated: use TURN for NAT relay fallback)")
+	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (deprecated: use embedded/external TURN)")
 	enableCodeExecution := flag.Bool("enable-code-execution", false, "Enable Docker sandbox code execution on this worker")
 	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated node IDs allowed to submit code jobs")
 	codeTimeout := flag.Int("code-timeout", 10, "Code job timeout in seconds (1-30)")
@@ -51,6 +55,20 @@ func main() {
 	flag.Parse()
 	if *codeTimeout < 1 || *codeTimeout > codeexec.MaxTimeoutSeconds {
 		log.Fatalf("-code-timeout must be between 1 and %d seconds", codeexec.MaxTimeoutSeconds)
+	}
+
+	if *enableRemoteShell && strings.TrimSpace(*shellAllowlist) == "" {
+		log.Fatalf("[FATAL] -enable-remote-shell is true but -shell-allowlist is empty; remote shell startup refused for security")
+	}
+
+	var shellList []string
+	if *shellAllowlist != "" {
+		for _, s := range strings.Split(*shellAllowlist, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				shellList = append(shellList, s)
+			}
+		}
 	}
 
 	if *nodeID == "" {
@@ -120,6 +138,7 @@ func main() {
 	// If runRelay is enabled, start contributor relay
 	var contributorRelay *relay.ContributorRelay
 	if *runRelay {
+		log.Println("[DEPRECATED] -run-relay is deprecated; native Pion WebRTC ICE with embedded/external TURN is preferred.")
 		var err error
 		contributorRelay, err = relay.NewContributorRelay(relay.ServerConfig{
 			ListenAddr:     *relayListen,
@@ -131,20 +150,25 @@ func main() {
 			defer contributorRelay.Close()
 			log.Printf("[INFO] Contributor relay running on %s\n", contributorRelay.Addr().String())
 		}
+	} else if *relayAddr != "" {
+		log.Println("[DEPRECATED] -relay is deprecated; native Pion WebRTC ICE with embedded/external TURN is preferred.")
 	}
 
 	quotaBytes := *quotaGB * 1024 * 1024 * 1024
 	n, err := node.NewNode(node.NodeConfig{
-		NodeID:          *nodeID,
-		PoolID:          *poolID,
-		StorageDir:      *storageDir,
-		StorageQuota:    quotaBytes,
-		SignalingURL:    *signalingURL,
-		STUNServersV4:   stunListV4,
-		STUNServersV6:   stunListV6,
-		TURNServers:     turnConfigs,
-		RelayAddr:       *relayAddr,
-		FallbackTimeout: 2000 * time.Millisecond,
+		NodeID:            *nodeID,
+		PoolID:            *poolID,
+		StorageDir:        *storageDir,
+		StorageQuota:      quotaBytes,
+		SignalingURL:      *signalingURL,
+		AuthToken:         *authToken,
+		STUNServersV4:     stunListV4,
+		STUNServersV6:     stunListV6,
+		TURNServers:       turnConfigs,
+		RelayAddr:         *relayAddr,
+		FallbackTimeout:   2000 * time.Millisecond,
+		EnableRemoteShell: *enableRemoteShell,
+		ShellAllowlist:    shellList,
 	})
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to initialize node: %v\n", err)
@@ -239,8 +263,13 @@ func main() {
 		}
 		if strings.HasPrefix(msgStr, "__PONG__:") {
 			tsStr := strings.TrimPrefix(msgStr, "__PONG__:")
-			if tNano, err := time.ParseDuration(fmt.Sprintf("%sns", tsStr)); err == nil {
-				_ = tNano
+			parts := strings.Split(tsStr, ":")
+			if len(parts) > 0 {
+				if tsNano, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+					rtt := time.Duration(time.Now().UnixNano() - tsNano)
+					fmt.Printf("\n[PONG] Reply from %s: RTT=%.2fms\n> ", peerID, float64(rtt)/float64(time.Millisecond))
+					return
+				}
 			}
 			fmt.Printf("\n[PONG] Reply from %s: Pong received!\n> ", peerID)
 			return
@@ -282,9 +311,12 @@ func main() {
 			select {
 			case <-ticker.C:
 				usage := n.StorageUsage()
+				var pct float64
+				if usage.QuotaBytes > 0 {
+					pct = (float64(usage.UsedBytes) / float64(usage.QuotaBytes)) * 100
+				}
 				log.Printf("[STATUS] Storage: %d / %d MB used (%.1f%%) | Blobs: %d\n",
-					usage.UsedBytes/(1024*1024), usage.QuotaBytes/(1024*1024),
-					(float64(usage.UsedBytes)/float64(usage.QuotaBytes))*100, usage.BlobCount)
+					usage.UsedBytes/(1024*1024), usage.QuotaBytes/(1024*1024), pct, usage.BlobCount)
 			case <-ctx.Done():
 				return
 			}
@@ -396,7 +428,8 @@ func main() {
 				}
 				peerID := parts[1]
 				nowNano := fmt.Sprintf("%d", time.Now().UnixNano())
-				if err := n.SendStream(peerID, []byte("__PING__:"+nowNano)); err != nil {
+				pingID := uuid.New().String()[:8]
+				if err := n.SendStream(peerID, []byte(fmt.Sprintf("__PING__:%s:%s", nowNano, pingID))); err != nil {
 					fmt.Printf("Ping failed: %v (are you connected? type 'connect %s')\n", err, peerID)
 				} else {
 					fmt.Printf("Ping sent to %s...\n", peerID)
@@ -409,9 +442,12 @@ func main() {
 				fmt.Println("\n==================== Local Node Diagnostics ====================")
 				fmt.Printf(" Node ID:        %s\n", *nodeID)
 				fmt.Printf(" Storage Path:   %s\n", *storageDir)
+				var pct float64
+				if usage.QuotaBytes > 0 {
+					pct = (float64(usage.UsedBytes) / float64(usage.QuotaBytes)) * 100
+				}
 				fmt.Printf(" Storage Quota:  %d MB total | %d MB used (%.1f%%) | %d Blobs\n",
-					usage.QuotaBytes/(1024*1024), usage.UsedBytes/(1024*1024),
-					(float64(usage.UsedBytes)/float64(usage.QuotaBytes))*100, usage.BlobCount)
+					usage.QuotaBytes/(1024*1024), usage.UsedBytes/(1024*1024), pct, usage.BlobCount)
 				fmt.Printf(" Signaling Hub:  %s\n", *signalingURL)
 				fmt.Printf(" Connected P2P:  %d peer(s) %v\n", len(connectedPeers), connectedPeers)
 				if rep != nil {
@@ -424,36 +460,11 @@ func main() {
 					fmt.Println("Usage: get <blobID> [destinationPath]")
 					break
 				}
-				blobID := parts[1]
-				rc, err := n.GetBlob(blobID)
-				if err != nil {
-					fmt.Printf("Error getting blob: %v\n", err)
-					break
-				}
-				defer rc.Close()
-
+				dest := ""
 				if len(parts) >= 3 {
-					destFile := parts[2]
-					outFile, err := os.Create(destFile)
-					if err != nil {
-						fmt.Printf("Error creating output file: %v\n", err)
-						break
-					}
-					written, err := io.Copy(outFile, rc)
-					outFile.Close()
-					if err != nil {
-						fmt.Printf("Error saving blob: %v\n", err)
-					} else {
-						fmt.Printf("Exported blob %s (%d bytes) to %s\n", blobID, written, destFile)
-					}
-				} else {
-					data, err := io.ReadAll(io.LimitReader(rc, 256))
-					if err != nil {
-						fmt.Printf("Read error: %v\n", err)
-					} else {
-						fmt.Printf("Blob %s Preview: %s\n", blobID, string(data))
-					}
+					dest = parts[2]
 				}
+				handleGetBlob(n, parts[1], dest)
 			case "fetch":
 				if len(parts) < 3 {
 					fmt.Println("Usage: fetch <peerID> <blobID> [expectedSize]")
@@ -909,5 +920,36 @@ func main() {
 	<-sigCh
 
 	log.Println("[INFO] Shutting down UniCompute node gracefully...")
+}
+
+func handleGetBlob(n *node.Node, blobID string, destFile string) {
+	rc, err := n.GetBlob(blobID)
+	if err != nil {
+		fmt.Printf("Error getting blob: %v\n", err)
+		return
+	}
+	defer rc.Close()
+
+	if destFile != "" {
+		outFile, err := os.Create(destFile)
+		if err != nil {
+			fmt.Printf("Error creating output file: %v\n", err)
+			return
+		}
+		defer outFile.Close()
+		written, err := io.Copy(outFile, rc)
+		if err != nil {
+			fmt.Printf("Error saving blob: %v\n", err)
+		} else {
+			fmt.Printf("Exported blob %s (%d bytes) to %s\n", blobID, written, destFile)
+		}
+	} else {
+		data, err := io.ReadAll(io.LimitReader(rc, 256))
+		if err != nil {
+			fmt.Printf("Read error: %v\n", err)
+		} else {
+			fmt.Printf("Blob %s Preview: %s\n", blobID, string(data))
+		}
+	}
 }
 

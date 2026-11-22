@@ -31,6 +31,10 @@ type lastInputInfo struct {
 	dwTime uint32
 }
 
+func isInputTelemetrySupported() bool {
+	return true
+}
+
 // Start begins the 50 ms polling loop on Windows.
 func (w *Watchdog) Start() {
 	go w.pollLoop()
@@ -68,6 +72,7 @@ func (w *Watchdog) pollLoop() {
 			}
 
 			w.mu.Lock()
+			w.status.InputTelemetryAvailable = true
 			w.status.OnBattery = onBattery
 			w.status.BatteryPercent = batteryPct
 			w.status.UserActive = userActive

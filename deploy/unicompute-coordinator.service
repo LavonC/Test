@@ -1,6 +1,6 @@
 [Unit]
 Description=UniCompute Central Coordinator & Signaling Hub
-After=network.target postgresql.service
+After=network.target
 Wants=network-online.target
 
 [Service]
@@ -12,7 +12,7 @@ ExecStart=/opt/unicompute/unicompute-coordinator \
     -listen 0.0.0.0:8080 \
     -public-ip ${PUBLIC_IP} \
     -realm unicompute.edu \
-    -turn true \
+    -turn=true \
     -turn-port 3478
 Restart=always
 RestartSec=5s
