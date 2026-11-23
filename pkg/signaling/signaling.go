@@ -42,6 +42,8 @@ type clientConn struct {
 	sendChan chan []byte
 	writeMu  sync.Mutex
 	hub      *Hub
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // NewHub starts a signaling hub HTTP server on the given address, optionally requiring an auth token.
@@ -176,6 +178,7 @@ func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn:     conn,
 		sendChan: make(chan []byte, 100),
 		hub:      h,
+		done:     make(chan struct{}),
 	}
 
 	go c.writePump()
@@ -184,6 +187,9 @@ func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *clientConn) readPump() {
 	defer func() {
+		c.doneOnce.Do(func() {
+			close(c.done)
+		})
 		if c.nodeID != "" {
 			c.hub.mu.Lock()
 			delete(c.hub.clients, c.nodeID)
@@ -310,12 +316,24 @@ func (c *clientConn) readPump() {
 
 		// Route message to target peer
 		if env.TargetID != "" {
+			if c.nodeID == "" {
+				continue
+			}
+			if env.SenderID != "" && env.SenderID != c.nodeID {
+				continue
+			}
+			env.SenderID = c.nodeID
+			routedPayload, err := json.Marshal(env)
+			if err != nil {
+				continue
+			}
+
 			c.hub.mu.RLock()
 			target, ok := c.hub.clients[env.TargetID]
 			c.hub.mu.RUnlock()
 			if ok {
 				select {
-				case target.sendChan <- msg:
+				case target.sendChan <- routedPayload:
 				default:
 				}
 			}
@@ -334,6 +352,8 @@ func (c *clientConn) writePump() {
 
 	for {
 		select {
+		case <-c.done:
+			return
 		case msg, ok := <-c.sendChan:
 			c.writeMu.Lock()
 			if !ok {
@@ -611,14 +631,16 @@ func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 		}
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
+		if err == nil {
 			defer resp.Body.Close()
-			var result struct {
-				Count int      `json:"count"`
-				Nodes []string `json:"nodes"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-				return result.Nodes, nil
+			if resp.StatusCode == http.StatusOK {
+				var result struct {
+					Count int      `json:"count"`
+					Nodes []string `json:"nodes"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+					return result.Nodes, nil
+				}
 			}
 		}
 	}

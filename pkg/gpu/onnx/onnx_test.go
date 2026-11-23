@@ -106,6 +106,12 @@ func TestTrainingLoop_PreemptionAndCheckpointResumption(t *testing.T) {
 	if !result.Preempted {
 		t.Fatal("Expected training loop to be preempted by simulated watchdog")
 	}
+	if result.TotalSteps <= 0 {
+		t.Errorf("Expected preempted result TotalSteps > 0, got %d", result.TotalSteps)
+	}
+	if result.FinalLoss >= 2.0 {
+		t.Errorf("Expected preempted result FinalLoss < 2.0, got %f", result.FinalLoss)
+	}
 	if result.PreemptReason != "Student started 3D game (GPU contention)" {
 		t.Errorf("Unexpected preempt reason: %s", result.PreemptReason)
 	}

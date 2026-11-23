@@ -1317,7 +1317,7 @@ html, body {
   padding: 1.25rem;
 }
 
-/* Reed-Solomon RS(4,2) 6-Cell Shard Strips */
+/* Content-Addressed Shard Strips */
 .shard-box {
   background-color: var(--surface-lowest);
   border-radius: 8px;

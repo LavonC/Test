@@ -82,6 +82,16 @@ func (t *Tracker) RecordDataTransfer(peerID string, sent int64, received int64) 
 	}
 }
 
+// RecordRTT updates the measured RTT for an active peer connection.
+func (t *Tracker) RecordRTT(peerID string, rtt time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if m, ok := t.metrics[peerID]; ok {
+		m.RTT = rtt
+	}
+}
+
 // GetMetrics returns telemetry for a single peer.
 func (t *Tracker) GetMetrics(peerID string) (PathMetrics, bool) {
 	t.mu.RLock()

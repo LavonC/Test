@@ -112,9 +112,9 @@ func TestTransport_WebRTCConnectionAndChunkTransfer(t *testing.T) {
 	// 1. Test Stream Channel
 	streamMsg := []byte("stream log from A to B")
 	receivedStreamCh := make(chan []byte, 1)
-	connB.OnStreamMessage = func(msg []byte) {
+	connB.SetOnStreamMessage(func(msg []byte) {
 		receivedStreamCh <- msg
-	}
+	})
 
 	if err := connA.SendStreamMessage(streamMsg); err != nil {
 		t.Fatalf("SendStreamMessage failed: %v", err)
@@ -356,5 +356,209 @@ func TestBuildICEServers_AndPeerConnectionCreation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPeerSessionEvictionOnClose(t *testing.T) {
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	var mgrAVal, mgrBVal atomic.Pointer[Manager]
+
+	sigA, err := signaling.NewClient(wsURL, "node-evict-A", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrAVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to start sigA: %v", err)
+	}
+	defer sigA.Close()
+
+	sigB, err := signaling.NewClient(wsURL, "node-evict-B", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrBVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to start sigB: %v", err)
+	}
+	defer sigB.Close()
+
+	mgrA, err := NewManager(Config{NodeID: "node-evict-A"}, sigA, nil)
+	if err != nil {
+		t.Fatalf("failed to create mgrA: %v", err)
+	}
+	defer mgrA.Close()
+	mgrAVal.Store(mgrA)
+
+	mgrB, err := NewManager(Config{NodeID: "node-evict-B"}, sigB, nil)
+	if err != nil {
+		t.Fatalf("failed to create mgrB: %v", err)
+	}
+	defer mgrB.Close()
+	mgrBVal.Store(mgrB)
+
+	connBChan := make(chan *PeerConnection, 1)
+	mgrB.SetOnNewConnection(func(pc *PeerConnection) {
+		connBChan <- pc
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	connA, err := mgrA.ConnectPeer(ctx, "node-evict-B")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer connA.Close()
+
+	var connB *PeerConnection
+	select {
+	case connB = <-connBChan:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for incoming connection on Node B")
+	}
+
+	if err := connB.WaitConnected(ctx); err != nil {
+		t.Fatalf("connB failed to connect: %v", err)
+	}
+	if err := connB.WaitChannelsReady(ctx); err != nil {
+		t.Fatalf("connB channels not ready: %v", err)
+	}
+
+	// Verify active connection exists
+	if _, ok := mgrA.GetConnection("node-evict-B"); !ok {
+		t.Fatalf("expected mgrA to have connection to node-evict-B")
+	}
+	peers := mgrA.ActivePeers()
+	if len(peers) == 0 || peers[0] != "node-evict-B" {
+		t.Fatalf("expected node-evict-B in ActivePeers, got %v", peers)
+	}
+
+	// Close remote peer connB and verify eviction from mgrA
+	_ = connB.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	evicted := false
+	for time.Now().Before(deadline) {
+		_, ok := mgrA.GetConnection("node-evict-B")
+		if !ok && len(mgrA.ActivePeers()) == 0 {
+			evicted = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !evicted {
+		t.Errorf("expected peer session to be evicted from mgrA after connection closed")
+	}
+	_ = connB.Close()
+}
+
+func TestZeroByteChunkTransfer(t *testing.T) {
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	var mgrAVal, mgrBVal atomic.Pointer[Manager]
+
+	sigA, err := signaling.NewClient(wsURL, "node-chunk-A", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrAVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to start sigA: %v", err)
+	}
+	defer sigA.Close()
+
+	sigB, err := signaling.NewClient(wsURL, "node-chunk-B", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrBVal.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to start sigB: %v", err)
+	}
+	defer sigB.Close()
+
+	mgrA, err := NewManager(Config{NodeID: "node-chunk-A"}, sigA, nil)
+	if err != nil {
+		t.Fatalf("failed to create mgrA: %v", err)
+	}
+	defer mgrA.Close()
+	mgrAVal.Store(mgrA)
+
+	mgrB, err := NewManager(Config{NodeID: "node-chunk-B"}, sigB, nil)
+	if err != nil {
+		t.Fatalf("failed to create mgrB: %v", err)
+	}
+	defer mgrB.Close()
+	mgrBVal.Store(mgrB)
+
+	connBChan := make(chan *PeerConnection, 1)
+	mgrB.SetOnNewConnection(func(pc *PeerConnection) {
+		connBChan <- pc
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	connA, err := mgrA.ConnectPeer(ctx, "node-chunk-B")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer connA.Close()
+
+	var connB *PeerConnection
+	select {
+	case connB = <-connBChan:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for incoming connection on Node B")
+	}
+	defer connB.Close()
+
+	if err := connB.WaitConnected(ctx); err != nil {
+		t.Fatalf("connB failed to connect: %v", err)
+	}
+	if err := connB.WaitChannelsReady(ctx); err != nil {
+		t.Fatalf("connB channels not ready: %v", err)
+	}
+
+	zeroChunkID := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	connB.SetOnChunkRequest(func(chunkID string) {
+		if chunkID == zeroChunkID {
+			_ = connB.SendChunk(ctx, chunkID, bytes.NewReader([]byte{}), 0)
+		}
+	})
+
+	data, err := connA.FetchChunk(ctx, zeroChunkID, 0)
+	if err != nil {
+		t.Fatalf("FetchChunk failed for 0-byte chunk: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("expected 0 bytes, got %d bytes", len(data))
 	}
 }

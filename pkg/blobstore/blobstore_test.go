@@ -123,6 +123,36 @@ func TestBlobStore_QuotaEnforcement(t *testing.T) {
 	}
 }
 
+func TestBlobStore_EarlyQuotaRejection(t *testing.T) {
+	tmpDir := t.TempDir()
+	limit := int64(1024)
+	store, err := NewDiskBlobStore(Config{
+		RootDir:    tmpDir,
+		QuotaBytes: limit,
+	})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// An oversized reader (10 KiB > 1 KiB quota)
+	oversizedReader := io.LimitReader(bytes.NewReader(bytes.Repeat([]byte("z"), 10*1024)), 10*1024)
+	dummyID := "custom-oversized-blob"
+	_, err = store.Put(dummyID, oversizedReader)
+	if err == nil {
+		t.Fatalf("expected early quota exceeded error, got nil")
+	}
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("expected ErrQuotaExceeded, got: %v", err)
+	}
+
+	// Verify temp directory has no leftover files
+	entries, err := os.ReadDir(filepath.Join(tmpDir, "tmp"))
+	if err == nil && len(entries) > 0 {
+		t.Errorf("expected no temp files left, found %d", len(entries))
+	}
+}
+
 func TestBlobStore_ChecksumMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewDiskBlobStore(Config{

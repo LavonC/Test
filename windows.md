@@ -1350,7 +1350,7 @@ The GUI features a unified 7-tab layout bridging Coordinator management and Work
 | Tab | Name | Primary Capabilities |
 |---|---|---|
 | **1** | **Topology Canvas** | Interactive 60 FPS Canvas showing central coordinator, orbiting workstation rigs, dual-hemisphere telemetry (compute & storage), animated SCTP laser beams, hover HUDs, and PC Inspector drawer with live RTT latency and P2P connection controls. |
-| **2** | **Coordinator Hub** | Dedicated control center for the signaling & daemon subsystem. Displays daemon uptime, listen socket, mTLS status, ED25519 join token presentation with QR preview and token rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, HEALTH \| CONN vitals matrix, and cryptographic keyring. |
+| **2** | **Coordinator Hub** | Dedicated control center for the signaling & daemon subsystem. Displays daemon uptime, listen socket, Transport Protocol (DTLS / SCTP) status, join token presentation with token copy and rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, and HEALTH \| CONN vitals matrix. |
 | **3** | **CPU Sandbox (O2)** | Multi-language code editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider (1–60s), target peer selection with `Local Worker (This Machine)` default, and live ANSI terminal console. |
 | **4** | **GPU Acceleration (O3)** | Live DXGI/DirectML hardware telemetry dials (RTX 4050 Laptop GPU, VRAM usage, temperature, power draw), 50 ms AC power/student idle watchdog radar, interactive CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner. |
 | **5** | **Storage & Shard Matrix** | Content-addressed storage vault (`local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification. |
@@ -1367,12 +1367,12 @@ You can verify all capabilities on a single machine without spinning up multiple
    Run `.\run-gui.bat` and wait for the application window to open.
 2. **Verify Dual Context Pills & Coordinator Hub**:
    - In the titlebar, click the **`[HEALTH & CONN]`** pill: The interface immediately switches to Tab 2 (**Coordinator Hub**).
-   - Observe live daemon metrics: Uptime counter, listen socket (`127.0.0.1:23080`), TLS/mTLS protocol state, and active cryptographic keyring (ED25519 node identity).
-   - Test Join Token Controls: Click **Copy Token** (copies `UC-XXXX-XXXX` to clipboard), or click **Show QR** to inspect the cryptographically signed connection QR modal.
+   - Observe live daemon metrics: Uptime counter, listen socket (`127.0.0.1:23080`), and Transport Protocol state (DTLS / SCTP).
+   - Test Join Token Controls: Click **Copy Token** (copies `UC-XXXX-XXXX` to clipboard).
    - Test Relay Threshold Slider: Adjust the Blind Relay Fallback threshold slider (e.g., from `1.5s` to `2.5s`). Notice the slider updates the backend via `POST /api/coordinator/settings` and broadcasts the update across the cluster.
 3. **Test Objective 1 (Storage & Shard Matrix)**:
    - Click the **Storage & Shard Matrix** tab (Tab 5).
-   - Inspect the Reed-Solomon RS(4,2) 6-cell striping layouts: 4 primary data chunks (`D0`–`D3`) and 2 Cauchy Reed-Solomon parity shards (`P0`, `P1`) mapped across peer nodes with real-time transfer throughput and chunk availability.
+   - Inspect the content-addressed chunk storage layout with SHA-256 Merkle root verification and chunk list mapped across peer nodes with real-time transfer throughput and chunk availability.
    - Click **Verify All Merkle Roots**: The system queries `/api/storage/scrub` and audits all local and striped Merkle tree roots, transitioning badges through verifying states to `VERIFIED (SHA-256)` with zero bit-rot detected.
    - Scroll to the integrated **CAS Storage Vault**: Type `UniCompute Sovereign Sharded Storage Test` into the stash box and click **Commit to Local Vault**.
    - Notice the table immediately updates with a new SHA-256 blob ID. Click **View** to inspect the cryptographic modal (`SHA-256 Valid: YES`).

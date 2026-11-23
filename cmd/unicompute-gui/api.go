@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -53,6 +54,7 @@ type ServerState struct {
 	startTime      time.Time
 	relayThreshold float64
 	joinToken      string
+	allowRemoteGUI bool
 	tasksMu        sync.RWMutex
 	tasks          []ClusterTask
 }
@@ -103,9 +105,52 @@ func (s *ServerState) SetActivePort(port int) {
 	s.activePort = port
 }
 
+func (s *ServerState) SetAllowRemoteGUI(allow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowRemoteGUI = allow
+}
+
+func (s *ServerState) isAllowedOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	s.mu.RLock()
+	allowRemote := s.allowRemoteGUI
+	expectedPort := s.activePort
+	s.mu.RUnlock()
+
+	host := u.Hostname()
+	port := u.Port()
+
+	isLoopback := host == "127.0.0.1" || host == "localhost" || host == "::1"
+	portMatches := (expectedPort == 0 || port == "" || port == fmt.Sprintf("%d", expectedPort))
+
+	if !allowRemote {
+		return isLoopback && portMatches
+	}
+
+	if isLoopback && portMatches {
+		return true
+	}
+	if r.Host != "" && u.Host == r.Host {
+		return true
+	}
+	return false
+}
+
 func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gpu.ManagerConfig) *ServerState {
 	tokenBytes := make([]byte, 32)
 	_, _ = rand.Read(tokenBytes)
+
+	joinBytes := make([]byte, 4)
+	_, _ = rand.Read(joinBytes)
+	initJoinToken := fmt.Sprintf("UC-%04X-%04X", binary.BigEndian.Uint16(joinBytes[0:2]), binary.BigEndian.Uint16(joinBytes[2:4]))
 
 	s := &ServerState{
 		node:           n,
@@ -116,7 +161,7 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 		sessionToken:   hex.EncodeToString(tokenBytes),
 		startTime:      time.Now(),
 		relayThreshold: 2.0,
-		joinToken:      "UC-9F4A-82B1",
+		joinToken:      initJoinToken,
 		wsClients:      make(map[*wsClient]bool),
 		eventLog:       make([]EventMessage, 0, 100),
 		pendingReqs:    make(map[string]string),
@@ -126,26 +171,7 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 
 	s.upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				return true
-			}
-			u, err := url.Parse(origin)
-			if err != nil {
-				return false
-			}
-			host := u.Hostname()
-			if host != "127.0.0.1" && host != "localhost" {
-				return false
-			}
-			port := u.Port()
-			s.mu.RLock()
-			expectedPort := s.activePort
-			s.mu.RUnlock()
-			if expectedPort != 0 && port != "" && port != fmt.Sprintf("%d", expectedPort) {
-				return false
-			}
-			return true
+			return s.isAllowedOrigin(r)
 		},
 	}
 
@@ -184,6 +210,7 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 				if ok && ch != nil {
 					if tsNano, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
 						rtt := time.Duration(time.Now().UnixNano() - tsNano)
+						n.RecordPeerRTT(peerID, rtt)
 						select {
 						case ch <- rtt:
 						default:
@@ -258,26 +285,9 @@ func (s *ServerState) Broadcast(eventType, peerID, message string, payload any) 
 func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Origin header validation (if present)
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			u, err := url.Parse(origin)
-			if err != nil {
-				http.Error(w, "invalid origin", http.StatusForbidden)
-				return
-			}
-			host := u.Hostname()
-			if host != "127.0.0.1" && host != "localhost" {
-				http.Error(w, "forbidden origin", http.StatusForbidden)
-				return
-			}
-			port := u.Port()
-			s.mu.RLock()
-			expectedPort := s.activePort
-			s.mu.RUnlock()
-			if expectedPort != 0 && port != "" && port != fmt.Sprintf("%d", expectedPort) {
-				http.Error(w, "forbidden origin port", http.StatusForbidden)
-				return
-			}
+		if !s.isAllowedOrigin(r) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
 		}
 
 		// 2. Token validation (Authorization: Bearer <token> or ?token=<token>)
@@ -388,6 +398,7 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		URL string `json:"url"`
 	}
@@ -545,6 +556,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		var body struct {
 			RelayThreshold *float64 `json:"relay_threshold"`
 			RotateToken    bool     `json:"rotate_token"`
@@ -595,6 +607,7 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 
 func (s *ServerState) handleTasks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		var body ClusterTask
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid task payload: "+err.Error(), http.StatusBadRequest)
@@ -645,6 +658,8 @@ func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 		LocalCandidate  string  `json:"local_candidate,omitempty"`
 		RemoteCandidate string  `json:"remote_candidate,omitempty"`
 		PairType        string  `json:"pair_type,omitempty"`
+		BytesSent       int64   `json:"bytes_sent"`
+		BytesReceived   int64   `json:"bytes_received"`
 	}
 	type PeerInfo struct {
 		PeerID   string       `json:"peer_id"`
@@ -656,14 +671,16 @@ func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 	for _, p := range connectedPeers {
 		info := PeerInfo{PeerID: p}
 		if m, ok := s.node.GetPathMetrics(p); ok {
-			info.IsDirect = m.IsDirect
 			rttMs := float64(m.RTT.Microseconds()) / 1000.0
+			info.IsDirect = m.IsDirect
 			info.Metrics = &PeerMetrics{
 				IsDirect:        m.IsDirect,
 				RTTMs:           rttMs,
 				LocalCandidate:  m.LocalCandidate,
 				RemoteCandidate: m.RemoteCandidate,
 				PairType:        string(m.PairType),
+				BytesSent:       m.BytesSent,
+				BytesReceived:   m.BytesReceived,
 			}
 		}
 		result = append(result, info)
@@ -673,6 +690,7 @@ func (s *ServerState) handlePeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handlePeerConnect(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID string `json:"peer_id"`
 	}
@@ -701,6 +719,7 @@ func (s *ServerState) handlePeerConnect(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *ServerState) handlePeerDisconnect(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID string `json:"peer_id"`
 	}
@@ -718,6 +737,7 @@ func (s *ServerState) handlePeerDisconnect(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *ServerState) handlePeerPing(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID string `json:"peer_id"`
 	}
@@ -766,6 +786,7 @@ func (s *ServerState) handlePeerPing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handlePeerStream(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID  string `json:"peer_id"`
 		Message string `json:"message"`
@@ -794,6 +815,7 @@ func (s *ServerState) handleGPU(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleGPUHipify(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		Source string `json:"source"`
 	}
@@ -807,6 +829,7 @@ func (s *ServerState) handleGPUHipify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		TaskType   string `json:"task_type"`
 		SourceCode string `json:"source_code"`
@@ -878,6 +901,7 @@ func (s *ServerState) isPeerConnected(peerID string) bool {
 }
 
 func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID   string `json:"peer_id"`
 		Language string `json:"language"`
@@ -1010,6 +1034,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		PeerID  string `json:"peer_id"`
 		Command string `json:"command"`
@@ -1137,6 +1162,7 @@ func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleStoragePut(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
 	var body struct {
 		Content string `json:"content"`
 	}
@@ -1167,6 +1193,7 @@ func (s *ServerState) handleStoragePut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleStorageDel(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body struct {
 		BlobID string `json:"blob_id"`
 	}

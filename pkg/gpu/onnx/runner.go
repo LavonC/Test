@@ -143,6 +143,8 @@ func (e *SessionEngine) RunTrainingLoop(
 		// Check for external preemption signal (watchdog or cancellation)
 		select {
 		case <-ctx.Done():
+			result.TotalSteps = e.currentStep
+			result.FinalLoss = e.currentLoss
 			result.Preempted = true
 			result.PreemptReason = "context canceled: " + ctx.Err().Error()
 			hash, _ := e.flushCheckpoint(checkpointSavePath)
@@ -151,6 +153,8 @@ func (e *SessionEngine) RunTrainingLoop(
 			return result, ctx.Err()
 
 		case reason := <-e.preemptChan:
+			result.TotalSteps = e.currentStep
+			result.FinalLoss = e.currentLoss
 			result.Preempted = true
 			result.PreemptReason = reason
 			hash, err := e.flushCheckpoint(checkpointSavePath)

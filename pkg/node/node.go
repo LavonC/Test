@@ -649,6 +649,13 @@ func (n *Node) GetPathMetrics(peerID string) (instrumentation.PathMetrics, bool)
 	return n.tracker.GetMetrics(peerID)
 }
 
+// RecordPeerRTT updates the measured RTT for a peer connection in the instrumentation tracker.
+func (n *Node) RecordPeerRTT(peerID string, rtt time.Duration) {
+	if n.tracker != nil {
+		n.tracker.RecordRTT(peerID, rtt)
+	}
+}
+
 // FleetStats aggregates connection metrics across all peers.
 func (n *Node) FleetStats() instrumentation.FleetNATStats {
 	return n.tracker.AggregateFleetStats()

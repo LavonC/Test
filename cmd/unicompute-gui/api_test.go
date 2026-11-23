@@ -511,3 +511,38 @@ func TestAPI_LocalShellBlockedByDefault(t *testing.T) {
 	}
 }
 
+func TestAPI_OriginAllowRemoteGUI(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+
+	// 1. allowRemoteGUI == false: non-loopback Origin matching r.Host is rejected with 403 Forbidden
+	s.SetAllowRemoteGUI(false)
+
+	req1 := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req1.Host = "192.168.1.50:23080"
+	req1.Header.Set("Origin", "http://192.168.1.50:23080")
+	req1.Header.Set("Authorization", "Bearer "+token)
+	rec1 := httptest.NewRecorder()
+	mux.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when allowRemoteGUI == false for non-loopback Origin, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// 2. allowRemoteGUI == true: non-loopback Origin matching r.Host is accepted (200 OK)
+	s.SetAllowRemoteGUI(true)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req2.Host = "192.168.1.50:23080"
+	req2.Header.Set("Origin", "http://192.168.1.50:23080")
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK when allowRemoteGUI == true for same-origin non-loopback Origin, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+

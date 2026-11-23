@@ -62,6 +62,8 @@ type PeerConnection struct {
 	OnChunkRequest  func(chunkID string)
 	OnStateChange   func(state webrtc.PeerConnectionState)
 
+	onInternalStateChange func(state webrtc.PeerConnectionState)
+
 	// Instrumentation
 	metrics   *instrumentation.PathMetrics
 	tracker   *instrumentation.Tracker
@@ -138,8 +140,12 @@ func (c *PeerConnection) setupHandlers() {
 			go c.cleanupInFlight(ErrConnectionClosed)
 		}
 		handler := c.OnStateChange
+		internalHandler := c.onInternalStateChange
 		c.mu.Unlock()
 
+		if internalHandler != nil {
+			internalHandler(state)
+		}
 		if handler != nil {
 			handler(state)
 		}
@@ -171,6 +177,13 @@ func (c *PeerConnection) SetOnStreamMessage(fn func(msg []byte)) {
 func (c *PeerConnection) SetOnStateChange(fn func(state webrtc.PeerConnectionState)) {
 	c.mu.Lock()
 	c.OnStateChange = fn
+	c.mu.Unlock()
+}
+
+// setOnInternalStateChange safely sets the internal state change callback.
+func (c *PeerConnection) setOnInternalStateChange(fn func(state webrtc.PeerConnectionState)) {
+	c.mu.Lock()
+	c.onInternalStateChange = fn
 	c.mu.Unlock()
 }
 
@@ -244,6 +257,15 @@ func (c *PeerConnection) bindDataChannel(dc *webrtc.DataChannel) {
 			default:
 				close(c.chunkReady)
 			}
+		}
+	})
+
+	dc.OnClose(func() {
+		c.mu.Lock()
+		internalHandler := c.onInternalStateChange
+		c.mu.Unlock()
+		if internalHandler != nil {
+			internalHandler(webrtc.PeerConnectionStateClosed)
 		}
 	})
 
@@ -398,6 +420,24 @@ func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Rea
 	// 64-byte padded chunkID (e.g. SHA-256 hex string)
 	idBytes := make([]byte, 64)
 	copy(idBytes, []byte(chunkID))
+
+	// Handle 0-byte chunk transfer
+	if totalSize == 0 {
+		frame := make([]byte, protocol.ChunkHeaderSize)
+		frame[0] = protocol.DataMsgChunkResponse
+		frame[1] = protocol.FlagStart | protocol.FlagEnd
+		binary.BigEndian.PutUint64(frame[2:10], 0)
+		binary.BigEndian.PutUint64(frame[10:18], 0)
+		copy(frame[18:82], idBytes)
+
+		if err := dc.Send(frame); err != nil {
+			return fmt.Errorf("failed to send chunk frame: %w", err)
+		}
+		if c.tracker != nil {
+			c.tracker.RecordDataTransfer(c.RemotePeerID, int64(len(frame)), 0)
+		}
+		return nil
+	}
 
 	// Frame payload size: 60 KiB to stay safely within SCTP frame limits with ChunkHeaderSize (PDF Section 6.3)
 	framePayloadSize := 60 * 1024

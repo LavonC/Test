@@ -187,6 +187,10 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 		s.mu.Unlock()
 		return existing.Size, nil
 	}
+	remaining := s.quotaBytes - s.usedBytes
+	if remaining < 0 {
+		remaining = 0
+	}
 	s.mu.Unlock()
 
 	// Write to temporary file first for atomic commit
@@ -202,11 +206,15 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
 
-	// Stream with quota monitoring
-	written, err := io.Copy(writer, r)
+	// Stream with bounded quota monitoring: read at most remaining + 1 bytes
+	limitR := io.LimitReader(r, remaining+1)
+	written, err := io.Copy(writer, limitR)
 	_ = tmpFile.Close()
 	if err != nil {
 		return 0, fmt.Errorf("failed during write: %w", err)
+	}
+	if written > remaining {
+		return 0, fmt.Errorf("%w: input exceeds available quota headroom (%d bytes)", ErrQuotaExceeded, remaining)
 	}
 
 	calculatedHash := hex.EncodeToString(hasher.Sum(nil))

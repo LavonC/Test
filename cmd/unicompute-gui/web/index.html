@@ -113,14 +113,14 @@
       <button class="nav-tab-btn" data-tab="tab-storage" id="navTab5">
         <span class="material-symbols-outlined text-base">dataset</span>
         <span>Storage &amp; Shard Matrix</span>
-        <span class="tab-pill">[RS(4,2)]</span>
+        <span class="tab-pill">[SHA-256]</span>
       </button>
 
       <!-- Tab 6 -->
       <button class="nav-tab-btn" data-tab="tab-tasks" id="navTab6">
         <span class="material-symbols-outlined text-base">task_alt</span>
         <span>Cluster Task Queue</span>
-        <span class="tab-pill">[CLASSAD]</span>
+        <span class="tab-pill">[P2P]</span>
       </button>
 
       <!-- Tab 7 -->
@@ -215,7 +215,7 @@
           <div class="hud-body">
             <div class="hud-row">
               <span class="hud-label">NAT Type:</span>
-              <span class="hud-val font-mono" id="hudNatType">Full Cone NAT</span>
+              <span class="hud-val font-mono" id="hudNatType">Unknown</span>
             </div>
             <div class="hud-row">
               <span class="hud-label">RFC 6598 CGNAT:</span>
@@ -286,7 +286,7 @@
               </div>
               <div class="spec-row">
                 <span class="spec-label">NAT Classification:</span>
-                <span class="spec-val font-mono" id="inspectorNat">Full Cone NAT</span>
+                <span class="spec-val font-mono" id="inspectorNat">Unknown</span>
               </div>
               <div class="spec-row">
                 <span class="spec-label">Data Transferred:</span>
@@ -420,7 +420,7 @@
                   <span class="text-on-surface font-semibold">20s WS Ping / 15s ICE Keepalive</span>
                 </div>
                 <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">mTLS Protocol</span>
+                  <span class="text-outline">Transport Protocol</span>
                   <span class="text-secondary font-semibold" id="coordMtls">TLS_AES_256_GCM_SHA384</span>
                 </div>
               </div>
@@ -453,7 +453,7 @@
               <!-- Large Token Presentation -->
               <div class="bg-surface-lowest p-3 rounded-lg border border-outline-variant/40 flex flex-col items-center justify-center my-2 text-center">
                 <span class="text-[10px] text-outline font-mono uppercase tracking-wider mb-1">Local UI Reference Code (Not Coordinator Auth Token)</span>
-                <span class="font-mono text-xl font-bold text-primary tracking-widest" id="coordDisplayedToken">UC-9F4A-82B1</span>
+                <span class="font-mono text-xl font-bold text-primary tracking-widest" id="coordDisplayedToken">--</span>
                 <div class="flex items-center gap-2 mt-2">
                   <button class="btn-surface font-mono text-xs flex items-center gap-1" id="btnCopyCoordToken">
                     <span class="material-symbols-outlined text-xs">content_copy</span>
@@ -705,7 +705,7 @@
               <span id="gpuStatusBadge" class="badge-emerald font-mono text-xs">ACTIVE</span>
             </div>
             <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Cross-platform DirectX 12 / DirectML and CUDA compute engine with 50 ms user-activity &amp; battery watchdog preemption, Win32 JobObject memory governance, and CUDA $\rightarrow$ AMD HIPIFY translation.
+              Cross-platform DirectX 12 / DirectML and CUDA compute engine with 50 ms user-activity &amp; battery watchdog preemption, Win32 JobObject memory governance, and CUDA &rarr; AMD HIPIFY translation.
             </p>
           </div>
           <div class="flex items-center gap-2">
@@ -860,7 +860,7 @@
     </section>
 
     <!-- ========================================================================= -->
-    <!-- TAB 5: STORAGE & REED-SOLOMON SHARD MATRIX [RS(4,2)]                       -->
+    <!-- TAB 5: STORAGE & CONTENT-ADDRESSED CHUNK STORE                              -->
     <!-- ========================================================================= -->
     <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-storage">
       <div class="max-w-7xl mx-auto space-y-6">
@@ -868,11 +868,11 @@
         <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
           <div>
             <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Network Storage &amp; Reed-Solomon Shard Matrix</h1>
-              <span class="badge-pri font-mono text-xs">[RS(4,2) ACTIVE]</span>
+              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Network Storage &amp; Content-Addressed Chunk Store</h1>
+              <span class="badge-pri font-mono text-xs">[SHA-256 ACTIVE]</span>
             </div>
             <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Distributed datasets sharded with Reed-Solomon RS(4,2) parity (4 data chunks + 2 erasure recovery shards) across fleet peers, anchored by local CAS Blake3 / SHA-256 integrity audits.
+              Distributed datasets partitioned into content-addressed chunks across fleet peers, anchored by local CAS SHA-256 integrity audits.
             </p>
           </div>
           <div class="flex items-center gap-2">
@@ -906,7 +906,7 @@
           </div>
         </div>
 
-        <!-- DATASET 3: local-vault-cas-blobs (Live Local CAS RS(4,2) Partition) -->
+        <!-- DATASET 3: local-vault-cas-blobs (Live Local CAS SHA-256 Partition) -->
         <div class="telemetry-card space-y-4">
           <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-outline-variant/30 pb-3">
             <div class="flex items-center gap-3">
@@ -1013,10 +1013,10 @@
         <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
           <div>
             <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Cluster Task Queue &amp; Bilateral Matchmaking</h1>
-              <span class="badge-pri font-mono text-xs">[CLASSAD]</span>
+              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Cluster Task Queue &amp; Peer Execution</h1>
+              <span class="badge-pri font-mono text-xs">[P2P]</span>
             </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">Bilateral ClassAd matchmaking, stage DAG dispatch, and real-time coordinator stream execution.</p>
+            <p class="font-body text-body-sm text-on-surface-variant mt-1">Task dispatch, job monitoring, and real-time coordinator stream execution.</p>
           </div>
           <div class="flex items-center gap-2">
             <span class="px-2.5 py-1 rounded bg-secondary/15 text-secondary border border-secondary/30 font-mono text-xs font-semibold">
@@ -1161,7 +1161,7 @@
   <footer class="app-footer">
     <div class="footer-left">
       <span class="flex items-center gap-1.5 text-secondary">
-        <span class="status-dot-sm"></span> ClassAds Broadcasting
+        <span class="status-dot-sm"></span> Task Activity Monitoring
       </span>
       <span class="footer-sep">•</span>
       <span id="footerAllocLabel">Allocated: 128MB RAM / 10GB Vault / GPU Tier 3</span>

@@ -168,6 +168,7 @@ func main() {
 
 	// Initialize GUI Server State & API Mux
 	state := NewServerState(n, nodeCfg, *enableGPU, gpuCfg)
+	state.SetAllowRemoteGUI(*allowRemoteGUI)
 	sessionToken := state.SessionToken()
 	mux := http.NewServeMux()
 	state.SetupRoutes(mux)

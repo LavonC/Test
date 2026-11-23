@@ -8,8 +8,48 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 )
+
+const MaxShellOutputBytes = 256 * 1024 // 256 KiB cap per stream
+
+type cappedBuffer struct {
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit}
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.limit - b.buf.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	if len(p) > remaining {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	str := b.buf.String()
+	if b.truncated {
+		str += "\n[output truncated]"
+	}
+	return str
+}
 
 // Executor defines interface for executing shell commands locally.
 type Executor interface {
@@ -46,9 +86,10 @@ func (e *SystemExecutor) Execute(ctx context.Context, req ShellRequest) ShellRes
 		cmd.Env = append(os.Environ(), req.Env...)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutBuf := newCappedBuffer(MaxShellOutputBytes)
+	stderrBuf := newCappedBuffer(MaxShellOutputBytes)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	runErr := cmd.Run()
 	elapsed := time.Since(start).Milliseconds()

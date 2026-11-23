@@ -253,7 +253,7 @@ function initTopologyControls() {
     }
 
     document.getElementById('hudNodeId').textContent = node.id + (node.isLocal ? ' (This PC)' : '');
-    document.getElementById('hudNatType').textContent = node.natType || (lastStatusData?.nat?.nat_type || 'Full Cone NAT');
+    document.getElementById('hudNatType').textContent = node.natType || (lastStatusData?.nat?.nat_type || 'Unknown');
     document.getElementById('hudCgnat').textContent = node.isCGNAT ? 'true (RFC 6598)' : 'false';
     document.getElementById('hudP2PStatus').textContent = node.isLocal ? 'Local Loopback' : (node.connectedP2P ? 'Active WebRTC P2P' : 'Disconnected');
     document.getElementById('hudGPU').textContent = node.gpuActive ? 'DirectML / CUDA Tier 3' : 'Tier 2 Docker';
@@ -382,7 +382,7 @@ function openPCInspector(node) {
     const gpuName = (lastStatusData && lastStatusData.gpu_profile) ? (lastStatusData.gpu_profile.device_name || 'DirectML Accelerated') : 'DirectML Accelerated';
     document.getElementById('inspectorGpu').textContent = gpuName;
 
-    const natName = (lastStatusData && lastStatusData.nat) ? lastStatusData.nat.nat_type : 'Full Cone NAT';
+    const natName = (lastStatusData && lastStatusData.nat) ? lastStatusData.nat.nat_type : 'Unknown';
     document.getElementById('inspectorNat').textContent = `${natName} (Local)`;
 
     const storedMB = (lastStatusData && lastStatusData.storage) ? (lastStatusData.storage.used_bytes / (1024 * 1024)).toFixed(1) : '0';
@@ -401,12 +401,12 @@ function openPCInspector(node) {
 
       if (peerObj && peerObj.metrics) {
         document.getElementById('inspectorPathType').textContent = peerObj.metrics.pair_type || 'host-host';
-        document.getElementById('inspectorLatency').textContent = `${peerObj.metrics.rtt_ms || 14} ms`;
+        document.getElementById('inspectorLatency').textContent = `${peerObj.metrics.rtt_ms ?? 0} ms`;
         document.getElementById('inspectorChannelStatus').textContent = peerObj.metrics.is_direct ? 'Direct (No Relay)' : 'Relayed';
         document.getElementById('inspectorDataIO').textContent = `${formatBytes(peerObj.metrics.bytes_sent || 0)} Out / ${formatBytes(peerObj.metrics.bytes_received || 0)} In`;
       } else {
         document.getElementById('inspectorPathType').textContent = 'host-host';
-        document.getElementById('inspectorLatency').textContent = '14 ms';
+        document.getElementById('inspectorLatency').textContent = '-- ms';
         document.getElementById('inspectorChannelStatus').textContent = 'Direct (No Relay)';
         document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
       }
@@ -414,7 +414,7 @@ function openPCInspector(node) {
       document.getElementById('inspectorTierBadge').textContent = node.gpuActive ? 'Tier 3 GPU' : 'Tier 2 Docker';
       document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
       document.getElementById('inspectorGpu').textContent = node.gpuActive ? 'Hardware Accelerated' : 'CPU Container';
-      document.getElementById('inspectorNat').textContent = node.natType || 'Full Cone NAT';
+      document.getElementById('inspectorNat').textContent = node.natType || 'Unknown';
     } else {
       document.getElementById('inspectorSubtext').textContent = 'Signaling via Coordinator Hub • Unlinked';
       btnConn.classList.remove('hidden');
@@ -427,7 +427,7 @@ function openPCInspector(node) {
       document.getElementById('inspectorTierBadge').textContent = 'Tier 2 Docker';
       document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
       document.getElementById('inspectorGpu').textContent = 'Detection Pending Link';
-      document.getElementById('inspectorNat').textContent = node.natType || 'Full Cone NAT';
+      document.getElementById('inspectorNat').textContent = node.natType || 'Unknown';
       document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
     }
   }
@@ -635,7 +635,7 @@ function loadBlobs() {
       const blobs = data.blobs || [];
       if (badge) badge.textContent = `${blobs.length} Total Blobs`;
 
-      // Update RS(4,2) local CAS dataset metrics
+      // Update SHA-256 local CAS dataset metrics
       let totalBytes = 0;
       blobs.forEach(b => { totalBytes += (b.size_bytes !== undefined ? b.size_bytes : (b.size || 0)); });
       const casSize = document.getElementById('rsCasTotalSize');
@@ -861,13 +861,21 @@ function loadStatus() {
 
       // Update GPU Card (Objective 3)
       if (data.gpu_profile) {
-        document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'NVIDIA RTX Hardware';
-        document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'NVIDIA'} • DirectML: ${data.gpu_profile.directml_supported}`;
-        const totalMB = data.gpu_profile.total_vram_bytes ? (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0) : 6144;
-        const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : 5800;
-        document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
-        document.getElementById('gpuVramAlloc').textContent = `${totalMB - availMB} MB`;
-        document.getElementById('gpuVramBar').style.width = `${((totalMB - availMB) / totalMB) * 100}%`;
+        if (!data.gpu_profile.total_vram_bytes || data.gpu_profile.total_vram_bytes === 0) {
+          document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'CPU Fallback (No Dedicated GPU)';
+          document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'System'} • DirectML: ${data.gpu_profile.directml_supported}`;
+          document.getElementById('gpuVramLabel').textContent = '0 / 0 MB';
+          document.getElementById('gpuVramAlloc').textContent = '0 MB';
+          document.getElementById('gpuVramBar').style.width = '0%';
+        } else {
+          document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'Dedicated GPU';
+          document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'Hardware'} • DirectML: ${data.gpu_profile.directml_supported}`;
+          const totalMB = (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0);
+          const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : totalMB;
+          document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
+          document.getElementById('gpuVramAlloc').textContent = `${Math.max(0, totalMB - availMB)} MB`;
+          document.getElementById('gpuVramBar').style.width = `${totalMB > 0 ? ((totalMB - availMB) / totalMB) * 100 : 0}%`;
+        }
 
         if (data.gpu_profile.temperature_c > 0) {
           document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
@@ -1092,32 +1100,10 @@ function initCoordinatorHub() {
         if (data.join_token) {
           document.getElementById('coordDisplayedToken').textContent = data.join_token;
           document.getElementById('activeJoinCode').textContent = data.join_token;
-          const qrToken = document.getElementById('qrModalToken');
-          if (qrToken) qrToken.textContent = data.join_token;
           appendLog('COORDINATOR', `Rotated discovery join token: ${data.join_token}`);
         }
       });
     });
-  }
-
-  // QR Modal
-  const qrBtn = document.getElementById('btnQrPreview');
-  const qrModal = document.getElementById('qrModal');
-  const closeQrBtn = document.getElementById('btnCloseQrModal');
-  const closeQrBtnDone = document.getElementById('btnCloseQrModalBtn');
-
-  if (qrBtn && qrModal) {
-    qrBtn.addEventListener('click', () => {
-      const currentToken = document.getElementById('coordDisplayedToken').textContent.trim();
-      document.getElementById('qrModalToken').textContent = currentToken;
-      qrModal.classList.remove('hidden');
-    });
-  }
-  if (closeQrBtn && qrModal) {
-    closeQrBtn.addEventListener('click', () => qrModal.classList.add('hidden'));
-  }
-  if (closeQrBtnDone && qrModal) {
-    closeQrBtnDone.addEventListener('click', () => qrModal.classList.add('hidden'));
   }
 
   // Relay Slider
@@ -1297,7 +1283,7 @@ function initShardMatrix() {
     shardBtn.addEventListener('click', () => {
       const input = document.getElementById('storageContentInput');
       if (input) {
-        input.value = `// Dataset partition shard payload\n// RS(4,2) parity: 4 data chunks + 2 erasure recovery shards\nconst DATASET_SIGNATURE = "ds_partition_${Date.now()}";`;
+        input.value = `// Dataset partition payload\n// SHA-256 content-addressed chunk storage\nconst DATASET_SIGNATURE = "ds_partition_${Date.now()}";`;
         input.focus();
         input.scrollIntoView({ behavior: 'smooth' });
       }

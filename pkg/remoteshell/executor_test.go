@@ -137,3 +137,51 @@ func TestSystemExecutor_Timeout(t *testing.T) {
 		t.Fatalf("execution took too long to timeout: %v", elapsed)
 	}
 }
+
+func TestSystemExecutor_OutputCapped(t *testing.T) {
+	buf := newCappedBuffer(1024)
+	largeData := make([]byte, 5000)
+	for i := range largeData {
+		largeData[i] = 'A'
+	}
+	n, err := buf.Write(largeData)
+	if err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+	if n != len(largeData) {
+		t.Errorf("expected %d bytes reported written, got %d", len(largeData), n)
+	}
+	str := buf.String()
+	if !strings.HasSuffix(str, "\n[output truncated]") {
+		t.Errorf("expected string to end with truncation notice")
+	}
+	if buf.buf.Len() > 1024 {
+		t.Errorf("expected buffer len <= 1024, got %d", buf.buf.Len())
+	}
+
+	executor := NewSystemExecutor()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var cmdStr string
+	if runtime.GOOS == "windows" {
+		cmdStr = "powershell -Command \"Write-Output ('X' * 300000)\""
+	} else {
+		cmdStr = "python3 -c \"print('X' * 300000)\" || printf '%*s' 300000 ''"
+	}
+
+	req := ShellRequest{
+		ExecID:    "test-cap",
+		Command:   cmdStr,
+		ShellType: ShellAuto,
+		TimeoutMs: 5000,
+	}
+
+	resp := executor.Execute(ctx, req)
+	if len(resp.Stdout) > MaxShellOutputBytes+100 {
+		t.Errorf("expected stdout to be capped at ~%d bytes, got %d", MaxShellOutputBytes, len(resp.Stdout))
+	}
+	if !strings.Contains(resp.Stdout, "[output truncated]") {
+		t.Errorf("expected stdout to contain truncation notice")
+	}
+}

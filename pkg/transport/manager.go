@@ -84,6 +84,21 @@ func (m *Manager) GetTracker() *instrumentation.Tracker {
 	return m.tracker
 }
 
+func (m *Manager) removeSession(peerID, sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur, ok := m.peerSessions[peerID]; ok && cur == sessionID {
+		delete(m.peerSessions, peerID)
+	}
+	delete(m.connections, sessionID)
+}
+
+func (m *Manager) getSignalingClient() *signaling.Client {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sigClient
+}
+
 // formatICEURL formats and normalizes STUN/TURN URLs to standard RFC 7064/7065 URI schemes
 // (e.g., stun:host:port, turn:host:port), resolving missing schemes, trimming double-slash syntax,
 // bracketing IPv6 literals, and handling query parameters.
@@ -221,10 +236,24 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	conn.setupHandlers()
 
 	m.mu.Lock()
+	if oldSessionID, exists := m.peerSessions[targetPeerID]; exists && oldSessionID != sessionID {
+		if oldConn, ok := m.connections[oldSessionID]; ok {
+			delete(m.connections, oldSessionID)
+			go func(c *PeerConnection) {
+				_ = c.Close()
+			}(oldConn)
+		}
+	}
 	m.connections[sessionID] = conn
 	m.peerSessions[targetPeerID] = sessionID
 	onConnHandler := m.onNewConn
 	m.mu.Unlock()
+
+	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+			m.removeSession(targetPeerID, sessionID)
+		}
+	})
 
 	// Register event callbacks (storage, streams) before creating DataChannels and Offer
 	if onConnHandler != nil {
@@ -233,7 +262,8 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 
 	// ICE Candidate gathering & Trickle signaling
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil || m.sigClient == nil {
+		sig := m.getSignalingClient()
+		if c == nil || sig == nil {
 			return
 		}
 		candidateJSON := c.ToJSON()
@@ -249,7 +279,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 		}
 
 		rawPayload, _ := json.Marshal(payload)
-		_ = m.sigClient.Send(protocol.Envelope{
+		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgICECandidate,
 			SenderID: m.cfg.NodeID,
 			TargetID: targetPeerID,
@@ -263,6 +293,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 		Ordered: func(b bool) *bool { return &b }(true),
 	})
 	if err != nil {
+		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to create stream DataChannel: %w", err)
 	}
@@ -273,6 +304,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 		Ordered: func(b bool) *bool { return &b }(true),
 	})
 	if err != nil {
+		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to create chunk DataChannel: %w", err)
 	}
@@ -281,23 +313,25 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	// Create SDP Offer
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
+		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to create offer: %w", err)
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
+		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to set local description: %w", err)
 	}
 
 	// Transmit Offer via signaling
-	if m.sigClient != nil {
+	if sig := m.getSignalingClient(); sig != nil {
 		sdpPayload, _ := json.Marshal(protocol.SDPPayload{
 			SessionID: sessionID,
 			Type:      offer.Type.String(),
 			SDP:       offer.SDP,
 		})
-		_ = m.sigClient.Send(protocol.Envelope{
+		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgSDPOffer,
 			SenderID: m.cfg.NodeID,
 			TargetID: targetPeerID,
@@ -306,7 +340,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	}
 
 	// Fast Fallback Ladder wait with context
-	fallbackCtx, cancelFallback := context.WithTimeout(ctx, m.cfg.FallbackTimeout)
+	fallbackCtx, cancelFallback := context.WithTimeout(ctx, m.FallbackTimeout())
 	defer cancelFallback()
 
 	connErr := conn.WaitConnected(fallbackCtx)
@@ -318,11 +352,15 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 			connErr = conn.WaitConnected(ctx)
 		}
 		if connErr != nil {
+			m.removeSession(targetPeerID, sessionID)
+			_ = conn.Close()
 			return nil, connErr
 		}
 	}
 
 	if err := conn.WaitChannelsReady(ctx); err != nil {
+		m.removeSession(targetPeerID, sessionID)
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -371,10 +409,24 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	conn.setupHandlers()
 
 	m.mu.Lock()
+	if oldSessionID, exists := m.peerSessions[remotePeerID]; exists && oldSessionID != sdp.SessionID {
+		if oldConn, ok := m.connections[oldSessionID]; ok {
+			delete(m.connections, oldSessionID)
+			go func(c *PeerConnection) {
+				_ = c.Close()
+			}(oldConn)
+		}
+	}
 	m.connections[sdp.SessionID] = conn
 	m.peerSessions[remotePeerID] = sdp.SessionID
 	onConnHandler := m.onNewConn
 	m.mu.Unlock()
+
+	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+			m.removeSession(remotePeerID, sdp.SessionID)
+		}
+	})
 
 	// Register event callbacks (storage, streams) synchronously before receiving early DataChannel messages
 	if onConnHandler != nil {
@@ -388,7 +440,8 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 
 	// Trickle ICE candidates
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil || m.sigClient == nil {
+		sig := m.getSignalingClient()
+		if c == nil || sig == nil {
 			return
 		}
 		candidateJSON := c.ToJSON()
@@ -404,7 +457,7 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 		}
 
 		rawPayload, _ := json.Marshal(payload)
-		_ = m.sigClient.Send(protocol.Envelope{
+		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgICECandidate,
 			SenderID: m.cfg.NodeID,
 			TargetID: remotePeerID,
@@ -418,25 +471,31 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	}
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
+		m.removeSession(remotePeerID, sdp.SessionID)
+		_ = conn.Close()
 		return err
 	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
+		m.removeSession(remotePeerID, sdp.SessionID)
+		_ = conn.Close()
 		return err
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
+		m.removeSession(remotePeerID, sdp.SessionID)
+		_ = conn.Close()
 		return err
 	}
 
-	if m.sigClient != nil {
+	if sig := m.getSignalingClient(); sig != nil {
 		answerPayload, _ := json.Marshal(protocol.SDPPayload{
 			SessionID: sdp.SessionID,
 			Type:      answer.Type.String(),
 			SDP:       answer.SDP,
 		})
-		_ = m.sigClient.Send(protocol.Envelope{
+		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgSDPAnswer,
 			SenderID: m.cfg.NodeID,
 			TargetID: remotePeerID,

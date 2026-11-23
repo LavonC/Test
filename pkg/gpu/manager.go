@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ type ManagerConfig struct {
 // Manager orchestrates hardware probing, sandboxing, watchdog, and execution for Objective 3.
 type Manager struct {
 	mu           sync.RWMutex
+	execMu       sync.Mutex
 	cfg          ManagerConfig
 	profile      GPUProfile
 	watchdog     *watchdog.Watchdog
@@ -155,12 +157,36 @@ func (m *Manager) AssignProcess(pid int) error {
 
 // ExecuteTask processes a GPU computation request with strict sandboxing and preemption support.
 func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskResponse {
+	m.execMu.Lock()
+	defer m.execMu.Unlock()
+
 	start := time.Now()
 	resp := GPUTaskResponse{
 		JobID:     req.JobID,
 		Status:    "failed",
 		ExitCode:  -1,
 		Simulated: true,
+	}
+
+	// Validate req.JobID to prevent path traversal
+	if req.JobID == "" || strings.Contains(req.JobID, "/") || strings.Contains(req.JobID, "\\") || strings.Contains(req.JobID, "..") || filepath.Base(req.JobID) != req.JobID {
+		resp.Status = "rejected"
+		resp.Error = "invalid job_id: path traversal detected"
+		resp.ExecutionMs = time.Since(start).Milliseconds()
+		return resp
+	}
+
+	// Validate req.CheckpointBlob to prevent path traversal
+	if req.CheckpointBlob != "" {
+		absStorage, err1 := filepath.Abs(m.cfg.StorageDir)
+		absBlob, err2 := filepath.Abs(filepath.Clean(req.CheckpointBlob))
+		rel, err3 := filepath.Rel(absStorage, absBlob)
+		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+			resp.Status = "rejected"
+			resp.Error = "invalid checkpoint_blob: path traversal detected"
+			resp.ExecutionMs = time.Since(start).Milliseconds()
+			return resp
+		}
 	}
 
 	// AssignProcess only applies when an external child worker PID is supplied via req.ProcessID.
@@ -276,9 +302,10 @@ func (m *Manager) Close() error {
 		return nil
 	}
 	m.closed = true
+	started := m.started
 	m.mu.Unlock()
 
-	if m.watchdog != nil {
+	if m.watchdog != nil && started {
 		m.watchdog.Stop()
 	}
 	if m.sandbox != nil {
