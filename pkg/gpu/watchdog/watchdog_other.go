@@ -37,18 +37,21 @@ func (w *Watchdog) pollLoop() {
 					w.status.State = StatePausedBattery
 					w.status.LastPauseReason = "Host switched to battery power"
 					w.status.LastPauseTime = time.Now()
+					reason := w.status.LastPauseReason
+					cb := w.onPause
 					w.mu.Unlock()
-					if w.onPause != nil {
-						w.onPause(w.status.LastPauseReason)
+					if cb != nil {
+						cb(reason)
 					}
 					continue
 				}
 			} else if !onBattery && w.state == StatePausedBattery {
 				w.state = StateRunning
 				w.status.State = StateRunning
+				cb := w.onResume
 				w.mu.Unlock()
-				if w.onResume != nil {
-					w.onResume()
+				if cb != nil {
+					cb()
 				}
 				continue
 			}

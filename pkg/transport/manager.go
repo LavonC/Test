@@ -250,7 +250,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	m.mu.Unlock()
 
 	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			m.removeSession(targetPeerID, sessionID)
 		}
 	})
@@ -423,7 +423,7 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	m.mu.Unlock()
 
 	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			m.removeSession(remotePeerID, sdp.SessionID)
 		}
 	})

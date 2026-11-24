@@ -384,6 +384,20 @@
           </div>
         </div>
 
+        <!-- Auth Required Alert Banner -->
+        <div class="hidden bg-amber-500/15 border border-amber-500/40 rounded-xl p-4 flex items-center justify-between gap-4" id="bannerAuthRequired">
+          <div class="flex items-center gap-3">
+            <span class="material-symbols-outlined text-amber-400 text-2xl">lock</span>
+            <div>
+              <h4 class="font-headline font-semibold text-sm text-amber-300">Coordinator Authentication Required (401)</h4>
+              <p class="text-xs text-on-surface-variant">The coordinator cluster requires a secret token (UNICOMPUTE_AUTH_TOKEN) to join the fleet.</p>
+            </div>
+          </div>
+          <button class="font-mono text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors" id="btnJumpToAuthToken">
+            Configure Token &darr;
+          </button>
+        </div>
+
         <!-- 3-Column Card Bento -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
           <!-- Card 1: Daemon Status Toggle Card -->
@@ -399,10 +413,13 @@
                     <p class="font-mono text-[11px] text-outline">UniCompute Daemon</p>
                   </div>
                 </div>
-                <!-- Status Toggle -->
-                <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
-                  <span class="status-dot-pulse"></span>
-                  <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
+                <!-- Status Toggle & Live Auth Badge -->
+                <div class="flex items-center gap-2">
+                  <span class="hidden px-2 py-0.5 rounded text-[10px] font-mono font-semibold" id="coordAuthBadge"></span>
+                  <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
+                    <span class="status-dot-pulse"></span>
+                    <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
+                  </div>
                 </div>
               </div>
 
@@ -526,6 +543,118 @@
                 <div class="bg-primary h-full" id="coordBarRelay" style="width: 0%" title="Relayed"></div>
                 <div class="bg-outline-variant/40 h-full" id="coordBarSpare" style="width: 100%" title="Spare capacity"></div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Cluster Auth & Worker Code Allowlist Controls -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Card: Coordinator Cluster Auth Token -->
+          <div class="telemetry-card flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center text-amber-400 border border-amber-500/30">
+                    <span class="material-symbols-outlined">security</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Coordinator Cluster Auth Token</h3>
+                    <p class="font-mono text-[11px] text-outline">Bearer token for protected coordinator hubs</p>
+                  </div>
+                </div>
+                <!-- Token Configured vs Not Set pill -->
+                <span id="pillAuthTokenStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
+                  Not Set
+                </span>
+              </div>
+
+              <!-- Input & Show/Hide -->
+              <div class="space-y-2 mt-2">
+                <label class="block text-xs font-mono text-outline">Cluster Auth Secret</label>
+                <div class="relative flex items-center">
+                  <input type="password" id="inputCoordAuthToken" autocomplete="off" placeholder="Enter cluster auth token (UNICOMPUTE_AUTH_TOKEN)"
+                    class="w-full bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-2 pr-10 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
+                  <button type="button" id="btnToggleAuthTokenVis" title="Show/Hide Token"
+                    class="absolute right-2 text-outline hover:text-on-surface p-1 transition-colors">
+                    <span class="material-symbols-outlined text-base">visibility</span>
+                  </button>
+                </div>
+                <p class="text-[11px] text-outline italic">Stored in memory for this running session only; never echoed back by the API.</p>
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="flex items-center justify-between pt-3 border-t border-outline-variant/30 mt-4">
+              <button id="btnClearAuthToken" class="btn-surface font-mono text-xs flex items-center gap-1.5 px-3 py-1.5 text-outline hover:text-error transition-colors">
+                <span class="material-symbols-outlined text-sm">delete</span>
+                <span>Clear</span>
+              </button>
+              <button id="btnSaveAuthToken" class="btn-primary-compact font-mono text-xs flex items-center gap-1.5 px-4 py-1.5">
+                <span class="material-symbols-outlined text-sm">lock_open</span>
+                <span>Save &amp; Reconnect</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Card: Worker Code Execution Allowlist -->
+          <div class="telemetry-card flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
+                    <span class="material-symbols-outlined">terminal</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Worker Code Execution Allowlist</h3>
+                    <p class="font-mono text-[11px] text-outline">Authorized remote peers for container sandbox</p>
+                  </div>
+                </div>
+                <!-- Runtime Status Badge -->
+                <span id="badgeDockerStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
+                  Checking Docker...
+                </span>
+              </div>
+
+              <!-- Interactive Chip List -->
+              <div class="space-y-1.5">
+                <div class="flex items-center justify-between text-xs font-mono">
+                  <span class="text-outline">Authorized Peers</span>
+                  <div class="flex items-center gap-2">
+                    <button id="btnAllowAllCode" class="text-[10px] text-amber-400 hover:underline font-mono">Allow All (*)</button>
+                    <span class="text-outline">|</span>
+                    <button id="btnDenyAllCode" class="text-[10px] text-error hover:underline font-mono">Deny All</button>
+                  </div>
+                </div>
+
+                <!-- Chips Container -->
+                <div id="codeAllowlistChips" class="min-h-[52px] p-2 bg-surface-lowest rounded-lg border border-outline-variant/40 flex flex-wrap gap-1.5 items-center">
+                  <!-- Dynamically populated chips -->
+                </div>
+              </div>
+
+              <!-- Add Peer Input & Suggestions -->
+              <div class="space-y-2 mt-3">
+                <div class="flex items-center gap-2">
+                  <input type="text" id="inputAddAllowPeer" placeholder="Peer ID (e.g. peer-a)"
+                    class="flex-1 bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-1.5 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
+                  <button id="btnAddAllowPeer" class="btn-surface font-mono text-xs px-3 py-1.5 flex items-center gap-1 font-semibold text-primary">
+                    <span class="material-symbols-outlined text-sm">add</span>
+                    <span>+ Add</span>
+                  </button>
+                </div>
+
+                <!-- Discovered Online Fleet Peer Suggestions -->
+                <div id="fleetSuggestionsWrap" class="hidden text-[11px] font-mono text-outline flex flex-wrap items-center gap-1.5 pt-1">
+                  <span>Fleet peers:</span>
+                  <div id="fleetSuggestionsList" class="flex flex-wrap gap-1"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Footer note -->
+            <div class="pt-2 border-t border-outline-variant/30 text-[11px] text-outline font-mono flex items-center justify-between">
+              <span>Policy: Zero-Trust Default Deny</span>
+              <span class="text-on-surface-variant">Air-gapped execution</span>
             </div>
           </div>
         </div>
@@ -888,21 +1017,21 @@
           </div>
         </div>
 
-        <!-- Reed-Solomon Legend & Quick Overview -->
+        <!-- CAS Blobstore Overview -->
         <div class="telemetry-card flex flex-wrap items-center justify-between gap-4 p-4">
           <div class="flex items-center gap-4">
-            <span class="text-xs font-mono text-outline font-semibold uppercase">Shard Topology:</span>
+            <span class="text-xs font-mono text-outline font-semibold uppercase">Storage Substrate:</span>
             <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
-              <span class="text-on-surface">Data Shard (D1-D4)</span>
+              <span class="w-3 h-3 rounded bg-emerald-500/80 border border-secondary/50"></span>
+              <span class="text-on-surface">SHA-256 Content-Addressed Local Chunk Storage</span>
             </div>
             <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-purple-500/80 border border-tertiary/50"></span>
-              <span class="text-on-surface">Parity Recovery Shard (P1-P2)</span>
+              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
+              <span class="text-on-surface">WebRTC Chunk Transfer</span>
             </div>
           </div>
           <div class="text-xs font-mono text-on-surface-variant">
-            Tolerates up to <span class="text-secondary font-semibold">2 Simultaneous Peer Failures</span> per dataset slice.
+            Per-node disk quota with <span class="text-secondary font-semibold">automatic Bitrot scrubber</span> verification.
           </div>
         </div>
 
@@ -917,7 +1046,7 @@
                   <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-emerald-500/15 text-secondary border border-secondary/30 font-semibold">Active Vault</span>
                   <span class="text-xs font-mono text-outline" id="rsCasTotalSize">0 B</span>
                 </div>
-                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices striped across mesh peers with SHA-256 CAS verification</p>
+                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices stored in local SHA-256 CAS with SHA-256 CAS verification</p>
               </div>
             </div>
             <!-- Merkle Verification Badge -->
@@ -1048,9 +1177,9 @@
               <thead>
                 <tr>
                   <th>Job ID</th>
-                  <th>Bilateral ClassAd Requirement</th>
+                  <th>Target Peer / Runtime</th>
                   <th>Target Node / Match</th>
-                  <th>Stage DAG Routing</th>
+                  <th>Execution Mode</th>
                   <th>Priority</th>
                   <th>Status</th>
                 </tr>

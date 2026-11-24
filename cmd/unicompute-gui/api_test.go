@@ -546,3 +546,287 @@ func TestAPI_OriginAllowRemoteGUI(t *testing.T) {
 	}
 }
 
+func TestAPI_CoordinatorAuthToken_NeverEchoed(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	secretAuthToken := "super-secret-cluster-auth-key-999"
+
+	// 1. POST /api/coordinator/settings with auth_token
+	postBody, _ := json.Marshal(map[string]any{
+		"auth_token": secretAuthToken,
+	})
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewReader(postBody))
+	reqPost.Header.Set("Authorization", "Bearer "+token)
+	reqPost.Header.Set("Content-Type", "application/json")
+	recPost := httptest.NewRecorder()
+	mux.ServeHTTP(recPost, reqPost)
+
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on POST /api/coordinator/settings, got %d: %s", recPost.Code, recPost.Body.String())
+	}
+
+	postRespStr := recPost.Body.String()
+	if strings.Contains(postRespStr, secretAuthToken) {
+		t.Fatalf("security violation: raw auth_token was echoed in POST response: %s", postRespStr)
+	}
+
+	var postData map[string]any
+	if err := json.Unmarshal(recPost.Body.Bytes(), &postData); err != nil {
+		t.Fatalf("failed to decode POST response: %v", err)
+	}
+	if postData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true in POST response, got %v", postData["auth_token_set"])
+	}
+
+	// 2. GET /api/coordinator/settings: verify auth_token_set: true and no raw token
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/coordinator/settings", nil)
+	reqGet.Header.Set("Authorization", "Bearer "+token)
+	recGet := httptest.NewRecorder()
+	mux.ServeHTTP(recGet, reqGet)
+
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on GET /api/coordinator/settings, got %d: %s", recGet.Code, recGet.Body.String())
+	}
+
+	getRespStr := recGet.Body.String()
+	if strings.Contains(getRespStr, secretAuthToken) {
+		t.Fatalf("security violation: raw auth_token was echoed in GET response: %s", getRespStr)
+	}
+
+	var getData map[string]any
+	if err := json.Unmarshal(recGet.Body.Bytes(), &getData); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if getData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true in GET response, got %v", getData["auth_token_set"])
+	}
+
+	// 3. Clear token
+	clearBody, _ := json.Marshal(map[string]any{
+		"clear_auth_token": true,
+	})
+	reqClear := httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewReader(clearBody))
+	reqClear.Header.Set("Authorization", "Bearer "+token)
+	reqClear.Header.Set("Content-Type", "application/json")
+	recClear := httptest.NewRecorder()
+	mux.ServeHTTP(recClear, reqClear)
+
+	if recClear.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on clear token, got %d: %s", recClear.Code, recClear.Body.String())
+	}
+
+	var clearData map[string]any
+	if err := json.Unmarshal(recClear.Body.Bytes(), &clearData); err != nil {
+		t.Fatalf("failed to decode clear response: %v", err)
+	}
+	if clearData["auth_token_set"] != false {
+		t.Errorf("expected auth_token_set: false after clear, got %v", clearData["auth_token_set"])
+	}
+}
+
+func TestAPI_WorkerAllowlist_GetAndSet(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+
+	// 1. Unauthenticated request must return 401
+	unauthReq := httptest.NewRequest(http.MethodGet, "/api/worker/settings", nil)
+	unauthRec := httptest.NewRecorder()
+	mux.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized without Bearer token, got %d", unauthRec.Code)
+	}
+
+	// 2. Initial GET returns empty allowlist and wildcard_allowed: false
+	getReq := httptest.NewRequest(http.MethodGet, "/api/worker/settings", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var initData struct {
+		CodeAllowlist   []string `json:"code_allowlist"`
+		DockerActive    bool     `json:"docker_active"`
+		WildcardAllowed bool     `json:"wildcard_allowed"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &initData); err != nil {
+		t.Fatalf("failed to decode JSON: %v", err)
+	}
+	if len(initData.CodeAllowlist) != 0 {
+		t.Errorf("expected empty initial allowlist, got %v", initData.CodeAllowlist)
+	}
+	if initData.WildcardAllowed {
+		t.Errorf("expected wildcard_allowed: false initially")
+	}
+
+	// 3. Valid POST /api/worker/settings
+	validBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{"peer-b", "peer-a"},
+	})
+	postReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(validBody))
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Content-Type", "application/json")
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST, got %d: %s", postRec.Code, postRec.Body.String())
+	}
+
+	// Verify node.CodeAllowlist() is updated and sorted
+	allowed := s.node.CodeAllowlist()
+	if len(allowed) != 2 || allowed[0] != "peer-a" || allowed[1] != "peer-b" {
+		t.Errorf("expected sorted [peer-a, peer-b], got %v", allowed)
+	}
+
+	// 4. Wildcard POST
+	wildBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{"*"},
+	})
+	wildReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(wildBody))
+	wildReq.Header.Set("Authorization", "Bearer "+token)
+	wildReq.Header.Set("Content-Type", "application/json")
+	wildRec := httptest.NewRecorder()
+	mux.ServeHTTP(wildRec, wildReq)
+	if wildRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on wildcard POST, got %d: %s", wildRec.Code, wildRec.Body.String())
+	}
+	var wildData struct {
+		CodeAllowlist   []string `json:"code_allowlist"`
+		WildcardAllowed bool     `json:"wildcard_allowed"`
+	}
+	if err := json.Unmarshal(wildRec.Body.Bytes(), &wildData); err != nil {
+		t.Fatalf("failed to decode wildcard response: %v", err)
+	}
+	if !wildData.WildcardAllowed {
+		t.Errorf("expected wildcard_allowed: true")
+	}
+
+	// 5. Rejects invalid payload (non-array, nil)
+	badReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", strings.NewReader(`{"code_allowlist": "not-an-array"}`))
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on invalid payload, got %d", badRec.Code)
+	}
+
+	// 6. Rejects oversized entry (> 128 chars)
+	longEntry := strings.Repeat("x", 129)
+	oversizedBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{longEntry},
+	})
+	overReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(oversizedBody))
+	overReq.Header.Set("Authorization", "Bearer "+token)
+	overReq.Header.Set("Content-Type", "application/json")
+	overRec := httptest.NewRecorder()
+	mux.ServeHTTP(overRec, overReq)
+	if overRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on oversized entry, got %d", overRec.Code)
+	}
+
+	// 7. Rejects oversized list (> 100 entries)
+	tooMany := make([]string, 101)
+	for i := range tooMany {
+		tooMany[i] = "peer"
+	}
+	tooManyBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": tooMany,
+	})
+	tooManyReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(tooManyBody))
+	tooManyReq.Header.Set("Authorization", "Bearer "+token)
+	tooManyReq.Header.Set("Content-Type", "application/json")
+	tooManyRec := httptest.NewRecorder()
+	mux.ServeHTTP(tooManyRec, tooManyReq)
+	if tooManyRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on >100 entries, got %d", tooManyRec.Code)
+	}
+}
+
+func TestCoordinatorStatus_401AuthRequired(t *testing.T) {
+	// Mock coordinator where /health returns 200 OK, but /api/nodes returns 401 Unauthorized
+	mockCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy","service":"unicompute-coordinator"}`))
+		case "/api/nodes":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized: cluster auth token required"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockCoord.Close()
+
+	coordWSURL := "ws://" + mockCoord.Listener.Addr().String() + "/ws"
+	s, mux, cleanup := setupTestServer(t, coordWSURL)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator/status", nil)
+	req.Header.Set("Authorization", "Bearer "+s.SessionToken())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("failed to decode response JSON: %v", err)
+	}
+
+	if data["status"] != "AUTH_REQUIRED" {
+		t.Errorf("expected status 'AUTH_REQUIRED' on 401, got %v", data["status"])
+	}
+	if data["auth_required"] != true {
+		t.Errorf("expected auth_required: true on 401, got %v", data["auth_required"])
+	}
+}
+
+func TestAPI_CoordinatorConnect_WithAuthToken(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	secret := "connect-secret-token-777"
+
+	postBody, _ := json.Marshal(map[string]any{
+		"url":        "ws://127.0.0.1:9090/ws",
+		"auth_token": secret,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/coordinator/connect", bytes.NewReader(postBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	respStr := rec.Body.String()
+	if strings.Contains(respStr, secret) {
+		t.Fatalf("security violation: raw auth_token echoed in /api/coordinator/connect response: %s", respStr)
+	}
+
+	var respData map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &respData); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if respData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true, got %v", respData["auth_token_set"])
+	}
+	if !s.node.HasAuthToken() {
+		t.Errorf("expected node.HasAuthToken() == true after connect")
+	}
+}
+
+

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -836,3 +837,52 @@ func (n *Node) ReconnectSignaling(ctx context.Context, newURL string) error {
 	}
 	return nil
 }
+
+// SetAuthToken updates the coordinator cluster authentication token.
+func (n *Node) SetAuthToken(token string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cfg.AuthToken = strings.TrimSpace(token)
+}
+
+// HasAuthToken reports whether a coordinator cluster authentication token is set.
+func (n *Node) HasAuthToken() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.cfg.AuthToken != ""
+}
+
+// SetCodeAllowlist replaces the worker Docker code execution allowlist with
+// a normalized map of allowed peer IDs (trimming whitespace and skipping empty entries).
+func (n *Node) SetCodeAllowlist(peers ...string) {
+	allowed := make(map[string]struct{}, len(peers))
+	for _, p := range peers {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			allowed[trimmed] = struct{}{}
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.codeAllowedPeers = allowed
+}
+
+// CodeAllowlist returns a sorted slice of currently allowed peer IDs.
+func (n *Node) CodeAllowlist() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	res := make([]string, 0, len(n.codeAllowedPeers))
+	for p := range n.codeAllowedPeers {
+		res = append(res, p)
+	}
+	sort.Strings(res)
+	return res
+}
+
+// CodeExecutorActive reports whether an active code executor is configured.
+func (n *Node) CodeExecutorActive() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.codeExecutor != nil
+}
+

@@ -55,3 +55,34 @@ func TestExecuteTask_PathTraversalRejection(t *testing.T) {
 		t.Errorf("expected path traversal in CheckpointBlob to be rejected, got %q", resp.Status)
 	}
 }
+
+func TestExecuteTask_RelativeCheckpointBlob(t *testing.T) {
+	storageDir := t.TempDir()
+	mgr, err := NewManager(ManagerConfig{
+		StorageDir: storageDir,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+
+	// 1. Valid relative path inside StorageDir must NOT be rejected with path traversal error
+	respValid := mgr.ExecuteTask(ctx, GPUTaskRequest{
+		JobID:          "valid-job-rel",
+		CheckpointBlob: "checkpoints/job1.bin",
+	})
+	if respValid.Status == "rejected" {
+		t.Errorf("expected relative path inside StorageDir to be accepted, got rejected: %v", respValid.Error)
+	}
+
+	// 2. Traversal ../escape.bin must be rejected
+	respEscape := mgr.ExecuteTask(ctx, GPUTaskRequest{
+		JobID:          "valid-job-rel",
+		CheckpointBlob: "../escape.bin",
+	})
+	if respEscape.Status != "rejected" {
+		t.Errorf("expected ../escape.bin to be rejected, got: %s", respEscape.Status)
+	}
+}

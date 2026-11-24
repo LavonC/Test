@@ -33,6 +33,10 @@ window.fetch = function(url, options = {}) {
   return _originalFetch(url, options);
 };
 
+function fetchWithAuth(url, options = {}) {
+  return window.fetch(url, options);
+}
+
 let topology = null;
 let currentLocalId = '';
 let currentFleet = [];
@@ -41,6 +45,7 @@ let selectedPeer = null;
 let isLogPaused = false;
 let currentLogFilter = 'all';
 let lastStatusData = null;
+let currentWorkerAllowlist = [];
 
 document.addEventListener('DOMContentLoaded', () => {
   topology = new TopologyRenderer('topologyCanvas', 'canvasContainer');
@@ -52,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSamples();
   loadBlobs();
   loadCoordinatorStatus();
+  loadWorkerSettings();
   loadTasks();
 
   // Periodic polling every 3 seconds to keep fleet and metrics synchronized
@@ -121,6 +127,8 @@ function switchTab(tabId) {
   if (tabId === 'tab-coordinator') {
     pillHealth?.classList.add('active');
     pillCode?.classList.remove('active');
+    loadCoordinatorStatus();
+    loadWorkerSettings();
   } else {
     pillCode?.classList.add('active');
     pillHealth?.classList.remove('active');
@@ -829,6 +837,10 @@ function handleLiveEvent(evt) {
     loadCoordinatorStatus();
   }
 
+  if (t === 'worker_settings_updated') {
+    loadWorkerSettings();
+  }
+
   if (t.includes('task')) {
     loadTasks();
   }
@@ -856,7 +868,7 @@ function loadStatus() {
       }
 
       if (data.nat) {
-        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Cone'}`;
+        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Unknown'}`;
       }
 
       // Update GPU Card (Objective 3)
@@ -958,6 +970,7 @@ function pollFleetAndPeers() {
     if (topology) {
       topology.updateFleet(currentFleet, connectedPeers, currentLocalId, lastStatusData);
     }
+    updateFleetSuggestions();
   }).catch(() => {});
 }
 
@@ -1127,6 +1140,104 @@ function initCoordinatorHub() {
       });
     });
   }
+
+  // Cluster Auth Token Controls
+  const inputToken = document.getElementById('inputCoordAuthToken');
+  const btnToggleVis = document.getElementById('btnToggleAuthTokenVis');
+  if (btnToggleVis && inputToken) {
+    btnToggleVis.addEventListener('click', () => {
+      const isPass = inputToken.type === 'password';
+      inputToken.type = isPass ? 'text' : 'password';
+      const icon = btnToggleVis.querySelector('.material-symbols-outlined');
+      if (icon) {
+        icon.textContent = isPass ? 'visibility_off' : 'visibility';
+      }
+    });
+  }
+
+  const btnSaveToken = document.getElementById('btnSaveAuthToken');
+  if (btnSaveToken && inputToken) {
+    btnSaveToken.addEventListener('click', () => {
+      const tok = inputToken.value.trim();
+      fetchWithAuth('/api/coordinator/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth_token: tok })
+      })
+      .then(r => r.json())
+      .then(() => {
+        appendLog('COORDINATOR', tok ? 'Cluster auth token updated & signaling reconnected' : 'Cleared cluster auth token');
+        loadCoordinatorStatus();
+        loadWorkerSettings();
+      })
+      .catch(err => {
+        appendLog('COORDINATOR', `Failed to update auth token: ${err.message}`);
+      });
+    });
+  }
+
+  const btnClearToken = document.getElementById('btnClearAuthToken');
+  if (btnClearToken && inputToken) {
+    btnClearToken.addEventListener('click', () => {
+      inputToken.value = '';
+      fetchWithAuth('/api/coordinator/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_auth_token: true })
+      })
+      .then(r => r.json())
+      .then(() => {
+        appendLog('COORDINATOR', 'Cleared cluster auth token & reconnecting');
+        loadCoordinatorStatus();
+        loadWorkerSettings();
+      })
+      .catch(err => {
+        appendLog('COORDINATOR', `Failed to clear auth token: ${err.message}`);
+      });
+    });
+  }
+
+  const btnJump = document.getElementById('btnJumpToAuthToken');
+  if (btnJump && inputToken) {
+    btnJump.addEventListener('click', () => {
+      inputToken.focus();
+    });
+  }
+
+  // Worker Code Allowlist Controls
+  const inputAllowPeer = document.getElementById('inputAddAllowPeer');
+  const btnAddAllow = document.getElementById('btnAddAllowPeer');
+  if (btnAddAllow && inputAllowPeer) {
+    const handleAdd = () => {
+      const peer = inputAllowPeer.value.trim();
+      if (!peer) return;
+      if (!currentWorkerAllowlist.includes(peer)) {
+        saveWorkerAllowlist([...currentWorkerAllowlist, peer]);
+      }
+      inputAllowPeer.value = '';
+    };
+    btnAddAllow.addEventListener('click', handleAdd);
+    inputAllowPeer.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleAdd();
+      }
+    });
+  }
+
+  const btnAllowAll = document.getElementById('btnAllowAllCode');
+  if (btnAllowAll) {
+    btnAllowAll.addEventListener('click', () => {
+      saveWorkerAllowlist(['*']);
+    });
+  }
+
+  const btnDenyAll = document.getElementById('btnDenyAllCode');
+  if (btnDenyAll) {
+    btnDenyAll.addEventListener('click', () => {
+      saveWorkerAllowlist([]);
+    });
+  }
 }
 
 function loadCoordinatorStatus() {
@@ -1144,7 +1255,55 @@ function loadCoordinatorStatus() {
       if (mtlsElem) mtlsElem.textContent = 'DTLS / SCTP (WebRTC DataChannel)';
 
       const daemonStat = document.getElementById('coordDaemonStatus');
-      if (daemonStat) daemonStat.textContent = data.status || 'RUNNING';
+      const authBadge = document.getElementById('coordAuthBadge');
+      const bannerAuth = document.getElementById('bannerAuthRequired');
+      const pillAuthToken = document.getElementById('pillAuthTokenStatus');
+
+      if (data.status === 'AUTH_REQUIRED' || data.auth_required) {
+        if (daemonStat) {
+          daemonStat.textContent = 'AUTH_REQUIRED';
+          daemonStat.className = 'text-amber-400 font-mono text-[11px] font-semibold';
+        }
+        if (authBadge) {
+          authBadge.textContent = 'Auth Required (401)';
+          authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40';
+          authBadge.classList.remove('hidden');
+        }
+        if (bannerAuth) {
+          bannerAuth.classList.remove('hidden');
+        }
+        if (pillAuthToken) {
+          pillAuthToken.textContent = 'Not Set';
+          pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
+        }
+      } else {
+        if (daemonStat) {
+          daemonStat.textContent = data.status || 'RUNNING';
+          daemonStat.className = 'text-secondary font-mono text-[11px] font-semibold';
+        }
+        if (bannerAuth) {
+          bannerAuth.classList.add('hidden');
+        }
+        if (data.auth_token_set) {
+          if (pillAuthToken) {
+            pillAuthToken.textContent = 'Token Configured';
+            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
+          }
+          if (authBadge) {
+            authBadge.textContent = 'Authenticated';
+            authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-secondary border border-secondary/30';
+            authBadge.classList.remove('hidden');
+          }
+        } else {
+          if (pillAuthToken) {
+            pillAuthToken.textContent = 'Not Set';
+            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline';
+          }
+          if (authBadge) {
+            authBadge.classList.add('hidden');
+          }
+        }
+      }
 
       if (topology) {
         if (topology.coordinator) {
@@ -1231,6 +1390,114 @@ function loadCoordinatorStatus() {
     }).catch(() => {});
 }
 
+function saveWorkerAllowlist(newList) {
+  fetchWithAuth('/api/worker/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code_allowlist: newList })
+  })
+  .then(r => r.json())
+  .then(data => {
+    appendLog('WORKER', `Updated code execution allowlist: [${(data.code_allowlist || []).join(', ')}]`);
+    loadWorkerSettings();
+  })
+  .catch(err => {
+    appendLog('WORKER', `Failed to update code allowlist: ${err.message}`);
+  });
+}
+
+function loadWorkerSettings() {
+  fetchWithAuth('/api/worker/settings')
+    .then(r => r.json())
+    .then(data => {
+      if (!data) return;
+      currentWorkerAllowlist = data.code_allowlist || [];
+
+      // Runtime Status Badge
+      const badge = document.getElementById('badgeDockerStatus');
+      if (badge) {
+        if (data.docker_active) {
+          badge.textContent = 'Docker Sandbox Active';
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
+        } else {
+          badge.textContent = 'Docker Unavailable (Forwarding Only)';
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
+        }
+      }
+
+      // Render interactive chip list
+      const container = document.getElementById('codeAllowlistChips');
+      if (container) {
+        if (currentWorkerAllowlist.length === 0) {
+          container.innerHTML = '<span class="text-xs text-outline italic p-1">Default Deny — no remote peers can execute code on this machine.</span>';
+        } else {
+          container.innerHTML = '';
+          currentWorkerAllowlist.forEach(p => {
+            const span = document.createElement('span');
+            if (p === '*') {
+              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5';
+              span.innerHTML = `
+                <span class="material-symbols-outlined text-sm">warning</span>
+                <span>Wildcard (*) active — any authenticated cluster peer can submit Docker code jobs.</span>
+                <button type="button" class="btn-remove-chip ml-1 text-amber-300 hover:text-white font-bold leading-none cursor-pointer" data-peer="*" title="Remove wildcard">&times;</button>
+              `;
+            } else {
+              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono bg-surface-high text-on-surface border border-outline-variant/50 flex items-center gap-1.5';
+              span.innerHTML = `
+                <span>${escapeHTML(p)}</span>
+                <button type="button" class="btn-remove-chip ml-1 text-outline hover:text-error font-bold leading-none cursor-pointer" data-peer="${escapeHTML(p)}" title="Remove peer">&times;</button>
+              `;
+            }
+            container.appendChild(span);
+          });
+
+          container.querySelectorAll('.btn-remove-chip').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const toRemove = btn.dataset.peer;
+              const nextList = currentWorkerAllowlist.filter(item => item !== toRemove);
+              saveWorkerAllowlist(nextList);
+            });
+          });
+        }
+      }
+
+      // Update fleet peer suggestions
+      updateFleetSuggestions();
+    })
+    .catch(() => {});
+}
+
+function updateFleetSuggestions() {
+  const wrap = document.getElementById('fleetSuggestionsWrap');
+  const list = document.getElementById('fleetSuggestionsList');
+  if (!wrap || !list) return;
+
+  const candidatePeers = (currentFleet || []).filter(p => {
+    return p && p !== currentLocalId && !currentWorkerAllowlist.includes(p) && !currentWorkerAllowlist.includes('*');
+  });
+
+  if (candidatePeers.length === 0) {
+    wrap.classList.add('hidden');
+    list.innerHTML = '';
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  list.innerHTML = '';
+  candidatePeers.forEach(p => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'px-2 py-0.5 rounded bg-surface-high hover:bg-surface-highest border border-outline-variant/30 text-[11px] text-primary font-mono cursor-pointer transition-colors';
+    btn.textContent = `+ ${p}`;
+    btn.title = `Authorize ${p}`;
+    btn.addEventListener('click', () => {
+      saveWorkerAllowlist([...currentWorkerAllowlist, p]);
+    });
+    list.appendChild(btn);
+  });
+}
+
 function initShardMatrix() {
   const verifyBtn = document.getElementById('btnVerifyAllMerkle');
   if (verifyBtn) {
@@ -1303,9 +1570,9 @@ function initTaskQueue() {
       const targetNode = (currentFleet && currentFleet.length > 0) ? currentFleet[0] : (currentLocalId || 'local-worker');
       const sampleJob = {
         job_id: `#JOB-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_ad: 'Arch == "x86_64" && HasLocalCAS == true',
+        class_ad: 'docker:python3.13 (128MB RAM, air-gapped)',
         target_match: `Matched -> ${targetNode}`,
-        stage_dag: 'STAGE_DATA_LOCAL_EXEC',
+        stage_dag: 'DOCKER_SANDBOX_EXEC',
         priority: 'P1 NORMAL',
         status: 'SUBMITTED (0%)',
         timestamp: new Date().toLocaleTimeString()
@@ -1337,7 +1604,7 @@ function loadTasks() {
       if (!tbody) return;
 
       if (countBadge) {
-        countBadge.textContent = `Showing ${data.tasks.length} Active DAG Tasks`;
+        countBadge.textContent = `Showing ${data.tasks.length} Active Tasks`;
       }
 
       tbody.innerHTML = '';

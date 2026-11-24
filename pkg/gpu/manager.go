@@ -179,7 +179,11 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 	// Validate req.CheckpointBlob to prevent path traversal
 	if req.CheckpointBlob != "" {
 		absStorage, err1 := filepath.Abs(m.cfg.StorageDir)
-		absBlob, err2 := filepath.Abs(filepath.Clean(req.CheckpointBlob))
+		target := req.CheckpointBlob
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(m.cfg.StorageDir, target)
+		}
+		absBlob, err2 := filepath.Abs(filepath.Clean(target))
 		rel, err3 := filepath.Rel(absStorage, absBlob)
 		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(rel, "..") || rel == ".." {
 			resp.Status = "rejected"

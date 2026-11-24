@@ -139,3 +139,79 @@ func TestSignaling_DuplicateNodeIDRejected(t *testing.T) {
 		t.Fatalf("timed out waiting for duplicate rejection ack")
 	}
 }
+
+func TestHub_RejectsSpoofedSenderID(t *testing.T) {
+	authToken := "cluster-auth-token-xyz"
+	hub, err := NewHub("127.0.0.1:0", authToken)
+	if err != nil {
+		t.Fatalf("failed to start hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	recvC := make(chan protocol.Envelope, 10)
+
+	// Register authenticated peer-A
+	peerA, err := NewClient(wsURL, "peer-A", func(env protocol.Envelope) {}, authToken)
+	if err != nil {
+		t.Fatalf("failed to create peerA: %v", err)
+	}
+	defer peerA.Close()
+
+	// Register authenticated peer-C
+	peerC, err := NewClient(wsURL, "peer-C", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			recvC <- env
+		}
+	}, authToken)
+	if err != nil {
+		t.Fatalf("failed to create peerC: %v", err)
+	}
+	defer peerC.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 1. peer-A attempts to send a spoofed envelope claiming SenderID: "peer-B" targeting peer-C
+	spoofedPayload, _ := json.Marshal(map[string]string{"attack": "impersonation"})
+	spoofedEnv := protocol.Envelope{
+		Type:     protocol.MsgSDPOffer,
+		SenderID: "peer-B",
+		TargetID: "peer-C",
+		Payload:  spoofedPayload,
+	}
+
+	if err := peerA.Send(spoofedEnv); err != nil {
+		t.Fatalf("peerA Send failed: %v", err)
+	}
+
+	// Verify peer-C does NOT receive the spoofed message
+	select {
+	case env := <-recvC:
+		t.Fatalf("security violation: peer-C received spoofed message from SenderID %s: %s", env.SenderID, string(env.Payload))
+	case <-time.After(300 * time.Millisecond):
+		// Expected: hub dropped the spoofed message
+	}
+
+	// 2. Legitimate message from peer-A to peer-C should still succeed
+	legitPayload, _ := json.Marshal(map[string]string{"status": "legit"})
+	legitEnv := protocol.Envelope{
+		Type:     protocol.MsgSDPOffer,
+		SenderID: "peer-A",
+		TargetID: "peer-C",
+		Payload:  legitPayload,
+	}
+
+	if err := peerA.Send(legitEnv); err != nil {
+		t.Fatalf("peerA legitimate Send failed: %v", err)
+	}
+
+	select {
+	case received := <-recvC:
+		if received.SenderID != "peer-A" {
+			t.Errorf("expected SenderID peer-A, got: %s", received.SenderID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for legitimate message at peer-C")
+	}
+}

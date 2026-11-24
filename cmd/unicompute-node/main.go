@@ -267,6 +267,7 @@ func main() {
 			if len(parts) > 0 {
 				if tsNano, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
 					rtt := time.Duration(time.Now().UnixNano() - tsNano)
+					n.RecordPeerRTT(peerID, rtt)
 					fmt.Printf("\n[PONG] Reply from %s: RTT=%.2fms\n> ", peerID, float64(rtt)/float64(time.Millisecond))
 					return
 				}

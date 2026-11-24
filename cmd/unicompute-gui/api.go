@@ -329,6 +329,7 @@ func (s *ServerState) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/coordinator/connect", s.authMiddleware(s.handleCoordinatorConnect))
 	mux.HandleFunc("/api/coordinator/status", s.authMiddleware(s.handleCoordinatorStatus))
 	mux.HandleFunc("/api/coordinator/settings", s.authMiddleware(s.handleCoordinatorSettings))
+	mux.HandleFunc("/api/worker/settings", s.authMiddleware(s.handleWorkerSettings))
 	mux.HandleFunc("/api/tasks", s.authMiddleware(s.handleTasks))
 	mux.HandleFunc("/api/fleet", s.authMiddleware(s.handleFleet))
 	mux.HandleFunc("/api/peers", s.authMiddleware(s.handlePeers))
@@ -398,9 +399,10 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		URL string `json:"url"`
+		URL       string  `json:"url"`
+		AuthToken *string `json:"auth_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		http.Error(w, "invalid coordinator url", http.StatusBadRequest)
@@ -410,14 +412,26 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 	url := strings.TrimSpace(body.URL)
 	s.mu.Lock()
 	s.coordinatorURL = url
+	if body.AuthToken != nil {
+		tok := strings.TrimSpace(*body.AuthToken)
+		s.nodeConfig.AuthToken = tok
+		s.node.SetAuthToken(tok)
+	}
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = s.node.ReconnectSignaling(ctx, url)
 
-	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), body.URL)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "reconnecting", "url": url})
+	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), map[string]any{
+		"url":            url,
+		"auth_token_set": s.node.HasAuthToken(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "reconnecting",
+		"url":            url,
+		"auth_token_set": s.node.HasAuthToken(),
+	})
 }
 
 func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +453,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 	client := &http.Client{Timeout: 1200 * time.Millisecond}
 	status := "RUNNING"
+	authRequired := false
 	fleetCount := 0
 	nodeIDs := []string{}
 
@@ -453,18 +468,21 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 				req.Header.Set("Authorization", "Bearer "+authToken)
 			}
 			nodesResp, err := client.Do(req)
-			if err == nil && nodesResp.StatusCode == http.StatusOK {
+			if err == nil {
 				defer nodesResp.Body.Close()
-				var nData struct {
-					Count int      `json:"count"`
-					Nodes []string `json:"nodes"`
+				if nodesResp.StatusCode == http.StatusOK {
+					var nData struct {
+						Count int      `json:"count"`
+						Nodes []string `json:"nodes"`
+					}
+					if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
+						fleetCount = nData.Count
+						nodeIDs = nData.Nodes
+					}
+				} else if nodesResp.StatusCode == http.StatusUnauthorized {
+					status = "AUTH_REQUIRED"
+					authRequired = true
 				}
-				if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
-					fleetCount = nData.Count
-					nodeIDs = nData.Nodes
-				}
-			} else if nodesResp != nil {
-				nodesResp.Body.Close()
 			}
 		}
 	} else {
@@ -533,6 +551,8 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              status,
+		"auth_required":       authRequired,
+		"auth_token_set":      authToken != "",
 		"uptime":              uptimeStr,
 		"coordinator_url":     coordURL,
 		"coordinator_host":    coordHost,
@@ -556,11 +576,13 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var body struct {
 			RelayThreshold *float64 `json:"relay_threshold"`
 			RotateToken    bool     `json:"rotate_token"`
 			JoinToken      string   `json:"join_token"`
+			AuthToken      *string  `json:"auth_token"`
+			ClearAuthToken bool     `json:"clear_auth_token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid settings payload: "+err.Error(), http.StatusBadRequest)
@@ -584,24 +606,117 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 		} else if body.JoinToken != "" {
 			s.joinToken = strings.TrimSpace(body.JoinToken)
 		}
+
+		tokenUpdated := false
+		if body.ClearAuthToken {
+			s.nodeConfig.AuthToken = ""
+			s.node.SetAuthToken("")
+			tokenUpdated = true
+		} else if body.AuthToken != nil {
+			tok := strings.TrimSpace(*body.AuthToken)
+			s.nodeConfig.AuthToken = tok
+			s.node.SetAuthToken(tok)
+			tokenUpdated = true
+		}
 		thresh := s.relayThreshold
 		token := s.joinToken
+		coordURL := s.coordinatorURL
+		authTokenSet := s.node.HasAuthToken()
 		s.mu.Unlock()
+
+		if tokenUpdated && coordURL != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.node.ReconnectSignaling(ctx, coordURL)
+		}
 
 		s.Broadcast("coordinator_settings_updated", "", fmt.Sprintf("Relay threshold set to %.1fs", thresh), map[string]any{
 			"relay_threshold": thresh,
 			"join_token":      token,
+			"auth_token_set":  authTokenSet,
 		})
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"relay_threshold": thresh,
+			"join_token":      token,
+			"auth_token_set":  authTokenSet,
+		})
+		return
 	}
 
 	s.mu.RLock()
 	thresh := s.relayThreshold
 	token := s.joinToken
+	authTokenSet := s.node.HasAuthToken()
 	s.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"relay_threshold": thresh,
 		"join_token":      token,
+		"auth_token_set":  authTokenSet,
+	})
+}
+
+func (s *ServerState) handleWorkerSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var body struct {
+			CodeAllowlist *[]string `json:"code_allowlist"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CodeAllowlist == nil {
+			http.Error(w, "invalid worker settings payload", http.StatusBadRequest)
+			return
+		}
+		if len(*body.CodeAllowlist) > 100 {
+			http.Error(w, "code_allowlist exceeds maximum 100 entries", http.StatusBadRequest)
+			return
+		}
+		clean := make([]string, 0, len(*body.CodeAllowlist))
+		for _, entry := range *body.CodeAllowlist {
+			trimmed := strings.TrimSpace(entry)
+			if trimmed == "" {
+				continue
+			}
+			if len(trimmed) > 128 {
+				http.Error(w, "allowlist entry exceeds 128 characters", http.StatusBadRequest)
+				return
+			}
+			clean = append(clean, trimmed)
+		}
+
+		s.node.SetCodeAllowlist(clean...)
+
+		allowlist := s.node.CodeAllowlist()
+		wildcard := false
+		for _, p := range allowlist {
+			if p == "*" {
+				wildcard = true
+				break
+			}
+		}
+		state := map[string]any{
+			"code_allowlist":   allowlist,
+			"docker_active":    s.node.CodeExecutorActive(),
+			"wildcard_allowed": wildcard,
+		}
+
+		s.Broadcast("worker_settings_updated", "", "Worker code execution allowlist updated", state)
+		writeJSON(w, http.StatusOK, state)
+		return
+	}
+
+	allowlist := s.node.CodeAllowlist()
+	wildcard := false
+	for _, p := range allowlist {
+		if p == "*" {
+			wildcard = true
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"code_allowlist":   allowlist,
+		"docker_active":    s.node.CodeExecutorActive(),
+		"wildcard_allowed": wildcard,
 	})
 }
 
