@@ -5,6 +5,7 @@ import (
 	"context"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -184,4 +185,48 @@ func TestSystemExecutor_OutputCapped(t *testing.T) {
 	if !strings.Contains(resp.Stdout, "[output truncated]") {
 		t.Errorf("expected stdout to contain truncation notice")
 	}
+}
+
+func TestSystemExecutor_ConcurrencyLimitBusy(t *testing.T) {
+	exec := NewSystemExecutor()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var cmdStr string
+	if runtime.GOOS == "windows" {
+		cmdStr = "Start-Sleep -Milliseconds 400"
+	} else {
+		cmdStr = "sleep 0.4"
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < DefaultMaxConcurrentShells; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			exec.Execute(ctx, ShellRequest{
+				ExecID:    "busy-fill",
+				Command:   cmdStr,
+				ShellType: ShellAuto,
+				TimeoutMs: 3000,
+			})
+		}(i)
+	}
+
+	// Wait briefly until the 2 slots are occupied
+	deadline := time.Now().Add(2 * time.Second)
+	for len(exec.slots) < DefaultMaxConcurrentShells && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	resp := exec.Execute(ctx, ShellRequest{
+		ExecID:    "busy-3rd",
+		Command:   "echo should_fail",
+		ShellType: ShellAuto,
+		TimeoutMs: 1000,
+	})
+	if resp.ExitCode != -1 || !strings.Contains(resp.Error, "worker shell busy") {
+		t.Fatalf("expected immediate 'worker shell busy' error when slots full, got: %+v", resp)
+	}
+	wg.Wait()
 }

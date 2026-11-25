@@ -38,7 +38,7 @@ This guide provides end-to-end instructions for installing prerequisites, compil
     - [10.3 C ISO C17 Runtime Benchmark (`hello.c`)](#103-c-iso-c17-runtime-benchmark-helloc)
     - [10.4 Security Test: Execution Timeout Enforcement (`timeout_test.py`)](#104-security-test-execution-timeout-enforcement-timeout_testpy)
     - [10.5 Security Test: Air-Gap Network Leak Block (`network_leak_test.py`)](#105-security-test-air-gap-network-leak-block-network_leak_testpy)
-    - [10.6 Security Test: 128 MB RAM Limit Enforcement (`mem_limit_test.py`)](#106-security-test-128-mb-ram-limit-enforcement-mem_limit_testpy)
+    - [10.6 Security Test: 256 MB RAM Limit Enforcement (`mem_limit_test.py`)](#106-security-test-256-mb-ram-limit-enforcement-mem_limit_testpy)
     - [10.7 GPU Sample: Portable Vector Addition (`portable_vector_add.cu`)](#107-gpu-sample-portable-vector-addition-portable_vector_addcu)
     - [10.8 GPU Sample: Warp Reduction Blocker (`warp_reduction.cu`)](#108-gpu-sample-warp-reduction-blocker-warp_reductioncu)
     - [10.9 GPU Sample: Inline PTX Assembly Blocker (`inline_ptx.cu`)](#109-gpu-sample-inline-ptx-assembly-blocker-inline_ptxcu)
@@ -53,9 +53,9 @@ This guide provides end-to-end instructions for installing prerequisites, compil
 ## 1. Architecture Overview & Binaries
 
 UniCompute integrates distributed volunteer compute, storage, and cross-platform hardware acceleration across three primary objectives:
-- **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, blind contributor relay fallback, WebRTC SCTP multiplexing (`dc-ctrl` and `dc-bulk`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
-- **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 128m`, `--cpus 1.0`, `--read-only`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
-- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (CUDA, ROCm, Vulkan), 50 ms battery/activity watchdog preemption, cgroup/setrlimit memory limits, CUDA-to-AMD HIPIFY analysis & translation, and ONNX training checkpoint persistence.
+- **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, standalone/legacy relay primitives (`pkg/relay`), WebRTC SCTP multiplexing (`stream` and `chunk`, DTLS 1.2 via `pion/dtls/v2`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
+- **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 256m`, `--cpus 1.0`, `--read-only`, `--ipc=none`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
+- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (CUDA, ROCm, Vulkan), 50 ms battery/activity watchdog preemption, cgroup/setrlimit memory limits, regex-based CUDA-to-AMD HIPIFY compatibility analysis & symbol translation, and pure-Go simulated ONNX training checkpoint persistence (`Simulated: true`).
 - **Desktop GUI Control Room**: A standalone desktop app featuring a 60 FPS HTML5 Canvas topology engine (central mainframe tower, orbiting dual-hemisphere workstation rigs, glowing P2P laser beams) and 4 dedicated control panels.
 
 The project compiles into standalone, CGO-free Linux ELF executables in the `bin/` directory:
@@ -334,14 +334,14 @@ go run ./cmd/verify-obj3
 - **`pkg/blobstore`**: Atomic filesystem commits, SHA-256 verification, quota accounting, bitrot scrub audit.
 - **`pkg/codeexec`**: Bounded code request/response framing, 12 KiB source and 4 KiB stdin ceiling checks.
 - **`pkg/gpu`**: Hardware capability discovery, ROCm/CUDA dynamic loading, temperature/VRAM monitoring.
-- **`pkg/gpu/hipify`**: Static AST analysis, 32-thread warp blocker detection, and CUDA-to-HIP AST translation.
-- **`pkg/gpu/onnx`**: Model checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
+- **`pkg/gpu/hipify`**: Regex-based pre-flight compatibility analysis, 32-thread warp blocker detection, and CUDA-to-HIP symbol translation.
+- **`pkg/gpu/onnx`**: Pure-Go simulated ONNX runner (`Simulated: true`), checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
 - **`pkg/instrumentation`**: Prometheus metrics counters and histograms.
 - **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, and virtual adapter pruning (`docker0`, `veth`).
-- **`pkg/relay`**: Syncthing relay-v1 blind end-to-end byte transfer and embedded TURN server lifecycle.
+- **`pkg/relay`**: Standalone/legacy Syncthing relay-v1 blind end-to-end byte transfer and embedded TURN server lifecycle.
 - **`pkg/remoteshell`**: Linux shell execution (`/bin/sh`, `/bin/bash`) and timeout enforcement.
-- **`pkg/signaling`**: WebSocket registration, 20-second keepalives, and candidate relay dispatch.
-- **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`dc-ctrl` and `dc-bulk`).
+- **`pkg/signaling`**: WebSocket registration with Ed25519 identity signature verification, 20-second keepalives, and candidate relay dispatch.
+- **`pkg/transport`**: WebRTC PeerConnection, 16 MiB SCTP receive buffer, and dual DataChannels (`stream` and `chunk`).
 - **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)**.
 - **`pkg/node`**: End-to-end chunk exchange and **Invariant CP-1 (Data Plane Independence)** verifying data transfer resilience if the coordinator fails.
 
@@ -596,12 +596,13 @@ On Linux targets, `exec` executes bash/sh commands on the remote machine.
 The `run` command reads a local source file on Client Node A, transmits the source code and optional standard input over the WebRTC `stream` DataChannel to Worker Node B, where it is compiled and executed in a sandboxed Docker container with:
 - **`--network none`**: Disables container network access (air-gapped).
 - **`--read-only`**: Read-only container root filesystem.
-- **`--memory 128m --memory-swap 128m`**: 128 MB RAM limit.
+- **`--memory 256m --memory-swap 256m`**: 256 MB RAM limit.
 - **`--cpus 1.0`**: 1 CPU core allocation.
 - **`--pids-limit 64`**: Mitigates fork bombs.
+- **`--ipc=none`**: Isolates POSIX IPC namespaces.
 - **`--cap-drop ALL`**: Drops all Linux capabilities.
 - **`--security-opt no-new-privileges:true`**: Prevents setuid privilege elevation.
-- **`--tmpfs /tmp:rw,nosuid,nodev,size=64m`**: Ephemeral memory scratchpad.
+- **`--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m`**: Ephemeral memory scratchpad (`noexec` for Python; `exec` enabled only for C/C++ compilation).
 
 ---
 
@@ -1052,8 +1053,8 @@ RESULT: AIR-GAP VERIFICATION PASSED. Container is completely isolated.
 
 ---
 
-### 10.6 Security Test: 128 MB RAM Limit Enforcement (`mem_limit_test.py`)
-Verifies that the Docker container enforces `--memory 128m --memory-swap 128m`. Continuously allocates 10 MB chunks until the Linux OOM killer terminates the container with exit code 137.
+### 10.6 Security Test: 256 MB RAM Limit Enforcement (`mem_limit_test.py`)
+Verifies that the Docker container enforces `--memory 256m --memory-swap 256m`. Continuously allocates 10 MB chunks until the Linux OOM killer terminates the container with exit code 137.
 
 #### Creation Command:
 ```bash
@@ -1063,7 +1064,7 @@ import sys
 import time
 
 print("==================================================")
-print("  UniCompute Security: 128 MB RAM Limit Audit     ")
+print("  UniCompute Security: 256 MB RAM Limit Audit     ")
 print("==================================================")
 print("Allocating memory in 10 MB chunks...")
 
@@ -1080,7 +1081,7 @@ try:
         print(f"[ALLOCATION] Successfully allocated {total_mb} MB RAM", flush=True)
         time.sleep(0.05)
 
-    print(f"[FAIL] Allocated {total_mb} MB without hitting the 128 MB container cap!")
+    print(f"[FAIL] Allocated {total_mb} MB without hitting the 256 MB container cap!")
     sys.exit(1)
 
 except MemoryError:
@@ -1102,7 +1103,7 @@ Expected Output:
  Status: Failed
  --- STDOUT ---
 ==================================================
-  UniCompute Security: 128 MB RAM Limit Audit     
+  UniCompute Security: 256 MB RAM Limit Audit     
 ==================================================
 Allocating memory in 10 MB chunks...
 [ALLOCATION] Successfully allocated 10 MB RAM
@@ -1263,18 +1264,18 @@ The GUI provides a comprehensive 7-tab control room uniting Coordinator administ
 - **`[CODE & DATA]` Titlebar Pill**: Jumps directly to Tab 3 (CPU Sandbox) for execution workloads.
 
 - **1. Topology Canvas**: Central coordinator node with orbiting rigs, dual-hemisphere telemetry (CPU/GPU and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and PC Inspector drawer with live SCTP ping and link controls.
-- **2. Coordinator Hub**: Cluster signaling and daemon operations center with live daemon uptime counter, listen socket address, Transport Protocol (DTLS / SCTP) verification, join token presentation with token copy and rotation, blind relay fallback slider (0.5s–5.0s) with live persistence, and HEALTH | CONN vitals matrix.
+- **2. Coordinator Hub**: Cluster signaling and daemon operations center with live daemon uptime counter, listen socket address, Transport Protocol (`DTLS 1.2 / SCTP (Pion WebRTC)`) verification, ICE wait settings, and HEALTH | CONN vitals matrix.
 - **3. CPU Sandbox (Objective 2)**: Dark code editor, recursive sample dropdown, stdin stream input, execution timeout slider (1-60s), target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
-- **4. GPU Acceleration (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32/POSIX JobObject memory-bounded training runner.
-- **5. Storage & Shard Matrix**: Content-addressed chunk storage layout with SHA-256 Merkle root verification and chunk list for local CAS vault (`local-vault-cas-blobs`), cryptographic Merkle root badges, "Verify All Merkle Roots" scrub audit trigger, "Shard New Dataset" action, and integrated CAS local storage vault with blob inspector and SHA-256 verification.
-- **6. Cluster Task Queue**: Dynamic task queue tracking active, queued, and completed jobs across the fleet (honest runtime telemetry initialized with 0 fake seed tasks). Dynamically appends real-time compute jobs dispatched via GPU DirectML and CPU code execution.
+- **4. GPU Acceleration (Objective 3)**: Telemetry cards (device name, VRAM used/total, DirectML/CUDA status), 50 ms Watchdog radar (AC power line status, student idle timer, state banner), regex-based CUDA-to-AMD HIPIFY compatibility analyzer with blocker detection, and pure-Go Simulated ONNX Runner (`Simulated: true`, CPU mock bounded by Win32/POSIX limits).
+- **5. Storage & Shard Matrix**: Content-addressed chunk storage layout for local CAS vault (`local-vault-cas-blobs`), CAS SHA-256 Audit badges, "Scrub Local CAS Vault" scrub audit trigger, and integrated CAS local storage vault with blob inspector and SHA-256 verification.
+- **6. Cluster Task Queue**: Dynamic task queue tracking active, queued, and completed jobs across the fleet (honest runtime telemetry initialized with 0 fake seed tasks). Dynamically appends real-time compute jobs dispatched via Simulated ONNX Runner and CPU code execution.
 - **7. Cluster Wire Logs**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
 
 ### 12.3 Standalone Local Testing on Linux (1 Node)
 1. Start GUI: `./run-gui.sh` (or `go run ./cmd/unicompute-gui -headless -port 23080`).
 2. Open `http://localhost:23080#token=<sessionToken>` (copy the `#token=...` session link printed in the startup banner).
-3. Click the **`[HEALTH & CONN]`** titlebar pill: Switches to **Coordinator Hub** (Tab 2). Observe daemon uptime, socket status, copy the join token, and adjust the blind relay fallback slider.
-4. In **Storage & Shard Matrix** (Tab 5), inspect the local CAS storage vault card, click **Verify All Merkle Roots** to audit Merkle trees via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
+3. Click the **`[HEALTH & CONN]`** titlebar pill: Switches to **Coordinator Hub** (Tab 2). Observe daemon uptime, socket status, and ICE wait configuration.
+4. In **Storage & Shard Matrix** (Tab 5), inspect the local CAS storage vault card, click **Scrub Local CAS Vault** to audit local blobs via `/api/storage/scrub`, then stash a text string in the CAS Vault and click **View** to inspect the SHA-256 modal.
 5. In **GPU Acceleration** (Tab 4), analyze `portable_vector_add.cu` and `warp_reduction.cu` with HIPIFY, and run a JobObject batch.
 6. In **CPU Sandbox** (Tab 3), with `Local Worker (This Machine)` selected, load `matrix_multiply.py`, click **Run Code in Sandbox**, and observe output and exit code in the console.
 7. In **Cluster Task Queue** (Tab 6), observe the live task queue table, dynamically recording real-time compute jobs dispatched via GPU and CPU code execution. (Starts with count: 0 and dynamically populates without fake seed entries).

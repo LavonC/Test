@@ -1,3 +1,5 @@
+// Package relay provides standalone/legacy TURN and contributor relay servers.
+// EmbeddedTURN is not auto-invoked by transport.Manager.ConnectPeer.
 package relay
 
 import (
@@ -34,10 +36,8 @@ type EmbeddedTURN struct {
 }
 
 // NewEmbeddedTURN spins up a local or public embedded TURN server.
+// Port 0 binds an OS-assigned ephemeral UDP port (useful in tests); CLI flags supply default 3478.
 func NewEmbeddedTURN(cfg TURNConfig) (*EmbeddedTURN, error) {
-	if cfg.Port == 0 {
-		cfg.Port = 3478
-	}
 	if cfg.Realm == "" {
 		cfg.Realm = "unicompute.local"
 	}

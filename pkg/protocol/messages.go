@@ -75,6 +75,8 @@ type RegisterPayload struct {
 	IPv6Supported bool   `json:"ipv6_supported"`
 	PublicIPv4    string `json:"public_ipv4,omitempty"`
 	PublicIPv6    string `json:"public_ipv6,omitempty"`
+	PublicKey     string `json:"public_key,omitempty"`
+	Signature     string `json:"signature,omitempty"`
 }
 
 // PeerListPayload contains a list of online nodes on the network.

@@ -80,5 +80,17 @@ func TestDockerSandboxSecurityAndCppConfig(t *testing.T) {
 			t.Errorf("expected docker args to contain %q; got %q", flag, joined)
 		}
 	}
+
+	pySrc, pyImg, pyCmd := languageRuntime("python")
+	if pySrc != "main.py" || pyImg != "python:3.13-slim" {
+		t.Fatalf("unexpected python runtime: %q, %q", pySrc, pyImg)
+	}
+	pyArgs := exec.buildDockerArgsForLang("python", "test-py", "/tmp/work", pyImg, pyCmd)
+	pyJoined := strings.Join(pyArgs, " ")
+	for _, flag := range []string{"--ipc none", "--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m"} {
+		if !strings.Contains(pyJoined, flag) {
+			t.Errorf("expected python docker args to contain %q; got %q", flag, pyJoined)
+		}
+	}
 }
 

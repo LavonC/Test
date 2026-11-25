@@ -295,3 +295,78 @@ func TestProbeSTUN_WithVariousAddressFormats(t *testing.T) {
 		}
 	}
 }
+
+type transientMockPacketConn struct {
+	net.PacketConn
+	calls int
+	resp  []byte
+}
+
+func (m *transientMockPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	msg := new(stun.Message)
+	msg.Raw = append([]byte(nil), p...)
+	if err := msg.Decode(); err == nil {
+		res := new(stun.Message)
+		res.Type = stun.BindingSuccess
+		res.TransactionID = msg.TransactionID
+		xor := &stun.XORMappedAddress{
+			IP:   net.ParseIP("203.0.113.10"),
+			Port: 45678,
+		}
+		_ = xor.AddTo(res)
+		res.Encode()
+		m.resp = res.Raw
+	}
+	return len(p), nil
+}
+
+func (m *transientMockPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	m.calls++
+	if m.calls == 1 {
+		return 0, nil, errors.New("wsarecvfrom: An existing connection was forcibly closed by the remote host. (10054)")
+	}
+	copy(p, m.resp)
+	return len(m.resp), &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3478}, nil
+}
+
+func (m *transientMockPacketConn) SetReadDeadline(t time.Time) error { return nil }
+func (m *transientMockPacketConn) Close() error                       { return nil }
+func (m *transientMockPacketConn) LocalAddr() net.Addr                { return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345} }
+
+func TestProbeSTUNWithConn_RetriesTransientSocketError(t *testing.T) {
+	mockConn := &transientMockPacketConn{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	mapped, err := ProbeSTUNWithConn(ctx, mockConn, "127.0.0.1:3478")
+	if err != nil {
+		t.Fatalf("expected ProbeSTUNWithConn to retry transient 10054 error and succeed, got: %v", err)
+	}
+	if mapped.IP.String() != "203.0.113.10" || mapped.Port != 45678 {
+		t.Fatalf("unexpected mapped address: %v", mapped)
+	}
+	if mockConn.calls < 2 {
+		t.Fatalf("expected at least 2 ReadFrom calls after transient retry, got %d", mockConn.calls)
+	}
+}
+
+func TestClassifier_UnknownWhenSTUNUnreachableAndNoIPv6(t *testing.T) {
+	// Closed port where STUN fails
+	ln, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket failed: %v", err)
+	}
+	closedAddr := ln.LocalAddr().String()
+	_ = ln.Close()
+
+	c := NewClassifier([]string{closedAddr}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	rep, err := c.Classify(ctx)
+	if err != nil {
+		t.Fatalf("Classify returned error: %v", err)
+	}
+	if !rep.IPv6Supported && rep.NATType != NATTypeUnknown {
+		t.Fatalf("expected NATTypeUnknown when STUN fails without IPv6, got %s", rep.NATType)
+	}
+}

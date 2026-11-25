@@ -8,7 +8,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +20,12 @@ var (
 	ErrConnectionClosed = errors.New("peer connection closed")
 	ErrTimeout          = errors.New("connection timeout")
 	ErrChannelNotReady  = errors.New("data channel not ready")
+)
+
+const (
+	MaxInFlightChunksPerPeer        = 8
+	MaxInFlightBytesPerPeer  uint64 = 64 * 1024 * 1024 // 64 MiB total across all active inFlight entries per peer
+	InFlightChunkTTL                = 30 * time.Second
 )
 
 // Config configures the WebRTC transport engine.
@@ -71,18 +76,21 @@ type PeerConnection struct {
 	keepAlive *time.Ticker
 
 	// In-flight chunk transfers: map[chunkID]*inFlightChunk
-	inFlightMu sync.Mutex
-	inFlight   map[string]*inFlightChunk
+	inFlightMu         sync.Mutex
+	inFlight           map[string]*inFlightChunk
+	totalInFlightBytes uint64
 }
 
 type inFlightChunk struct {
-	chunkID   string
-	totalSize uint64
-	received  uint64
-	data      []byte
-	doneCh    chan []byte
-	errCh     chan error
-	hasWaiter bool
+	chunkID      string
+	totalSize    uint64
+	received     uint64
+	data         []byte
+	doneCh       chan []byte
+	errCh        chan error
+	hasWaiter    bool
+	createdAt    time.Time
+	lastActivity time.Time
 }
 
 func newPeerConnection(sessionID, localPeerID, remotePeerID string, pc *webrtc.PeerConnection, tracker *instrumentation.Tracker) *PeerConnection {
@@ -110,6 +118,38 @@ func newPeerConnection(sessionID, localPeerID, remotePeerID string, pc *webrtc.P
 	return conn
 }
 
+func (c *PeerConnection) deleteInFlightLocked(chunkID string) (*inFlightChunk, bool) {
+	inflight, ok := c.inFlight[chunkID]
+	if !ok {
+		return nil, false
+	}
+	delete(c.inFlight, chunkID)
+	if c.totalInFlightBytes >= inflight.totalSize {
+		c.totalInFlightBytes -= inflight.totalSize
+	} else {
+		c.totalInFlightBytes = 0
+	}
+	return inflight, true
+}
+
+func (c *PeerConnection) evictStaleInFlightLocked(now time.Time) {
+	for id, inflight := range c.inFlight {
+		if !inflight.lastActivity.IsZero() && now.Sub(inflight.lastActivity) > InFlightChunkTTL {
+			select {
+			case inflight.errCh <- ErrTimeout:
+			default:
+			}
+			c.deleteInFlightLocked(id)
+		}
+	}
+}
+
+func (c *PeerConnection) evictStaleInFlight(now time.Time) {
+	c.inFlightMu.Lock()
+	c.evictStaleInFlightLocked(now)
+	c.inFlightMu.Unlock()
+}
+
 func (c *PeerConnection) cleanupInFlight(err error) {
 	c.inFlightMu.Lock()
 	defer c.inFlightMu.Unlock()
@@ -118,7 +158,7 @@ func (c *PeerConnection) cleanupInFlight(err error) {
 		case inflight.errCh <- err:
 		default:
 		}
-		delete(c.inFlight, id)
+		c.deleteInFlightLocked(id)
 	}
 }
 
@@ -224,6 +264,7 @@ func (c *PeerConnection) startKeepAlive() {
 		case <-c.stopKeep:
 			return
 		case <-ticker.C:
+			c.evictStaleInFlight(time.Now())
 			c.mu.RLock()
 			dc := c.ChunkDC
 			c.mu.RUnlock()
@@ -318,45 +359,99 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 		chunkID := strings.TrimRight(rawID, "\x00")
 		payload := data[protocol.ChunkHeaderSize:]
 
-		const MaxAllowedChunkSize uint64 = 64 * 1024 * 1024
-		if totalSize > MaxAllowedChunkSize {
+		if totalSize > MaxInFlightBytesPerPeer {
 			return
 		}
 
+		now := time.Now()
 		c.inFlightMu.Lock()
+		c.evictStaleInFlightLocked(now)
+
 		inflight, ok := c.inFlight[chunkID]
-		if !ok && (flags&protocol.FlagStart != 0) {
+		justCreated := false
+		if !ok {
+			if flags&protocol.FlagStart == 0 {
+				c.inFlightMu.Unlock()
+				return
+			}
+			if len(c.inFlight) >= MaxInFlightChunksPerPeer {
+				c.inFlightMu.Unlock()
+				return
+			}
+			if totalSize > MaxInFlightBytesPerPeer-c.totalInFlightBytes {
+				c.inFlightMu.Unlock()
+				return
+			}
 			inflight = &inFlightChunk{
-				chunkID:   chunkID,
-				totalSize: totalSize,
-				data:      make([]byte, totalSize),
-				doneCh:    make(chan []byte, 1),
-				errCh:     make(chan error, 1),
+				chunkID:      chunkID,
+				totalSize:    totalSize,
+				data:         make([]byte, totalSize),
+				doneCh:       make(chan []byte, 1),
+				errCh:        make(chan error, 1),
+				createdAt:    now,
+				lastActivity: now,
 			}
 			c.inFlight[chunkID] = inflight
-		} else if ok && len(inflight.data) == 0 {
+			c.totalInFlightBytes += totalSize
+			justCreated = true
+		} else if len(inflight.data) == 0 && inflight.totalSize == 0 && totalSize > 0 {
+			if flags&protocol.FlagStart == 0 {
+				c.inFlightMu.Unlock()
+				return
+			}
+			if totalSize > MaxInFlightBytesPerPeer-c.totalInFlightBytes {
+				c.inFlightMu.Unlock()
+				return
+			}
 			inflight.totalSize = totalSize
 			inflight.data = make([]byte, totalSize)
+			c.totalInFlightBytes += totalSize
+		} else if totalSize != inflight.totalSize {
+			c.inFlightMu.Unlock()
+			return
+		}
+
+		dataLen := uint64(len(inflight.data))
+		payloadLen := uint64(len(payload))
+		if offset > dataLen || payloadLen > dataLen-offset {
+			if justCreated {
+				c.deleteInFlightLocked(chunkID)
+			}
+			c.inFlightMu.Unlock()
+			return
+		}
+
+		// Require sequential, non-overlapping offsets so duplicate frames cannot cause
+		// premature completion with zeroed holes.
+		if offset != inflight.received {
+			if justCreated {
+				c.deleteInFlightLocked(chunkID)
+			}
+			c.inFlightMu.Unlock()
+			return
+		}
+
+		copy(inflight.data[offset:], payload)
+		inflight.received += payloadLen
+		inflight.lastActivity = now
+
+		completed := (inflight.totalSize == 0 && (flags&protocol.FlagEnd != 0)) ||
+			(inflight.totalSize > 0 && inflight.received >= inflight.totalSize)
+
+		var doneData []byte
+		var hadWaiter bool
+		var doneCh chan []byte
+		if completed {
+			c.deleteInFlightLocked(chunkID)
+			hadWaiter = inflight.hasWaiter
+			doneData = inflight.data
+			doneCh = inflight.doneCh
 		}
 		c.inFlightMu.Unlock()
 
-		if inflight == nil {
-			return
-		}
-
-		if offset+uint64(len(payload)) <= uint64(len(inflight.data)) {
-			copy(inflight.data[offset:], payload)
-			atomic.AddUint64(&inflight.received, uint64(len(payload)))
-		}
-
-		if (flags&protocol.FlagEnd != 0) || (atomic.LoadUint64(&inflight.received) >= inflight.totalSize) {
-			c.inFlightMu.Lock()
-			delete(c.inFlight, chunkID)
-			hadWaiter := inflight.hasWaiter
-			c.inFlightMu.Unlock()
-
+		if completed {
 			select {
-			case inflight.doneCh <- inflight.data:
+			case doneCh <- doneData:
 			default:
 			}
 
@@ -365,7 +460,7 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				handler := c.OnChunkReceived
 				c.mu.RUnlock()
 				if handler != nil {
-					handler(chunkID, inflight.data)
+					handler(chunkID, doneData)
 				}
 			}
 		}
@@ -391,10 +486,7 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				chunkID := string(data[2 : 2+idLen])
 				errMsg := string(data[2+idLen:])
 				c.inFlightMu.Lock()
-				inflight, ok := c.inFlight[chunkID]
-				if ok {
-					delete(c.inFlight, chunkID)
-				}
+				inflight, ok := c.deleteInFlightLocked(chunkID)
 				c.inFlightMu.Unlock()
 				if ok && inflight != nil {
 					select {
@@ -559,30 +651,40 @@ func (c *PeerConnection) FetchChunk(ctx context.Context, chunkID string, totalSi
 		return nil, fmt.Errorf("invalid chunk size: %d", totalSize)
 	}
 
+	now := time.Now()
 	c.inFlightMu.Lock()
+	c.evictStaleInFlightLocked(now)
 	inflight, ok := c.inFlight[chunkID]
 	if !ok {
+		if len(c.inFlight) >= MaxInFlightChunksPerPeer || uint64(totalSize) > MaxInFlightBytesPerPeer-c.totalInFlightBytes {
+			c.inFlightMu.Unlock()
+			return nil, fmt.Errorf("in-flight chunk capacity exceeded")
+		}
 		var buf []byte
 		if totalSize > 0 {
 			buf = make([]byte, totalSize)
 		}
 		inflight = &inFlightChunk{
-			chunkID:   chunkID,
-			totalSize: uint64(totalSize),
-			data:      buf,
-			doneCh:    make(chan []byte, 1),
-			errCh:     make(chan error, 1),
-			hasWaiter: true,
+			chunkID:      chunkID,
+			totalSize:    uint64(totalSize),
+			data:         buf,
+			doneCh:       make(chan []byte, 1),
+			errCh:        make(chan error, 1),
+			hasWaiter:    true,
+			createdAt:    now,
+			lastActivity: now,
 		}
 		c.inFlight[chunkID] = inflight
+		c.totalInFlightBytes += uint64(totalSize)
 	} else {
 		inflight.hasWaiter = true
+		inflight.lastActivity = now
 	}
 	c.inFlightMu.Unlock()
 
 	defer func() {
 		c.inFlightMu.Lock()
-		delete(c.inFlight, chunkID)
+		c.deleteInFlightLocked(chunkID)
 		c.inFlightMu.Unlock()
 	}()
 
@@ -607,30 +709,40 @@ func (c *PeerConnection) ReceiveChunk(ctx context.Context, chunkID string, total
 		return nil, fmt.Errorf("invalid chunk size: %d", totalSize)
 	}
 
+	now := time.Now()
 	c.inFlightMu.Lock()
+	c.evictStaleInFlightLocked(now)
 	inflight, ok := c.inFlight[chunkID]
 	if !ok {
+		if len(c.inFlight) >= MaxInFlightChunksPerPeer || uint64(totalSize) > MaxInFlightBytesPerPeer-c.totalInFlightBytes {
+			c.inFlightMu.Unlock()
+			return nil, fmt.Errorf("in-flight chunk capacity exceeded")
+		}
 		var buf []byte
 		if totalSize > 0 {
 			buf = make([]byte, totalSize)
 		}
 		inflight = &inFlightChunk{
-			chunkID:   chunkID,
-			totalSize: uint64(totalSize),
-			data:      buf,
-			doneCh:    make(chan []byte, 1),
-			errCh:     make(chan error, 1),
-			hasWaiter: true,
+			chunkID:      chunkID,
+			totalSize:    uint64(totalSize),
+			data:         buf,
+			doneCh:       make(chan []byte, 1),
+			errCh:        make(chan error, 1),
+			hasWaiter:    true,
+			createdAt:    now,
+			lastActivity: now,
 		}
 		c.inFlight[chunkID] = inflight
+		c.totalInFlightBytes += uint64(totalSize)
 	} else {
 		inflight.hasWaiter = true
+		inflight.lastActivity = now
 	}
 	c.inFlightMu.Unlock()
 
 	defer func() {
 		c.inFlightMu.Lock()
-		delete(c.inFlight, chunkID)
+		c.deleteInFlightLocked(chunkID)
 		c.inFlightMu.Unlock()
 	}()
 

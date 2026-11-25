@@ -2,13 +2,17 @@ package signaling
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	mrand "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +21,25 @@ import (
 	"github.com/unicompute/obj1/pkg/protocol"
 )
 
+var ErrUnauthorized = errors.New("signaling unauthorized (HTTP 401)")
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  64 * 1024,
 	WriteBufferSize: 64 * 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for local & peer testing
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Non-browser Go CLI / daemon clients
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		if r.Host != "" && u.Host == r.Host {
+			return true
+		}
+		host := u.Hostname()
+		return host == "127.0.0.1" || host == "localhost" || host == "::1"
 	},
 }
 
@@ -29,6 +47,7 @@ var upgrader = websocket.Upgrader{
 type Hub struct {
 	mu         sync.RWMutex
 	clients    map[string]*clientConn
+	pinnedKeys map[string]string // nodeID -> hex-encoded ed25519 public key (TOFU/pre-seeded)
 	httpServer *http.Server
 	listener   net.Listener
 	addr       string
@@ -58,9 +77,10 @@ func NewHub(listenAddr string, authTokens ...string) (*Hub, error) {
 	}
 
 	h := &Hub{
-		clients:  make(map[string]*clientConn),
-		listener: ln,
-		addr:     ln.Addr().String(),
+		clients:    make(map[string]*clientConn),
+		pinnedKeys: make(map[string]string),
+		listener:   ln,
+		addr:       ln.Addr().String(),
 	}
 	if len(authTokens) > 0 {
 		h.authToken = authTokens[0]
@@ -83,8 +103,6 @@ func NewHub(listenAddr string, authTokens ...string) (*Hub, error) {
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
 				reqToken = strings.TrimPrefix(authHeader, "Bearer ")
-			} else if qToken := r.URL.Query().Get("token"); qToken != "" {
-				reqToken = qToken
 			}
 			if subtle.ConstantTimeCompare([]byte(reqToken), []byte(token)) != 1 {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -150,6 +168,17 @@ func (h *Hub) SetAuthToken(token string) {
 	h.authToken = token
 }
 
+// PinPublicKey pre-seeds or pins a trusted ed25519 public key for a node ID.
+func (h *Hub) PinPublicKey(nodeID string, pubKey ed25519.PublicKey) error {
+	if nodeID == "" || len(pubKey) != ed25519.PublicKeySize {
+		return errors.New("invalid nodeID or ed25519 public key")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pinnedKeys[nodeID] = strings.ToLower(hex.EncodeToString(pubKey))
+	return nil
+}
+
 func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	token := h.authToken
@@ -160,8 +189,6 @@ func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			reqToken = strings.TrimPrefix(authHeader, "Bearer ")
-		} else if qToken := r.URL.Query().Get("token"); qToken != "" {
-			reqToken = qToken
 		}
 		if subtle.ConstantTimeCompare([]byte(reqToken), []byte(token)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -230,34 +257,56 @@ func (c *clientConn) readPump() {
 		}
 
 		if env.Type == protocol.MsgRegister {
+			if c.nodeID != "" {
+				c.rejectRegister(c.nodeID, "connection already registered")
+				return
+			}
 			var reg protocol.RegisterPayload
-			_ = json.Unmarshal(env.Payload, &reg)
+			if err := json.Unmarshal(env.Payload, &reg); err != nil {
+				c.rejectRegister("", "invalid registration payload")
+				return
+			}
 			targetNodeID := reg.NodeID
 			if targetNodeID == "" {
 				targetNodeID = env.SenderID
 			}
+			if targetNodeID == "" {
+				c.rejectRegister("", "nodeID is required")
+				return
+			}
+			if env.SenderID != "" && env.SenderID != targetNodeID {
+				c.rejectRegister(targetNodeID, "sender_id mismatch on registration")
+				return
+			}
+
+			pubBytes, err := hex.DecodeString(reg.PublicKey)
+			if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+				c.rejectRegister(targetNodeID, "missing or invalid ed25519 public key")
+				return
+			}
+			sigBytes, err := hex.DecodeString(reg.Signature)
+			if err != nil || len(sigBytes) != ed25519.SignatureSize {
+				c.rejectRegister(targetNodeID, "missing or invalid registration signature")
+				return
+			}
+			if !ed25519.Verify(ed25519.PublicKey(pubBytes), []byte(targetNodeID), sigBytes) {
+				c.rejectRegister(targetNodeID, "invalid node registration signature")
+				return
+			}
+			normPubKey := strings.ToLower(hex.EncodeToString(pubBytes))
 
 			c.hub.mu.Lock()
 			if existing, exists := c.hub.clients[targetNodeID]; exists && existing != c {
 				c.hub.mu.Unlock()
-				// Reject duplicate registration to prevent silent session hijacking
-				errMsg, _ := json.Marshal(protocol.Envelope{
-					Type:     protocol.MsgRegisterAck,
-					SenderID: "coordinator",
-					TargetID: targetNodeID,
-					Payload:  []byte(`{"error":"duplicate nodeID registration rejected"}`),
-				})
-				select {
-				case c.sendChan <- errMsg:
-				default:
-				}
-				time.Sleep(50 * time.Millisecond)
-				c.writeMu.Lock()
-				_ = c.conn.WriteMessage(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "duplicate nodeID registration rejected"))
-				c.writeMu.Unlock()
+				c.rejectRegister(targetNodeID, "duplicate nodeID registration rejected")
 				return
 			}
+			if pinnedPub, pinned := c.hub.pinnedKeys[targetNodeID]; pinned && pinnedPub != normPubKey {
+				c.hub.mu.Unlock()
+				c.rejectRegister(targetNodeID, "nodeID public key mismatch")
+				return
+			}
+			c.hub.pinnedKeys[targetNodeID] = normPubKey
 			c.nodeID = targetNodeID
 			c.hub.clients[c.nodeID] = c
 
@@ -379,6 +428,26 @@ func (c *clientConn) writePump() {
 	}
 }
 
+// rejectRegister notifies the client of a registration rejection and closes the WebSocket with ClosePolicyViolation.
+func (c *clientConn) rejectRegister(targetNodeID, reason string) {
+	payloadBytes, _ := json.Marshal(map[string]string{"error": reason})
+	errMsg, _ := json.Marshal(protocol.Envelope{
+		Type:     protocol.MsgRegisterAck,
+		SenderID: "coordinator",
+		TargetID: targetNodeID,
+		Payload:  payloadBytes,
+	})
+	select {
+	case c.sendChan <- errMsg:
+	default:
+	}
+	time.Sleep(50 * time.Millisecond)
+	c.writeMu.Lock()
+	_ = c.conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason))
+	c.writeMu.Unlock()
+}
+
 // Client connects to the signaling hub and handles peer negotiation.
 type Client struct {
 	mu           sync.Mutex
@@ -386,6 +455,8 @@ type Client struct {
 	url          string
 	nodeID       string
 	authToken    string
+	privKey      ed25519.PrivateKey
+	pubKey       ed25519.PublicKey
 	conn         *websocket.Conn
 	handler      func(protocol.Envelope)
 	reconnectCtx context.Context
@@ -394,12 +465,49 @@ type Client struct {
 	closed       bool
 }
 
-// NewClient initializes a signaling client with auto-reconnection and keepalive.
+// NewClient initializes a signaling client with an ephemeral ed25519 keypair, auto-reconnection, and keepalive.
 func NewClient(wsURL string, nodeID string, handler func(protocol.Envelope), authTokens ...string) (*Client, error) {
+	return NewClientWithKey(wsURL, nodeID, nil, handler, authTokens...)
+}
+
+// NewClientWithKey initializes a signaling client using the provided ed25519 private key (or generates one if nil).
+func NewClientWithKey(wsURL string, nodeID string, privKey ed25519.PrivateKey, handler func(protocol.Envelope), authTokens ...string) (*Client, error) {
+	c, err := newClientWithKey(wsURL, nodeID, privKey, handler, false, authTokens...)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// NewClientAsync initializes a signaling client that keeps reconnecting in the background
+// if the initial dial fails (except on HTTP 401 unauthorized, which fails immediately with nil client).
+func NewClientAsync(wsURL string, nodeID string, handler func(protocol.Envelope), authTokens ...string) (*Client, error) {
+	return NewClientAsyncWithKey(wsURL, nodeID, nil, handler, authTokens...)
+}
+
+// NewClientAsyncWithKey initializes a signaling client with the given ed25519 key that
+// retains background reconnection on transient initial dial failures (returning both client and initial error),
+// while failing immediately on HTTP 401 Unauthorized.
+func NewClientAsyncWithKey(wsURL string, nodeID string, privKey ed25519.PrivateKey, handler func(protocol.Envelope), authTokens ...string) (*Client, error) {
+	return newClientWithKey(wsURL, nodeID, privKey, handler, true, authTokens...)
+}
+
+func newClientWithKey(wsURL string, nodeID string, privKey ed25519.PrivateKey, handler func(protocol.Envelope), allowAsyncDial bool, authTokens ...string) (*Client, error) {
+	if len(privKey) != ed25519.PrivateKeySize {
+		_, genPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate node identity key: %w", err)
+		}
+		privKey = genPriv
+	}
+	pubKey := privKey.Public().(ed25519.PublicKey)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		url:          wsURL,
 		nodeID:       nodeID,
+		privKey:      privKey,
+		pubKey:       pubKey,
 		handler:      handler,
 		reconnectCtx: ctx,
 		cancel:       cancel,
@@ -410,8 +518,13 @@ func NewClient(wsURL string, nodeID string, handler func(protocol.Envelope), aut
 	}
 
 	if err := c.connect(); err != nil {
-		cancel()
-		return nil, err
+		if !allowAsyncDial || errors.Is(err, ErrUnauthorized) {
+			cancel()
+			return nil, err
+		}
+		go c.readLoop()
+		go c.writeLoop()
+		return c, err
 	}
 
 	go c.readLoop()
@@ -429,18 +542,29 @@ func (c *Client) connect() error {
 		header.Set("Authorization", "Bearer "+c.authToken)
 	}
 
-	conn, _, err := dialer.DialContext(c.reconnectCtx, c.url, header)
+	conn, resp, err := dialer.DialContext(c.reconnectCtx, c.url, header)
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("%w: %v", ErrUnauthorized, err)
+		}
 		return err
 	}
 
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return errors.New("signaling client closed")
+	}
 	c.conn = conn
 	c.mu.Unlock()
 
-	// Register immediately under write lock
+	// Register immediately under write lock with ed25519 signature
+	sig := ed25519.Sign(c.privKey, []byte(c.nodeID))
 	regPayload, _ := json.Marshal(protocol.RegisterPayload{
-		NodeID: c.nodeID,
+		NodeID:    c.nodeID,
+		PublicKey: hex.EncodeToString(c.pubKey),
+		Signature: hex.EncodeToString(sig),
 	})
 	regEnv := protocol.Envelope{
 		Type:     protocol.MsgRegister,
@@ -481,7 +605,7 @@ func (c *Client) readLoop() {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			c.mu.Lock()
-			if !c.closed {
+			if !c.closed && c.conn == conn {
 				_ = c.conn.Close()
 				c.conn = nil
 			}
@@ -510,7 +634,7 @@ func (c *Client) reconnect() {
 		}
 		c.mu.Unlock()
 
-		jitter := time.Duration(rand.Int63n(int64(250 * time.Millisecond)))
+		jitter := time.Duration(mrand.Int63n(int64(250 * time.Millisecond)))
 		sleepDuration := backoff + jitter
 		if sleepDuration > maxBackoff {
 			sleepDuration = maxBackoff
@@ -548,8 +672,16 @@ func (c *Client) writeLoop() {
 			if conn != nil {
 				c.writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				_ = conn.WriteMessage(websocket.TextMessage, msg)
+				err := conn.WriteMessage(websocket.TextMessage, msg)
 				c.writeMu.Unlock()
+				if err != nil {
+					c.mu.Lock()
+					if !c.closed && c.conn == conn {
+						_ = c.conn.Close()
+						c.conn = nil
+					}
+					c.mu.Unlock()
+				}
 			}
 		case <-pingTicker.C:
 			c.mu.Lock()
@@ -558,8 +690,16 @@ func (c *Client) writeLoop() {
 			if conn != nil {
 				c.writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				_ = conn.WriteMessage(websocket.PingMessage, nil)
+				err := conn.WriteMessage(websocket.PingMessage, nil)
 				c.writeMu.Unlock()
+				if err != nil {
+					c.mu.Lock()
+					if !c.closed && c.conn == conn {
+						_ = c.conn.Close()
+						c.conn = nil
+					}
+					c.mu.Unlock()
+				}
 			}
 		}
 	}
@@ -639,6 +779,9 @@ func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 					Nodes []string `json:"nodes"`
 				}
 				if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+					if result.Nodes == nil {
+						result.Nodes = []string{}
+					}
 					return result.Nodes, nil
 				}
 			}

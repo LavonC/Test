@@ -109,3 +109,32 @@ func TestDetermineCandidatePairType(t *testing.T) {
 		}
 	}
 }
+
+func TestTracker_DeepCopyAndRemoveConnection(t *testing.T) {
+	tracker := NewTracker()
+	pm := &PathMetrics{
+		PeerID:   "peer-copy",
+		IsDirect: true,
+		PairType: PairHostHost,
+	}
+	tracker.RecordConnection(pm)
+	// Mutating caller struct after RecordConnection must not mutate tracker state
+	pm.IsDirect = false
+	pm.BytesSent = 99999
+
+	got, ok := tracker.GetMetrics("peer-copy")
+	if !ok {
+		t.Fatalf("expected peer-copy metrics")
+	}
+	if !got.IsDirect || got.BytesSent != 0 {
+		t.Fatalf("expected deep-copied metrics unaffected by caller mutation, got %+v", got)
+	}
+
+	tracker.RemoveConnection("peer-copy")
+	if _, ok := tracker.GetMetrics("peer-copy"); ok {
+		t.Fatalf("expected peer-copy metrics removed after RemoveConnection")
+	}
+	if stats := tracker.AggregateFleetStats(); stats.TotalConnections != 0 {
+		t.Fatalf("expected 0 active connections in FleetNATStats, got %d", stats.TotalConnections)
+	}
+}

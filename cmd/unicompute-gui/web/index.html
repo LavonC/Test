@@ -45,16 +45,8 @@
       </div>
     </div>
 
-    <!-- Right: Join Code & Coordinator Hub Selector -->
+    <!-- Right: Coordinator Hub Selector -->
     <div class="titlebar-right">
-      <div class="join-code-pill" title="Click to copy cluster join code">
-        <span class="pill-tag">JOIN:</span>
-        <span class="pill-code" id="activeJoinCode">UC-LOADING</span>
-        <button class="btn-copy" id="btnCopyJoinCode" title="Copy Cluster Join Code">
-          <span class="material-symbols-outlined text-xs">content_copy</span>
-        </button>
-      </div>
-
       <div class="coordinator-dropdown-wrap">
         <select id="coordinatorSelect" class="styled-select-compact">
           <option value="wss://unicompute-coordinator.onrender.com/ws">Render Cloud</option>
@@ -328,29 +320,13 @@
           </div>
         </aside>
 
-        <!-- Incoming Mutual Connection Request Modal -->
-        <div id="incomingModal" class="incoming-modal hidden">
-          <div class="modal-card">
-            <div class="modal-icon-glow">
-              <span class="material-symbols-outlined text-2xl text-secondary">wifi_tethering</span>
-            </div>
-            <div class="modal-content">
-              <h3 class="modal-title">Incoming P2P Connection Request</h3>
-              <p class="modal-desc"><strong id="incomingPeerId" class="font-mono text-primary">node-xxxx</strong> requests an encrypted WebRTC DataChannel session with this machine.</p>
-            </div>
-            <div class="modal-actions">
-              <button id="btnAcceptIncoming" class="btn-emerald">Accept &amp; Connect</button>
-              <button id="btnDeclineIncoming" class="btn-surface">Decline</button>
-            </div>
-          </div>
-        </div>
       </div>
 
       <!-- Bottom Status Strip Overlay -->
       <div class="canvas-bottom-strip font-mono text-xs">
         <div class="flex items-center gap-3">
           <span class="text-outline">Data Plane Topology:</span>
-          <span class="text-on-surface">WebRTC SCTP Multiplexing (dc-ctrl &amp; dc-bulk)</span>
+          <span class="text-on-surface">WebRTC SCTP Multiplexing (stream &amp; chunk)</span>
         </div>
         <div class="flex items-center gap-4 text-on-surface-variant">
           <span>Click any node in the topology mesh to open the inspector card</span>
@@ -438,7 +414,7 @@
                 </div>
                 <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
                   <span class="text-outline">Transport Protocol</span>
-                  <span class="text-secondary font-semibold" id="coordMtls">TLS_AES_256_GCM_SHA384</span>
+                  <span class="text-secondary font-semibold" id="coordMtls">DTLS 1.2 / SCTP (Pion WebRTC)</span>
                 </div>
               </div>
             </div>
@@ -449,45 +425,44 @@
             </div>
           </div>
 
-          <!-- Card 2: Join Code Generation & Relay Configuration -->
+          <!-- Card 2: Read-Only ICE & Signaling Transport Timeouts -->
           <div class="telemetry-card flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between mb-4">
                 <div class="flex items-center gap-2">
                   <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
-                    <span class="material-symbols-outlined">vpn_key</span>
+                    <span class="material-symbols-outlined">timer</span>
                   </div>
                   <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">Cluster Join Token</h3>
-                    <p class="font-mono text-[11px] text-outline">Peer discovery broadcast payload</p>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">ICE &amp; NAT Timeouts</h3>
+                    <p class="font-mono text-[11px] text-outline">Pion WebRTC SettingEngine configuration</p>
                   </div>
                 </div>
-                <button class="btn-icon" id="btnRotateToken" title="Rotate Cluster Token">
-                  <span class="material-symbols-outlined text-sm">autorenew</span>
-                </button>
+                <span class="badge-pri font-mono text-[10px]">READ-ONLY</span>
               </div>
 
-              <!-- Large Token Presentation -->
-              <div class="bg-surface-lowest p-3 rounded-lg border border-outline-variant/40 flex flex-col items-center justify-center my-2 text-center">
-                <span class="text-[10px] text-outline font-mono uppercase tracking-wider mb-1">Local UI Reference Code (Not Coordinator Auth Token)</span>
-                <span class="font-mono text-xl font-bold text-primary tracking-widest" id="coordDisplayedToken">--</span>
-                <div class="flex items-center gap-2 mt-2">
-                  <button class="btn-surface font-mono text-xs flex items-center gap-1" id="btnCopyCoordToken">
-                    <span class="material-symbols-outlined text-xs">content_copy</span>
-                    <span>Copy Code</span>
-                  </button>
+              <div class="space-y-2.5 pt-2 font-mono text-xs">
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">ICE Disconnected Timeout</span>
+                  <span class="text-primary font-semibold">20.0s</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">ICE Failed Timeout</span>
+                  <span class="text-on-surface font-semibold">25.0s</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">ICE Keepalive Interval</span>
+                  <span class="text-secondary font-semibold">15.0s</span>
+                </div>
+                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
+                  <span class="text-outline">SCTP Receive Window</span>
+                  <span class="text-on-surface font-semibold">16 MiB</span>
                 </div>
               </div>
+            </div>
 
-              <!-- Relay Slider Setting -->
-              <div class="mt-4 space-y-1.5">
-                <div class="flex justify-between items-center text-xs">
-                  <span class="text-outline font-mono">Blind Relay Fallback Threshold</span>
-                  <span class="font-mono text-primary font-semibold" id="coordSliderValueText">2.0s</span>
-                </div>
-                <input class="styled-range w-full" id="coordRelaySlider" max="5.0" min="0.5" step="0.1" type="range" value="2.0"/>
-                <p class="text-[11px] text-outline">Peers unable to establish direct NAT UDP holes fall back to blind coordinator relays after timeout.</p>
-              </div>
+            <div class="mt-5 pt-3 border-t border-outline-variant/30 text-[11px] text-outline font-mono">
+              <span>Configured via ICE STUN/TURN; standalone relay package is not auto-invoked.</span>
             </div>
           </div>
 
@@ -515,9 +490,9 @@
                   <span class="text-[10px] text-outline font-mono" id="coordAvgRtt">Avg RTT: 0.0ms</span>
                 </div>
                 <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">Relayed Throughput</span>
+                  <span class="text-[11px] text-outline font-mono">Relayed Links</span>
                   <div class="font-mono text-lg font-bold text-primary mt-0.5" id="coordRelayedPeers">0 Nodes</div>
-                  <span class="text-[10px] text-outline font-mono" id="coordRelayFallback">2.0s Fallback Active</span>
+                  <span class="text-[10px] text-outline font-mono" id="coordRelayFallback">TURN ICE Candidate</span>
                 </div>
                 <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
                   <span class="text-[11px] text-outline font-mono">Throttled Peers</span>
@@ -525,7 +500,7 @@
                   <span class="text-[10px] text-secondary font-mono">Zero backpressure</span>
                 </div>
                 <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">Merkle Tree Verif.</span>
+                  <span class="text-[11px] text-outline font-mono">CAS SHA-256 Audit</span>
                   <div class="font-mono text-lg font-bold text-tertiary mt-0.5" id="coordMerkleVerif">0.0%</div>
                   <span class="text-[10px] text-outline font-mono" id="coordHashCount">0 Blobs</span>
                 </div>
@@ -668,22 +643,14 @@
             </h3>
             <span class="text-xs font-mono text-outline">Transport: WebRTC DataChannel (SCTP)</span>
           </div>
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs font-mono">
-            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
-              <div class="text-outline">COORDINATOR_KEY</div>
-              <div class="text-on-surface truncate mt-1">--</div>
-            </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
             <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
               <div class="text-outline">CIPHER_SUITE</div>
-              <div class="text-on-surface truncate mt-1">TLS_AES_256_GCM_SHA384</div>
+              <div class="text-on-surface truncate mt-1">DTLS 1.2 / SCTP (Pion WebRTC)</div>
             </div>
             <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
               <div class="text-outline">NAT_HOLE_PUNCH</div>
               <div class="text-secondary truncate mt-1">STUN/TURN RFC-8489 Active</div>
-            </div>
-            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
-              <div class="text-outline">CONCURRENCY_POLICY</div>
-              <div class="text-primary truncate mt-1">ASYNC_EVENT_LOOP</div>
             </div>
           </div>
         </div>
@@ -853,7 +820,7 @@
             <div class="dial-title font-mono text-primary" id="gpuDeviceName">Probing GPU...</div>
             <div class="dial-sub font-mono" id="gpuVendor">DirectML / CUDA</div>
             <div class="mt-3 pt-2 border-t border-outline-variant/30 flex justify-between text-xs font-mono text-outline">
-              <span>Driver: <strong class="text-on-surface">DirectML / CUDA (Simulated Runner)</strong></span>
+              <span>Driver: <strong class="text-on-surface">Simulated ONNX Runner (CPU Mock — No Native DirectML/CUDA Execution Yet)</strong></span>
               <span>Tier: <strong class="text-secondary">Tier 3 Hardware</strong></span>
             </div>
           </div>
@@ -920,9 +887,9 @@
             <div class="flex items-center justify-between border-b border-outline-variant/30 pb-3">
               <div class="flex items-center gap-2">
                 <span class="material-symbols-outlined text-primary text-base">play_circle</span>
-                <span class="font-headline font-semibold text-sm text-on-surface">Sandboxed GPU Task Runner (Win32 JobObject)</span>
+                <span class="font-headline font-semibold text-sm text-on-surface">Simulated ONNX Runner (CPU Mock — No Native DirectML/CUDA Execution Yet)</span>
               </div>
-              <span class="badge-neutral font-mono text-[10px]">DIRECTML</span>
+              <span class="badge-neutral font-mono text-[10px]">SIMULATED</span>
             </div>
 
             <div class="space-y-3">
@@ -1007,7 +974,7 @@
           <div class="flex items-center gap-2">
             <button id="btnVerifyAllMerkle" class="btn-surface font-mono text-xs flex items-center gap-1.5">
               <span class="material-symbols-outlined text-xs">verified</span>
-              <span>Verify All Merkle Roots</span>
+              <span>Scrub Local CAS Vault</span>
             </button>
             <button id="btnShardNewDataset" class="btn-emerald font-semibold text-xs flex items-center gap-1.5">
               <span class="material-symbols-outlined text-xs">upload_file</span>
@@ -1155,19 +1122,15 @@
               <span class="material-symbols-outlined text-xs">refresh</span>
               <span>Refresh Queue</span>
             </button>
-            <button class="btn-emerald font-semibold text-xs flex items-center gap-1.5" id="btnDispatchSampleTask">
-              <span class="material-symbols-outlined text-xs">send</span>
-              <span>Dispatch Sample Task</span>
-            </button>
           </div>
         </div>
 
-        <!-- Global Pending Task Queue Table Card -->
+        <!-- Local CPU/GPU Execution History Log Card -->
         <div class="bg-surface-low rounded-xl border border-outline-variant/50 overflow-hidden shadow-sm">
           <div class="px-4 py-3 bg-surface-high border-b border-outline-variant/40 flex items-center justify-between">
             <div class="flex items-center gap-2">
               <span class="material-symbols-outlined text-primary text-base">task_alt</span>
-              <h3 class="font-headline font-semibold text-sm text-on-surface">Global Pending &amp; Scheduled Task Queue</h3>
+              <h3 class="font-headline font-semibold text-sm text-on-surface">Local Execution History Log (CPU &amp; Simulated GPU Runs)</h3>
             </div>
             <span class="text-xs font-mono text-outline" id="taskQueueCount">Showing 0 Active Tasks</span>
           </div>

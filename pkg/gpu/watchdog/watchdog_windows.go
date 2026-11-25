@@ -37,6 +37,13 @@ func isInputTelemetrySupported() bool {
 
 // Start begins the 50 ms polling loop on Windows.
 func (w *Watchdog) Start() {
+	w.mu.Lock()
+	if w.started || w.state == StateStopped {
+		w.mu.Unlock()
+		return
+	}
+	w.started = true
+	w.mu.Unlock()
 	go w.pollLoop()
 }
 
@@ -135,6 +142,11 @@ func (w *Watchdog) queryPowerStatus() (onBattery bool, batteryPct uint8) {
 	return sps.ACLineStatus == 0, sps.BatteryLifePercent
 }
 
+func computeTickElapsed(currentTick, lastInputTick uint32) time.Duration {
+	elapsed := currentTick - lastInputTick
+	return time.Duration(elapsed) * time.Millisecond
+}
+
 func (w *Watchdog) queryUserIdle() time.Duration {
 	var lii lastInputInfo
 	lii.cbSize = uint32(unsafe.Sizeof(lii))
@@ -147,8 +159,5 @@ func (w *Watchdog) queryUserIdle() time.Duration {
 	tickRet, _, _ := procGetTickCount64.Call()
 	currentTick := uint32(tickRet)
 
-	if currentTick >= lii.dwTime {
-		return time.Duration(currentTick-lii.dwTime) * time.Millisecond
-	}
-	return time.Duration(0)
+	return computeTickElapsed(currentTick, lii.dwTime)
 }

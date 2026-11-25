@@ -274,6 +274,9 @@ func ProbeSTUNWithConn(ctx context.Context, conn net.PacketConn, serverAddr stri
 		_ = conn.SetReadDeadline(deadline)
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
+			if IsTransientSocketError(err) && time.Now().Before(deadline) {
+				continue
+			}
 			return nil, err
 		}
 
@@ -418,8 +421,8 @@ func (c *Classifier) Classify(ctx context.Context) (*NATReport, error) {
 
 	// 4. Determine NAT classification
 	if mappedV4_1 == nil && !report.IPv6Supported {
-		// No STUN response and no IPv6 -> strict firewall or offline
-		report.NATType = NATTypeSymmetric
+		// No STUN response and no IPv6 -> NAT type cannot be determined
+		report.NATType = NATTypeUnknown
 		report.HolePunchFeasible = false
 		report.RequiresRelay = true
 		return report, nil

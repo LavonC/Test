@@ -9,10 +9,10 @@ An independent, fully-featured, tested Go module implementing **Objective 1 (Mem
 Objective 1 owns the **peer-to-peer data transport substrate** and **contributed storage capacity accounting**. It provides the underlying data plane upon which all other objectives (O2 Durability/Erasure Coding, O3 Chunking/Deduplication, O4 Client Encryption, and O5 Locality-Aware Scheduling) operate.
 
 ### Scope of Work (as specified in PDF)
-1. **Transport & Connection Lifecycle**: Full WebRTC PeerConnection management (ICE, DTLS 1.3, SCTP) with dual-channel multiplexing (`stream` for logs/control, `chunk` for bulk data).
+1. **Transport & Connection Lifecycle**: Full WebRTC PeerConnection management (ICE, DTLS 1.2 via `pion/dtls/v2`, SCTP) with dual-channel multiplexing (`stream` for logs/control, `chunk` for bulk data).
 2. **Dual-Stack NAT & CGNAT Detection**: Automatic discovery of local IPv4/IPv6 interfaces, RFC 6598 Carrier-Grade NAT (`100.64.0.0/10`) detection, and dual-stack STUN candidate harvesting.
 3. **Direct Connection Establishment & Hole Punching**: Direct peer-to-peer hole punching across consumer NATs without requiring port forwarding.
-4. **Relay Fallback**: Embedded TURN server (`pion/turn/v2`) and peer-elected contributor relays (Syncthing relay-v1 model) for pairs that cannot connect directly.
+4. **Standalone Relay Packages**: Embedded TURN server (`pion/turn/v2`) and contributor relay (Syncthing relay-v1 model) in `pkg/relay` as standalone/legacy packages (`transport.Manager.ConnectPeer` uses Pion ICE with configured STUN/TURN directly rather than auto-invoking `pkg/relay`).
 5. **Keepalive & Session Resumption**: 15-second ICE keepalive binding indications, 20-second WebSocket ping tickers with 60-second read deadlines, and certificate/UUID-based node identity surviving IP address churn.
 6. **Node-Local Blob Store & Quota Accounting**: Content-addressed and chunk-addressed local storage vault enforcing disk quotas, atomic commits via temporary files, and SHA-256 integrity verification.
 7. **Per-Connection Path Instrumentation**: Real-time telemetry reporting candidate pair types (`host-host`, `host-srflx`, `srflx-srflx`, `prflx`, `relay`), direct vs relayed ratio, RTT, throughput, and fleet-wide CGNAT prevalence.
@@ -31,7 +31,7 @@ UniComputeOBJ1/
 ├── pkg/
 │   ├── blobstore/                # Local disk vault, quota enforcement, atomic commits, SHA-256 validation
 │   ├── nat/                      # Dual-stack STUN probing, CGNAT detection, virtual interface filtering
-│   ├── relay/                    # Contributor relay (Syncthing relay-v1) and embedded TURN server
+│   ├── relay/                    # Standalone/legacy contributor relay (Syncthing relay-v1) and embedded TURN server
 │   ├── transport/                # WebRTC manager, 16 MiB SCTP buffer, dual DataChannels, trickle ICE
 │   ├── instrumentation/          # Path metrics, candidate pair classification, fleet NAT telemetry
 │   ├── protocol/                 # Framing, envelopes, chunk transfer wire protocol
@@ -90,11 +90,11 @@ This implementation directly addresses and resolves all six architectural defect
 2. **SCTP Receive Buffer Raised to 16 MiB**:
    - `settingEngine.SetSCTPMaxReceiveBufferSize(16 * 1024 * 1024)`: Prevents throughput capping on high-latency residential links (raising max line speed from ~336 Mbps at 100ms RTT to >1 Gbps).
 3. **Max Message Size & Backpressure**:
-   - Configured chunk frames at 128 KiB with flow control and SCTP buffer threshold monitoring (`dc.BufferedAmount() > 4 MiB`) to prevent memory exhaustion during bulk transfers.
+   - Streams chunk transfers in bounded segments (60 KiB chunks in `Node.TransferChunk`) with flow control and SCTP buffer threshold monitoring (`dc.BufferedAmount() > 4 MiB`) to prevent memory exhaustion during bulk transfers.
 4. **Dual-Stack STUN Probing**:
    - Probes both IPv4 and IPv6 STUN endpoints. If a peer has native IPv6 (78.6% of residential broadband in India), direct IPv6 peer links bypass IPv4 CGNAT entirely.
 5. **Carrier-Grade NAT (CGNAT) Detection**:
-   - Enforces an RFC 6598 range check (`100.64.0.0/10`). Distinguishes between standard home routers (where UDP hole punching succeeds) and CGNAT gateways (where IPv6 or contributor relay fallback is mandatory).
+   - Enforces an RFC 6598 range check (`100.64.0.0/10`). Distinguishes between standard home routers (where UDP hole punching succeeds) and CGNAT gateways (where IPv6 or TURN/relay traversal is needed).
 6. **Virtual Adapter Pruning (`SetInterfaceFilter`)**:
    - Filters out Hyper-V (`vEthernet`), WSL2 virtual adapters, Docker bridges, VirtualBox, TAP, and VPN interfaces that would otherwise generate unroutable host candidates and stall ICE checks.
 7. **Windows Socket Reset Error Handling (Section 6.4)**:
@@ -155,7 +155,7 @@ UniCompute provides an industrial-grade Desktop Workstation GUI (`cmd/unicompute
 
 1. **P2P Topology Mesh (Tab 1)**: Interactive fleet topology canvas displaying the central coordinator, orbiting workstation rigs, dual-hemisphere cores (CPU/GPU load and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and the PC Inspector drawer with live SCTP ping and link controls.
 2. **CPU Containers (Tab 2 - Objective 2)**: Dark code editor, recursive sample dropdown (`samples/`), stdin stream input, execution timeout slider, target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
-3. **GPU Subsystem (Tab 3 - Objective 3)**: Real-time hardware telemetry (RTX 4050 / DirectML), 50 ms battery/activity watchdog radar, CUDA-to-AMD HIPIFY translator with blocker analysis, and Win32 JobObject memory-bounded training runner.
+3. **GPU Subsystem (Tab 3 - Objective 3)**: Hardware telemetry probing, 50 ms battery/activity watchdog radar, regex-based CUDA-to-AMD HIPIFY compatibility analyzer/translator with blocker analysis, and pure-Go simulated ONNX training/checkpoint runner (`Simulated: true`, bounded by Win32 JobObject / POSIX limits).
 4. **CAS Vault (Tab 4 - Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
 5. **Wire Logs & Diagnostics (Tab 5)**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
 

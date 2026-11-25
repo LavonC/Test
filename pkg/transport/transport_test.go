@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -560,5 +564,209 @@ func TestZeroByteChunkTransfer(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Fatalf("expected 0 bytes, got %d bytes", len(data))
+	}
+}
+
+func buildTestChunkFrame(flags byte, offset, totalSize uint64, chunkID string, payload []byte) []byte {
+	frame := make([]byte, protocol.ChunkHeaderSize+len(payload))
+	frame[0] = protocol.DataMsgChunkResponse
+	frame[1] = flags
+	binary.BigEndian.PutUint64(frame[2:10], offset)
+	binary.BigEndian.PutUint64(frame[10:18], totalSize)
+	idBytes := make([]byte, 64)
+	copy(idBytes, []byte(chunkID))
+	copy(frame[18:82], idBytes)
+	copy(frame[protocol.ChunkHeaderSize:], payload)
+	return frame
+}
+
+func TestHandleChunkMessage_SecurityGuards(t *testing.T) {
+	conn := newPeerConnection("sess-sec", "local", "remote", nil, nil)
+
+	// (a) offset = math.MaxUint64 must not panic with integer overflow
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("handleChunkMessage panicked on math.MaxUint64 offset: %v", r)
+			}
+		}()
+		frameStart := buildTestChunkFrame(protocol.FlagStart, 0, 128, "chunk-overflow", []byte("abcd"))
+		conn.handleChunkMessage(frameStart)
+
+		frameOverflow := buildTestChunkFrame(protocol.FlagData, math.MaxUint64, 128, "chunk-overflow", []byte("evil"))
+		conn.handleChunkMessage(frameOverflow)
+	}()
+
+	// Clean up chunk-overflow entry before testing capacity caps
+	conn.cleanupInFlight(ErrConnectionClosed)
+
+	// (b) 20 simultaneous FlagStart frames claiming 64 MiB each must reject beyond cap
+	for i := 0; i < 20; i++ {
+		cid := fmt.Sprintf("chunk-oom-%d", i)
+		frame := buildTestChunkFrame(protocol.FlagStart, 0, 64*1024*1024, cid, []byte("x"))
+		conn.handleChunkMessage(frame)
+	}
+
+	conn.inFlightMu.Lock()
+	inFlightCount := len(conn.inFlight)
+	inFlightBytes := conn.totalInFlightBytes
+	conn.inFlightMu.Unlock()
+
+	if inFlightCount > MaxInFlightChunksPerPeer {
+		t.Fatalf("expected at most %d in-flight chunks, got %d", MaxInFlightChunksPerPeer, inFlightCount)
+	}
+	if inFlightBytes > MaxInFlightBytesPerPeer {
+		t.Fatalf("expected total in-flight bytes <= %d, got %d", MaxInFlightBytesPerPeer, inFlightBytes)
+	}
+	if inFlightCount != 1 {
+		t.Fatalf("expected exactly 1 64MiB chunk accepted under 64MiB peer cap, got %d", inFlightCount)
+	}
+
+	conn.cleanupInFlight(ErrConnectionClosed)
+
+	// Also verify count cap (MaxInFlightChunksPerPeer = 8) with small chunks
+	for i := 0; i < 20; i++ {
+		cid := fmt.Sprintf("chunk-count-%d", i)
+		frame := buildTestChunkFrame(protocol.FlagStart, 0, 1024, cid, []byte("x"))
+		conn.handleChunkMessage(frame)
+	}
+	conn.inFlightMu.Lock()
+	countOnly := len(conn.inFlight)
+	conn.inFlightMu.Unlock()
+	if countOnly != MaxInFlightChunksPerPeer {
+		t.Fatalf("expected %d in-flight chunks at count cap, got %d", MaxInFlightChunksPerPeer, countOnly)
+	}
+
+	conn.cleanupInFlight(ErrConnectionClosed)
+
+	// (c) Duplicate frames at offset = 0 must not trigger premature completion with zeroed holes
+	var completedCount int
+	var completedData []byte
+	conn.SetOnChunkReceived(func(chunkID string, data []byte) {
+		completedCount++
+		completedData = append([]byte(nil), data...)
+	})
+
+	const chunkID = "chunk-dup-0"
+	const totalSize = 10
+	part1 := []byte("12345")
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagStart, 0, totalSize, chunkID, part1))
+	// Send duplicate frame at offset=0 (same length 5, which previously bumped received to 10 == totalSize)
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagData, 0, totalSize, chunkID, part1))
+	// Even with FlagEnd set on duplicate offset=0, it must be rejected
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagEnd, 0, totalSize, chunkID, part1))
+
+	if completedCount != 0 {
+		t.Fatalf("duplicate frames at offset=0 triggered premature completion (%d times)", completedCount)
+	}
+
+	// Now send legitimate second half at offset=5
+	part2 := []byte("67890")
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagEnd, 5, totalSize, chunkID, part2))
+	if completedCount != 1 {
+		t.Fatalf("expected completion count 1 after sequential second half, got %d", completedCount)
+	}
+	if string(completedData) != "1234567890" {
+		t.Fatalf("expected completed data %q, got %q", "1234567890", string(completedData))
+	}
+}
+
+func TestManager_BuffersEarlyICECandidatesBeforeAnswer(t *testing.T) {
+	mgrA, err := NewManager(Config{NodeID: "node-early-A"}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager A failed: %v", err)
+	}
+	defer mgrA.Close()
+
+	mgrB, err := NewManager(Config{NodeID: "node-early-B"}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager B failed: %v", err)
+	}
+	defer mgrB.Close()
+
+	pcA, err := mgrA.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection A failed: %v", err)
+	}
+	_, err = pcA.CreateDataChannel("stream", nil)
+	if err != nil {
+		t.Fatalf("CreateDataChannel failed: %v", err)
+	}
+	offer, err := pcA.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer failed: %v", err)
+	}
+	if err := pcA.SetLocalDescription(offer); err != nil {
+		t.Fatalf("SetLocalDescription A failed: %v", err)
+	}
+
+	const sessionID = "sess-early-ice"
+	connA := newPeerConnection(sessionID, "node-early-A", "node-early-B", pcA, nil)
+	connA.setupHandlers()
+	mgrA.mu.Lock()
+	mgrA.connections[sessionID] = connA
+	mgrA.peerSessions["node-early-B"] = sessionID
+	mgrA.mu.Unlock()
+
+	// Deliver an ICE candidate BEFORE MsgSDPAnswer arrives on mgrA
+	candPayload, _ := json.Marshal(protocol.ICECandidatePayload{
+		SessionID:     sessionID,
+		Candidate:     "candidate:1 1 udp 2122260223 127.0.0.1 50000 typ host",
+		SDPMid:        "0",
+		SDPMLineIndex: 0,
+	})
+	if err := mgrA.HandleSignalingEnvelope(protocol.Envelope{
+		Type:     protocol.MsgICECandidate,
+		SenderID: "node-early-B",
+		TargetID: "node-early-A",
+		Payload:  candPayload,
+	}); err != nil {
+		t.Fatalf("expected early ICE candidate to be buffered without error, got: %v", err)
+	}
+
+	mgrA.mu.Lock()
+	queued := len(mgrA.pendingCandidates[sessionID])
+	mgrA.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("expected 1 queued candidate before answer, got %d", queued)
+	}
+
+	// Now create a real answer on pcB and deliver MsgSDPAnswer to mgrA
+	pcB, err := mgrB.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection B failed: %v", err)
+	}
+	defer pcB.Close()
+	if err := pcB.SetRemoteDescription(offer); err != nil {
+		t.Fatalf("SetRemoteDescription B failed: %v", err)
+	}
+	answer, err := pcB.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("CreateAnswer failed: %v", err)
+	}
+
+	ansPayload, _ := json.Marshal(protocol.SDPPayload{
+		SessionID: sessionID,
+		Type:      answer.Type.String(),
+		SDP:       answer.SDP,
+	})
+	if err := mgrA.HandleSignalingEnvelope(protocol.Envelope{
+		Type:     protocol.MsgSDPAnswer,
+		SenderID: "node-early-B",
+		TargetID: "node-early-A",
+		Payload:  ansPayload,
+	}); err != nil {
+		t.Fatalf("HandleSignalingEnvelope(MsgSDPAnswer) failed flushing buffered ICE candidate: %v", err)
+	}
+
+	mgrA.mu.Lock()
+	remaining := len(mgrA.pendingCandidates[sessionID])
+	descSet := mgrA.remoteDescSet[sessionID]
+	mgrA.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected 0 remaining queued candidates after answer, got %d", remaining)
+	}
+	if !descSet {
+		t.Fatalf("expected remoteDescSet[sessionID] to be true after answer")
 	}
 }

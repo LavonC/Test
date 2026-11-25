@@ -39,14 +39,15 @@ type Status struct {
 
 // Watchdog monitors power and user input to protect student laptop responsiveness.
 type Watchdog struct {
-	mu        sync.RWMutex
-	cfg       Config
-	state     State
-	status    Status
-	onPause   func(reason string)
-	onResume  func()
-	stopChan  chan struct{}
-	doneChan  chan struct{}
+	mu         sync.RWMutex
+	cfg        Config
+	state      State
+	status     Status
+	onPause    func(reason string)
+	onResume   func()
+	stopChan   chan struct{}
+	doneChan   chan struct{}
+	started    bool
 	lastActive time.Time
 }
 
@@ -89,6 +90,12 @@ func (w *Watchdog) Stop() {
 		return
 	}
 	w.state = StateStopped
+	w.status.State = StateStopped
+	if !w.started {
+		close(w.stopChan)
+		w.mu.Unlock()
+		return
+	}
 	close(w.stopChan)
 	w.mu.Unlock()
 

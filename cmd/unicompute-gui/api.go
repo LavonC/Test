@@ -34,6 +34,16 @@ type wsClient struct {
 	writeMu sync.Mutex
 }
 
+type coordProbeCache struct {
+	fetchedAt    time.Time
+	coordURL     string
+	authToken    string
+	status       string
+	authRequired bool
+	fleetCount   int
+	nodeIDs      []string
+}
+
 // ServerState encapsulates the active node and GUI runtime state.
 type ServerState struct {
 	mu             sync.RWMutex
@@ -48,9 +58,12 @@ type ServerState struct {
 	wsClients      map[*wsClient]bool
 	wsMu           sync.Mutex
 	eventLog       []EventMessage
-	pendingReqs    map[string]string // peerID -> status
 	pendingPings   map[string]chan time.Duration
 	pingMu         sync.Mutex
+	httpClient     *http.Client
+	localShellExec *remoteshell.SystemExecutor
+	coordCacheMu   sync.Mutex
+	coordCache     coordProbeCache
 	startTime      time.Time
 	relayThreshold float64
 	joinToken      string
@@ -164,8 +177,11 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 		joinToken:      initJoinToken,
 		wsClients:      make(map[*wsClient]bool),
 		eventLog:       make([]EventMessage, 0, 100),
-		pendingReqs:    make(map[string]string),
 		pendingPings:   make(map[string]chan time.Duration),
+		httpClient: &http.Client{
+			Timeout: 1200 * time.Millisecond,
+		},
+		localShellExec: remoteshell.NewSystemExecutor(),
 		tasks:          []ClusterTask{}, // Real empty task queue; no fake seed tasks
 	}
 
@@ -281,8 +297,8 @@ func (s *ServerState) Broadcast(eventType, peerID, message string, payload any) 
 	}
 }
 
-// authMiddleware enforces Origin checks, constant-time bearer token auth, and Content-Type validation.
-func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// authMiddleware enforces Origin checks, constant-time bearer token auth, HTTP method allowlists, and Content-Type validation.
+func (s *ServerState) authMiddleware(next http.HandlerFunc, allowedMethods ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Origin header validation (if present)
 		if !s.isAllowedOrigin(r) {
@@ -290,7 +306,7 @@ func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// 2. Token validation (Authorization: Bearer <token> or ?token=<token>)
+		// 2. Token validation (Authorization: Bearer <token>; ?token= allowed ONLY on /api/events WebSocket upgrade)
 		s.mu.RLock()
 		expectedToken := s.sessionToken
 		s.mu.RUnlock()
@@ -300,7 +316,7 @@ func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			authHdr := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHdr, "Bearer ") {
 				token = strings.TrimPrefix(authHdr, "Bearer ")
-			} else {
+			} else if r.URL.Path == "/api/events" {
 				token = r.URL.Query().Get("token")
 			}
 
@@ -310,7 +326,23 @@ func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		// 3. Content-Type validation for mutating requests (POST, PUT, DELETE)
+		// 3. Enforce allowed HTTP methods
+		if len(allowedMethods) > 0 {
+			methodAllowed := false
+			for _, m := range allowedMethods {
+				if r.Method == m {
+					methodAllowed = true
+					break
+				}
+			}
+			if !methodAllowed {
+				w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+		}
+
+		// 4. Content-Type validation for mutating requests (POST, PUT, DELETE)
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
 			ct := r.Header.Get("Content-Type")
 			if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
@@ -323,32 +355,32 @@ func (s *ServerState) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// SetupRoutes registers all REST and WebSocket API endpoints wrapped in auth middleware.
+// SetupRoutes registers all REST and WebSocket API endpoints wrapped in auth and method enforcement middleware.
 func (s *ServerState) SetupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/status", s.authMiddleware(s.handleStatus))
-	mux.HandleFunc("/api/coordinator/connect", s.authMiddleware(s.handleCoordinatorConnect))
-	mux.HandleFunc("/api/coordinator/status", s.authMiddleware(s.handleCoordinatorStatus))
-	mux.HandleFunc("/api/coordinator/settings", s.authMiddleware(s.handleCoordinatorSettings))
-	mux.HandleFunc("/api/worker/settings", s.authMiddleware(s.handleWorkerSettings))
-	mux.HandleFunc("/api/tasks", s.authMiddleware(s.handleTasks))
-	mux.HandleFunc("/api/fleet", s.authMiddleware(s.handleFleet))
-	mux.HandleFunc("/api/peers", s.authMiddleware(s.handlePeers))
-	mux.HandleFunc("/api/peer/connect", s.authMiddleware(s.handlePeerConnect))
-	mux.HandleFunc("/api/peer/disconnect", s.authMiddleware(s.handlePeerDisconnect))
-	mux.HandleFunc("/api/peer/ping", s.authMiddleware(s.handlePeerPing))
-	mux.HandleFunc("/api/peer/stream", s.authMiddleware(s.handlePeerStream))
-	mux.HandleFunc("/api/gpu", s.authMiddleware(s.handleGPU))
-	mux.HandleFunc("/api/gpu/hipify", s.authMiddleware(s.handleGPUHipify))
-	mux.HandleFunc("/api/gpu/run", s.authMiddleware(s.handleGPURun))
-	mux.HandleFunc("/api/code/run", s.authMiddleware(s.handleCodeRun))
-	mux.HandleFunc("/api/shell/exec", s.authMiddleware(s.handleShellExec))
-	mux.HandleFunc("/api/storage/blobs", s.authMiddleware(s.handleStorageBlobs))
-	mux.HandleFunc("/api/storage/get", s.authMiddleware(s.handleStorageGet))
-	mux.HandleFunc("/api/storage/put", s.authMiddleware(s.handleStoragePut))
-	mux.HandleFunc("/api/storage/del", s.authMiddleware(s.handleStorageDel))
-	mux.HandleFunc("/api/storage/scrub", s.authMiddleware(s.handleStorageScrub))
-	mux.HandleFunc("/api/samples", s.authMiddleware(s.handleSamples))
-	mux.HandleFunc("/api/events", s.authMiddleware(s.handleEventsWS))
+	mux.HandleFunc("/api/status", s.authMiddleware(s.handleStatus, http.MethodGet))
+	mux.HandleFunc("/api/coordinator/connect", s.authMiddleware(s.handleCoordinatorConnect, http.MethodPost))
+	mux.HandleFunc("/api/coordinator/status", s.authMiddleware(s.handleCoordinatorStatus, http.MethodGet))
+	mux.HandleFunc("/api/coordinator/settings", s.authMiddleware(s.handleCoordinatorSettings, http.MethodGet, http.MethodPost))
+	mux.HandleFunc("/api/worker/settings", s.authMiddleware(s.handleWorkerSettings, http.MethodGet, http.MethodPost))
+	mux.HandleFunc("/api/tasks", s.authMiddleware(s.handleTasks, http.MethodGet, http.MethodPost))
+	mux.HandleFunc("/api/fleet", s.authMiddleware(s.handleFleet, http.MethodGet))
+	mux.HandleFunc("/api/peers", s.authMiddleware(s.handlePeers, http.MethodGet))
+	mux.HandleFunc("/api/peer/connect", s.authMiddleware(s.handlePeerConnect, http.MethodPost))
+	mux.HandleFunc("/api/peer/disconnect", s.authMiddleware(s.handlePeerDisconnect, http.MethodPost))
+	mux.HandleFunc("/api/peer/ping", s.authMiddleware(s.handlePeerPing, http.MethodPost))
+	mux.HandleFunc("/api/peer/stream", s.authMiddleware(s.handlePeerStream, http.MethodPost))
+	mux.HandleFunc("/api/gpu", s.authMiddleware(s.handleGPU, http.MethodGet))
+	mux.HandleFunc("/api/gpu/hipify", s.authMiddleware(s.handleGPUHipify, http.MethodPost))
+	mux.HandleFunc("/api/gpu/run", s.authMiddleware(s.handleGPURun, http.MethodPost))
+	mux.HandleFunc("/api/code/run", s.authMiddleware(s.handleCodeRun, http.MethodPost))
+	mux.HandleFunc("/api/shell/exec", s.authMiddleware(s.handleShellExec, http.MethodPost))
+	mux.HandleFunc("/api/storage/blobs", s.authMiddleware(s.handleStorageBlobs, http.MethodGet))
+	mux.HandleFunc("/api/storage/get", s.authMiddleware(s.handleStorageGet, http.MethodGet))
+	mux.HandleFunc("/api/storage/put", s.authMiddleware(s.handleStoragePut, http.MethodPost))
+	mux.HandleFunc("/api/storage/del", s.authMiddleware(s.handleStorageDel, http.MethodPost))
+	mux.HandleFunc("/api/storage/scrub", s.authMiddleware(s.handleStorageScrub, http.MethodPost))
+	mux.HandleFunc("/api/samples", s.authMiddleware(s.handleSamples, http.MethodGet))
+	mux.HandleFunc("/api/events", s.authMiddleware(s.handleEventsWS, http.MethodGet))
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -419,6 +451,10 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 	}
 	s.mu.Unlock()
 
+	s.coordCacheMu.Lock()
+	s.coordCache = coordProbeCache{}
+	s.coordCacheMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	reconnErr := s.node.ReconnectSignaling(ctx, url)
@@ -456,57 +492,88 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	}
 	httpURL = strings.TrimSuffix(httpURL, "/ws")
 
-	client := &http.Client{Timeout: 1200 * time.Millisecond}
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 1200 * time.Millisecond}
+	}
+
 	status := "RUNNING"
 	authRequired := false
 	fleetCount := 0
 	nodeIDs := []string{}
 
-	// Query coordinator /health
-	healthResp, err := client.Get(httpURL + "/health")
-	if err == nil && healthResp.StatusCode == http.StatusOK {
-		healthResp.Body.Close()
-		// Health succeeded; query coordinator /api/nodes
-		req, err := http.NewRequest("GET", httpURL+"/api/nodes", nil)
-		if err == nil {
-			if authToken != "" {
-				req.Header.Set("Authorization", "Bearer "+authToken)
-			}
-			nodesResp, err := client.Do(req)
+	s.coordCacheMu.Lock()
+	cacheHit := !s.coordCache.fetchedAt.IsZero() &&
+		time.Since(s.coordCache.fetchedAt) < 8*time.Second &&
+		s.coordCache.coordURL == coordURL &&
+		s.coordCache.authToken == authToken
+	if cacheHit {
+		status = s.coordCache.status
+		authRequired = s.coordCache.authRequired
+		fleetCount = s.coordCache.fleetCount
+		nodeIDs = append([]string(nil), s.coordCache.nodeIDs...)
+	}
+	s.coordCacheMu.Unlock()
+
+	if !cacheHit {
+		// Query coordinator /health
+		healthResp, err := client.Get(httpURL + "/health")
+		if err == nil && healthResp.StatusCode == http.StatusOK {
+			healthResp.Body.Close()
+			// Health succeeded; query coordinator /api/nodes
+			req, err := http.NewRequest("GET", httpURL+"/api/nodes", nil)
 			if err == nil {
-				defer nodesResp.Body.Close()
-				if nodesResp.StatusCode == http.StatusOK {
-					var nData struct {
-						Count int      `json:"count"`
-						Nodes []string `json:"nodes"`
+				if authToken != "" {
+					req.Header.Set("Authorization", "Bearer "+authToken)
+				}
+				nodesResp, err := client.Do(req)
+				if err == nil {
+					defer nodesResp.Body.Close()
+					if nodesResp.StatusCode == http.StatusOK {
+						var nData struct {
+							Count int      `json:"count"`
+							Nodes []string `json:"nodes"`
+						}
+						if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
+							fleetCount = nData.Count
+							nodeIDs = nData.Nodes
+						}
+					} else if nodesResp.StatusCode == http.StatusUnauthorized {
+						status = "AUTH_REQUIRED"
+						authRequired = true
 					}
-					if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
-						fleetCount = nData.Count
-						nodeIDs = nData.Nodes
-					}
-				} else if nodesResp.StatusCode == http.StatusUnauthorized {
-					status = "AUTH_REQUIRED"
-					authRequired = true
 				}
 			}
-		}
-	} else {
-		if healthResp != nil {
-			healthResp.Body.Close()
-		}
-		// Remote HTTP probe failed or timed out; check locally cached fleet with fast timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		fleet, fErr := s.node.GetFleetNodes(ctx)
-		cancel()
-		if fErr == nil && len(fleet) > 0 {
-			fleetCount = len(fleet)
-			nodeIDs = fleet
-			status = "CONNECTED"
 		} else {
-			status = "DISCONNECTED"
-			fleetCount = 0
-			nodeIDs = []string{}
+			if healthResp != nil {
+				healthResp.Body.Close()
+			}
+			// Remote HTTP probe failed or timed out; check locally cached fleet with fast timeout
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			fleet, fErr := s.node.GetFleetNodes(ctx)
+			cancel()
+			if fErr == nil && len(fleet) > 0 {
+				fleetCount = len(fleet)
+				nodeIDs = fleet
+				status = "CONNECTED"
+			} else {
+				status = "DISCONNECTED"
+				fleetCount = 0
+				nodeIDs = []string{}
+			}
 		}
+
+		s.coordCacheMu.Lock()
+		s.coordCache = coordProbeCache{
+			fetchedAt:    time.Now(),
+			coordURL:     coordURL,
+			authToken:    authToken,
+			status:       status,
+			authRequired: authRequired,
+			fleetCount:   fleetCount,
+			nodeIDs:      append([]string(nil), nodeIDs...),
+		}
+		s.coordCacheMu.Unlock()
 	}
 
 	connectedPeers := s.node.GetConnectedPeers()
@@ -631,6 +698,9 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 
 		var reconnErr error
 		if tokenUpdated && coordURL != "" {
+			s.coordCacheMu.Lock()
+			s.coordCache = coordProbeCache{}
+			s.coordCacheMu.Unlock()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			reconnErr = s.node.ReconnectSignaling(ctx, coordURL)
@@ -995,10 +1065,13 @@ func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = "FAILED"
 	}
+	s.mu.RLock()
+	nodeID := s.nodeConfig.NodeID
+	s.mu.RUnlock()
 	s.addTask(ClusterTask{
 		JobID:       req.JobID,
 		ClassAd:     fmt.Sprintf("Simulated ONNX Runner && Task == %q", body.TaskType),
-		TargetMatch: fmt.Sprintf("Matched -> %s (DirectML Tier 3)", s.nodeConfig.NodeID),
+		TargetMatch: fmt.Sprintf("Matched -> %s (DirectML Tier 3)", nodeID),
 		StageDAG:    "LOCAL_GPU_SIMULATION",
 		Priority:    "P0 CRITICAL",
 		Status:      status,
@@ -1053,13 +1126,17 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 
 	startRun := time.Now()
 
+	s.mu.RLock()
+	localNodeID := s.nodeConfig.NodeID
+	s.mu.RUnlock()
+
 	// If local node or local worker is selected:
-	if body.PeerID == "local" || body.PeerID == s.nodeConfig.NodeID || body.PeerID == "" {
+	if body.PeerID == "local" || body.PeerID == localNodeID || body.PeerID == "" {
 		if !s.node.HasCodeExecutor() {
 			s.addTask(ClusterTask{
 				JobID:       req.JobID,
 				ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
-				TargetMatch: fmt.Sprintf("Matched -> %s (Local)", s.nodeConfig.NodeID),
+				TargetMatch: fmt.Sprintf("Matched -> %s (Local)", localNodeID),
 				StageDAG:    "CONTAINER_EXEC",
 				Priority:    "P1 HIGH",
 				Status:      "FAILED (NO_DOCKER)",
@@ -1085,7 +1162,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 		s.addTask(ClusterTask{
 			JobID:       req.JobID,
 			ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
-			TargetMatch: fmt.Sprintf("Matched -> %s (Local)", s.nodeConfig.NodeID),
+			TargetMatch: fmt.Sprintf("Matched -> %s (Local)", localNodeID),
 			StageDAG:    "CONTAINER_EXEC",
 			Priority:    "P1 HIGH",
 			Status:      taskStatus,
@@ -1188,7 +1265,10 @@ func (s *ServerState) handleShellExec(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "local/remote shell execution is disabled (start with -enable-remote-shell to opt in)"})
 			return
 		}
-		executor := remoteshell.NewSystemExecutor()
+		executor := s.localShellExec
+		if executor == nil {
+			executor = remoteshell.NewSystemExecutor()
+		}
 		res := executor.Execute(ctx, remoteshell.ShellRequest{
 			Command:   body.Command,
 			ShellType: remoteshell.ShellAuto,

@@ -981,4 +981,208 @@ func TestNode_StartSignaling401ThenReconnect_TransportReadyAndDispatch(t *testin
 	}
 }
 
+func TestNode_FailedConnectPeerDoesNotFireOnPeerConnected(t *testing.T) {
+	tmpDir := t.TempDir()
+	n, err := NewNode(NodeConfig{
+		NodeID:       "fail-cb-node",
+		PoolID:       "pool-cb",
+		StorageDir:   tmpDir,
+		StorageQuota: 10 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewNode failed: %v", err)
+	}
+	defer n.Close()
+
+	var fired int32
+	n.SetOnPeerConnected(func(peerID string) {
+		atomic.AddInt32(&fired, 1)
+	})
+
+	if err := n.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Attempt ConnectPeer to a nonexistent peer with a short canceled/expired context
+	connCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = n.ConnectPeer(connCtx, "nonexistent-peer")
+	if err == nil {
+		t.Fatalf("expected ConnectPeer to nonexistent peer to fail")
+	}
+
+	if got := atomic.LoadInt32(&fired); got != 0 {
+		t.Fatalf("expected onPeerConnected NOT to fire on failed ConnectPeer, got %d", got)
+	}
+}
+
+func TestNode_UnsolicitedChunkGuards(t *testing.T) {
+	tmpDir := t.TempDir()
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	nSender, err := NewNode(NodeConfig{
+		NodeID:       "unsol-sender",
+		PoolID:       "pool-u",
+		StorageDir:   filepath.Join(tmpDir, "sender"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode sender failed: %v", err)
+	}
+	defer nSender.Close()
+
+	// Receiver 1: DisableUnsolicitedChunks = true
+	nBlocked, err := NewNode(NodeConfig{
+		NodeID:                   "unsol-blocked",
+		PoolID:                   "pool-u",
+		StorageDir:               filepath.Join(tmpDir, "blocked"),
+		StorageQuota:             10 * 1024 * 1024,
+		SignalingURL:             hub.URL(),
+		DisableUnsolicitedChunks: true,
+	})
+	if err != nil {
+		t.Fatalf("NewNode blocked failed: %v", err)
+	}
+	defer nBlocked.Close()
+
+	// Receiver 2: Allow unsolicited up to 100 bytes/peer
+	nCapped, err := NewNode(NodeConfig{
+		NodeID:                          "unsol-capped",
+		PoolID:                          "pool-u",
+		StorageDir:                      filepath.Join(tmpDir, "capped"),
+		StorageQuota:                    10 * 1024 * 1024,
+		SignalingURL:                    hub.URL(),
+		MaxUnsolicitedChunkBytesPerPeer: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewNode capped failed: %v", err)
+	}
+	defer nCapped.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := nSender.Start(ctx); err != nil {
+		t.Fatalf("sender Start failed: %v", err)
+	}
+	if err := nBlocked.Start(ctx); err != nil {
+		t.Fatalf("blocked Start failed: %v", err)
+	}
+	if err := nCapped.Start(ctx); err != nil {
+		t.Fatalf("capped Start failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// Test DisableUnsolicitedChunks: unsolicited push must NOT persist
+	if _, err := nSender.ConnectPeer(ctx, "unsol-blocked"); err != nil {
+		t.Fatalf("ConnectPeer to blocked failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	p1 := []byte("blocked unsolicited payload")
+	h1 := sha256.Sum256(p1)
+	cid1 := hex.EncodeToString(h1[:])
+	_, _ = nSender.PutBlob(cid1, bytes.NewReader(p1))
+	if err := nSender.TransferChunk(ctx, "unsol-blocked", cid1); err != nil {
+		t.Fatalf("TransferChunk to blocked failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if nBlocked.HasBlob(cid1) {
+		t.Fatalf("expected DisableUnsolicitedChunks=true to reject unsolicited chunk write")
+	}
+
+	// Test MaxUnsolicitedChunkBytesPerPeer = 100: 60-byte chunk accepted, second 60-byte chunk rejected
+	if _, err := nSender.ConnectPeer(ctx, "unsol-capped"); err != nil {
+		t.Fatalf("ConnectPeer to capped failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	pSmall := bytes.Repeat([]byte("a"), 60)
+	hSmall := sha256.Sum256(pSmall)
+	cidSmall := hex.EncodeToString(hSmall[:])
+	_, _ = nSender.PutBlob(cidSmall, bytes.NewReader(pSmall))
+	if err := nSender.TransferChunk(ctx, "unsol-capped", cidSmall); err != nil {
+		t.Fatalf("TransferChunk small failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if !nCapped.HasBlob(cidSmall) {
+		t.Fatalf("expected first 60-byte chunk under 100-byte cap to be stored")
+	}
+
+	pOver := bytes.Repeat([]byte("b"), 60)
+	hOver := sha256.Sum256(pOver)
+	cidOver := hex.EncodeToString(hOver[:])
+	_, _ = nSender.PutBlob(cidOver, bytes.NewReader(pOver))
+	if err := nSender.TransferChunk(ctx, "unsol-capped", cidOver); err != nil {
+		t.Fatalf("TransferChunk over cap failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if nCapped.HasBlob(cidOver) {
+		t.Fatalf("expected second 60-byte chunk exceeding 100-byte cap to be rejected")
+	}
+}
+
+func TestNode_GetFleetNodesReconcilesOfflinePeers(t *testing.T) {
+	tmpDir := t.TempDir()
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "fleet-n1",
+		PoolID:       "pool-f",
+		StorageDir:   filepath.Join(tmpDir, "n1"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode n1 failed: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "fleet-n2",
+		PoolID:       "pool-f",
+		StorageDir:   filepath.Join(tmpDir, "n2"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode n2 failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("n1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("n2 Start failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	nodes, err := n1.GetFleetNodes(ctx)
+	if err != nil {
+		t.Fatalf("GetFleetNodes failed: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0] != "fleet-n2" {
+		t.Fatalf("expected [fleet-n2], got %v", nodes)
+	}
+
+	// Close n2 and verify GetFleetNodes reconciles and removes fleet-n2 even if event missed
+	_ = n2.Close()
+	time.Sleep(150 * time.Millisecond)
+	nodesAfter, err := n1.GetFleetNodes(ctx)
+	if err != nil {
+		t.Fatalf("GetFleetNodes after close failed: %v", err)
+	}
+	if len(nodesAfter) != 0 {
+		t.Fatalf("expected empty fleet after n2 closed, got %v", nodesAfter)
+	}
+}
+
 

@@ -63,12 +63,25 @@ func NewTracker() *Tracker {
 }
 
 // RecordConnection records or updates the path metrics of a peer connection.
+// A copy of PathMetrics is stored so callers never share mutable pointers with Tracker.
 func (t *Tracker) RecordConnection(m *PathMetrics) {
+	if m == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.metrics[m.PeerID] = m
+	cp := *m
+	t.metrics[m.PeerID] = &cp
 	t.knownCGNATs[m.PeerID] = m.IsBehindCGNAT
+}
+
+// RemoveConnection removes active connection metrics for a disconnected or evicted peer.
+func (t *Tracker) RemoveConnection(peerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.metrics, peerID)
 }
 
 // RecordDataTransfer increments bytes sent and received for a peer.

@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -22,16 +21,20 @@ import (
 // Manager manages WebRTC API lifecycle, peer connection establishment,
 // and signaling coordination.
 type Manager struct {
-	mu           sync.Mutex
-	cfg          Config
-	api          *webrtc.API
-	sigClient    *signaling.Client
-	tracker      *instrumentation.Tracker
-	connections  map[string]*PeerConnection // sessionID -> PeerConnection
-	peerSessions map[string]string          // remotePeerID -> sessionID
-	onNewConn    func(*PeerConnection)
-	closed       bool
+	mu                sync.Mutex
+	cfg               Config
+	api               *webrtc.API
+	sigClient         *signaling.Client
+	tracker           *instrumentation.Tracker
+	connections       map[string]*PeerConnection       // sessionID -> PeerConnection
+	peerSessions      map[string]string                // remotePeerID -> sessionID
+	pendingCandidates map[string][]webrtc.ICECandidateInit // sessionID -> early ICE candidates
+	remoteDescSet     map[string]bool                  // sessionID -> whether SetRemoteDescription succeeded
+	onNewConn         func(*PeerConnection)
+	closed            bool
 }
+
+const maxPendingCandidatesPerSession = 64
 
 // NewManager creates a new WebRTC transport manager with PDF-specified engine tuning.
 func NewManager(cfg Config, sigClient *signaling.Client, tracker *instrumentation.Tracker) (*Manager, error) {
@@ -61,12 +64,14 @@ func NewManager(cfg Config, sigClient *signaling.Client, tracker *instrumentatio
 	}
 
 	m := &Manager{
-		cfg:          cfg,
-		api:          api,
-		sigClient:    sigClient,
-		tracker:      tracker,
-		connections:  make(map[string]*PeerConnection),
-		peerSessions: make(map[string]string),
+		cfg:               cfg,
+		api:               api,
+		sigClient:         sigClient,
+		tracker:           tracker,
+		connections:       make(map[string]*PeerConnection),
+		peerSessions:      make(map[string]string),
+		pendingCandidates: make(map[string][]webrtc.ICECandidateInit),
+		remoteDescSet:     make(map[string]bool),
 	}
 
 	return m, nil
@@ -86,11 +91,19 @@ func (m *Manager) GetTracker() *instrumentation.Tracker {
 
 func (m *Manager) removeSession(peerID, sessionID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	removedActivePeer := false
 	if cur, ok := m.peerSessions[peerID]; ok && cur == sessionID {
 		delete(m.peerSessions, peerID)
+		removedActivePeer = true
 	}
 	delete(m.connections, sessionID)
+	delete(m.pendingCandidates, sessionID)
+	delete(m.remoteDescSet, sessionID)
+	m.mu.Unlock()
+
+	if removedActivePeer && m.tracker != nil {
+		m.tracker.RemoveConnection(peerID)
+	}
 }
 
 func (m *Manager) getSignalingClient() *signaling.Client {
@@ -339,23 +352,12 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 		})
 	}
 
-	// Fast Fallback Ladder wait with context
-	fallbackCtx, cancelFallback := context.WithTimeout(ctx, m.FallbackTimeout())
-	defer cancelFallback()
-
-	connErr := conn.WaitConnected(fallbackCtx)
-	if connErr != nil {
-		// If timeout reached before direct connection converged, connection can either
-		// continue waiting or activate relay fallback
-		if errors.Is(connErr, context.DeadlineExceeded) {
-			// Wait on overall context if direct connection is still progressing
-			connErr = conn.WaitConnected(ctx)
-		}
-		if connErr != nil {
-			m.removeSession(targetPeerID, sessionID)
-			_ = conn.Close()
-			return nil, connErr
-		}
+	// Wait directly on ctx for WebRTC ICE/DTLS convergence.
+	// Note: pkg/relay (ContributorRelay / EmbeddedTURN) is standalone and not auto-invoked here.
+	if err := conn.WaitConnected(ctx); err != nil {
+		m.removeSession(targetPeerID, sessionID)
+		_ = conn.Close()
+		return nil, fmt.Errorf("webrtc ICE connection to %s failed: %w", targetPeerID, err)
 	}
 
 	if err := conn.WaitChannelsReady(ctx); err != nil {
@@ -476,6 +478,20 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 		return err
 	}
 
+	m.mu.Lock()
+	m.remoteDescSet[sdp.SessionID] = true
+	queuedCandidates := m.pendingCandidates[sdp.SessionID]
+	delete(m.pendingCandidates, sdp.SessionID)
+	m.mu.Unlock()
+
+	for _, init := range queuedCandidates {
+		if err := pc.AddICECandidate(init); err != nil {
+			m.removeSession(remotePeerID, sdp.SessionID)
+			_ = conn.Close()
+			return err
+		}
+	}
+
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		m.removeSession(remotePeerID, sdp.SessionID)
@@ -520,23 +536,45 @@ func (m *Manager) handleAnswer(sdp protocol.SDPPayload) error {
 		SDP:  sdp.SDP,
 	}
 
-	return conn.PC.SetRemoteDescription(answer)
+	if err := conn.PC.SetRemoteDescription(answer); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.remoteDescSet[sdp.SessionID] = true
+	queuedCandidates := m.pendingCandidates[sdp.SessionID]
+	delete(m.pendingCandidates, sdp.SessionID)
+	m.mu.Unlock()
+
+	for _, init := range queuedCandidates {
+		if err := conn.PC.AddICECandidate(init); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) handleCandidate(cand protocol.ICECandidatePayload) error {
-	m.mu.Lock()
-	conn, ok := m.connections[cand.SessionID]
-	m.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("unknown session: %s", cand.SessionID)
-	}
-
 	init := webrtc.ICECandidateInit{
 		Candidate:     cand.Candidate,
 		SDPMid:        &cand.SDPMid,
 		SDPMLineIndex: &cand.SDPMLineIndex,
 	}
+
+	m.mu.Lock()
+	conn, ok := m.connections[cand.SessionID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("unknown session: %s", cand.SessionID)
+	}
+	if !m.remoteDescSet[cand.SessionID] {
+		if len(m.pendingCandidates[cand.SessionID]) < maxPendingCandidatesPerSession {
+			m.pendingCandidates[cand.SessionID] = append(m.pendingCandidates[cand.SessionID], init)
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
 
 	return conn.PC.AddICECandidate(init)
 }
@@ -577,7 +615,13 @@ func (m *Manager) DisconnectPeer(peerID string) error {
 	conn, hasConn := m.connections[sessionID]
 	delete(m.peerSessions, peerID)
 	delete(m.connections, sessionID)
+	delete(m.pendingCandidates, sessionID)
+	delete(m.remoteDescSet, sessionID)
 	m.mu.Unlock()
+
+	if m.tracker != nil {
+		m.tracker.RemoveConnection(peerID)
+	}
 
 	if hasConn && conn != nil {
 		return conn.Close()
@@ -594,12 +638,24 @@ func (m *Manager) Close() error {
 	}
 	m.closed = true
 
+	peerIDs := make([]string, 0, len(m.peerSessions))
+	for peerID := range m.peerSessions {
+		peerIDs = append(peerIDs, peerID)
+	}
 	for _, conn := range m.connections {
 		_ = conn.Close()
 	}
 	m.connections = make(map[string]*PeerConnection)
 	m.peerSessions = make(map[string]string)
+	m.pendingCandidates = make(map[string][]webrtc.ICECandidateInit)
+	m.remoteDescSet = make(map[string]bool)
 	m.mu.Unlock()
+
+	if m.tracker != nil {
+		for _, peerID := range peerIDs {
+			m.tracker.RemoveConnection(peerID)
+		}
+	}
 
 	return nil
 }

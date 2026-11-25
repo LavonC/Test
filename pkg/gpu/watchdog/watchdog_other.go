@@ -4,6 +4,7 @@ package watchdog
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -14,6 +15,13 @@ func isInputTelemetrySupported() bool {
 
 // Start begins the polling loop on Linux/macOS.
 func (w *Watchdog) Start() {
+	w.mu.Lock()
+	if w.started || w.state == StateStopped {
+		w.mu.Unlock()
+		return
+	}
+	w.started = true
+	w.mu.Unlock()
 	go w.pollLoop()
 }
 
@@ -61,10 +69,37 @@ func (w *Watchdog) pollLoop() {
 }
 
 func (w *Watchdog) queryLinuxBattery() bool {
-	// Check sysfs power_supply status
-	data, err := os.ReadFile("/sys/class/power_supply/AC/online")
-	if err == nil {
-		return strings.TrimSpace(string(data)) == "0"
+	return isLinuxOnBattery("/sys/class/power_supply")
+}
+
+func isLinuxOnBattery(baseDir string) bool {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return false
 	}
-	return false
+	foundMains := false
+	anyOnline := false
+	for _, entry := range entries {
+		supplyDir := filepath.Join(baseDir, entry.Name())
+		typeData, err := os.ReadFile(filepath.Join(supplyDir, "type"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(typeData)) != "Mains" {
+			continue
+		}
+		foundMains = true
+		onlineData, err := os.ReadFile(filepath.Join(supplyDir, "online"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(onlineData)) == "1" {
+			anyOnline = true
+			break
+		}
+	}
+	if !foundMains {
+		return false
+	}
+	return !anyOnline
 }

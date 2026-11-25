@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -71,15 +72,11 @@ type DiskBlobStore struct {
 	closed     bool
 }
 
-// validateID ensures an ID contains no directory traversal sequences or invalid characters.
+var validBlobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+// validateID ensures an ID conforms to the strict allowlist ^[a-zA-Z0-9_-]{1,128}$.
 func validateID(id string) error {
-	if id == "" {
-		return ErrInvalidID
-	}
-	if strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
-		return ErrInvalidID
-	}
-	if filepath.Base(id) != id {
+	if !validBlobIDRegex.MatchString(id) {
 		return ErrInvalidID
 	}
 	return nil
@@ -142,7 +139,7 @@ func (s *DiskBlobStore) scanExisting() error {
 
 		sha := ""
 		if len(id) == 64 && isHex(id) {
-			sha = id
+			sha = strings.ToLower(id)
 		} else {
 			f, err := os.Open(filepath.Join(s.dataDir, id))
 			if err == nil {
@@ -209,12 +206,20 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 	// Stream with bounded quota monitoring: read at most remaining + 1 bytes
 	limitR := io.LimitReader(r, remaining+1)
 	written, err := io.Copy(writer, limitR)
-	_ = tmpFile.Close()
 	if err != nil {
+		_ = tmpFile.Close()
 		return 0, fmt.Errorf("failed during write: %w", err)
 	}
 	if written > remaining {
+		_ = tmpFile.Close()
 		return 0, fmt.Errorf("%w: input exceeds available quota headroom (%d bytes)", ErrQuotaExceeded, remaining)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return 0, fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	calculatedHash := hex.EncodeToString(hasher.Sum(nil))
@@ -238,7 +243,7 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 
 	// If ID looks like a SHA256 hash (64 hex characters), verify content-addressing
 	if len(id) == 64 && isHex(id) {
-		if calculatedHash != id {
+		if calculatedHash != strings.ToLower(id) {
 			return 0, fmt.Errorf("%w: expected %s, got %s", ErrChecksumMismatch, id, calculatedHash)
 		}
 	}
@@ -403,7 +408,7 @@ func (s *DiskBlobStore) Verify(id string) (bool, error) {
 	if info.SHA256 != "" && computed != info.SHA256 {
 		return false, nil
 	}
-	if len(id) == 64 && isHex(id) && computed != id {
+	if len(id) == 64 && isHex(id) && computed != strings.ToLower(id) {
 		return false, nil
 	}
 	if info.SHA256 == "" && len(id) != 64 {

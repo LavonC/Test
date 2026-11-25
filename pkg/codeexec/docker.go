@@ -137,7 +137,7 @@ func (e *DockerExecutor) Execute(parent context.Context, req Request) Response {
 		resp.DurationMs = time.Since(started).Milliseconds()
 		return resp
 	}
-	args := e.buildDockerArgs(containerName, absDir, image, command)
+	args := e.buildDockerArgsForLang(req.Language, containerName, absDir, image, command)
 	cmd := exec.CommandContext(jobCtx, "docker", args...)
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	stdout := newCappedBuffer(MaxOutputBytes)
@@ -146,12 +146,14 @@ func (e *DockerExecutor) Execute(parent context.Context, req Request) Response {
 	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
-	// A timeout can terminate the Docker CLI before it can remove the container.
-	// Explicitly remove this uniquely named job container with a short independent
-	// context so timed-out programs do not continue consuming resources.
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	_ = exec.CommandContext(cleanupCtx, "docker", "rm", "-f", containerName).Run()
-	cleanupCancel()
+	if runErr != nil {
+		// A timeout or failure can terminate the Docker CLI before it removes the container.
+		// Explicitly remove this uniquely named job container with a short independent
+		// context so timed-out programs do not continue consuming resources.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = exec.CommandContext(cleanupCtx, "docker", "rm", "-f", containerName).Run()
+		cleanupCancel()
+	}
 
 	resp.Stdout = stdout.String()
 	resp.Stderr = stderr.String()
@@ -178,10 +180,20 @@ func (e *DockerExecutor) Execute(parent context.Context, req Request) Response {
 }
 
 func (e *DockerExecutor) buildDockerArgs(containerName, absDir, image, command string) []string {
+	return e.buildDockerArgsForLang("cpp", containerName, absDir, image, command)
+}
+
+func (e *DockerExecutor) buildDockerArgsForLang(language, containerName, absDir, image, command string) []string {
+	tmpfsMount := "/tmp:rw,noexec,nosuid,nodev,size=64m"
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "c", "cpp":
+		tmpfsMount = "/tmp:rw,exec,nosuid,nodev,size=64m"
+	}
 	return []string{
 		"run", "--rm", "-i",
 		"--name", containerName,
 		"--network", "none",
+		"--ipc", "none",
 		"--memory", e.cfg.MemoryLimit,
 		"--memory-swap", e.cfg.MemoryLimit,
 		"--cpus", e.cfg.CPULimit,
@@ -189,7 +201,7 @@ func (e *DockerExecutor) buildDockerArgs(containerName, absDir, image, command s
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges:true",
 		"--read-only",
-		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=64m",
+		"--tmpfs", tmpfsMount,
 		"--ulimit", "fsize=16777216:16777216",
 		"--mount", "type=bind,source=" + absDir + ",target=/src,readonly",
 		"--workdir", "/tmp",

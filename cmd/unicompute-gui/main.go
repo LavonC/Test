@@ -39,6 +39,7 @@ func main() {
 	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated peer IDs allowed to submit code jobs (* for any)")
 	enableRemoteShell := flag.Bool("enable-remote-shell", false, "Enable remote shell execution on this node (requires allowlist)")
 	shellAllowlist := flag.String("shell-allowlist", "", "Comma-separated peer IDs allowed to execute remote shell commands")
+	allowUnsolicitedChunks := flag.Bool("allow-unsolicited-chunks", false, "Allow peers to push unsolicited chunks to local storage (capped at 64 MiB/peer)")
 	headless := flag.Bool("headless", false, "Run in headless server mode without launching desktop window")
 	port := flag.Int("port", 23080, "Port for GUI web server")
 	listenHost := flag.String("listen", "127.0.0.1", "Host interface to bind the GUI server to (use 0.0.0.0 for LAN)")
@@ -103,9 +104,12 @@ func main() {
 		AuthToken:         *authToken,
 		STUNServersV4:     stunListV4,
 		STUNServersV6:     stunListV6,
-		FallbackTimeout:   2000 * time.Millisecond,
-		EnableRemoteShell: *enableRemoteShell,
-		ShellAllowlist:    shellList,
+		FallbackTimeout:                 2000 * time.Millisecond,
+		EnableRemoteShell:               *enableRemoteShell,
+		ShellAllowlist:                  shellList,
+		AllowUnsolicitedChunks:          *allowUnsolicitedChunks,
+		DisableUnsolicitedChunks:        !*allowUnsolicitedChunks,
+		MaxUnsolicitedChunkBytesPerPeer: node.DefaultMaxUnsolicitedChunkBytesPerPeer,
 	}
 
 	n, err := node.NewNode(nodeCfg)
@@ -213,7 +217,15 @@ func main() {
 	}
 	actualPort := listener.Addr().(*net.TCPAddr).Port
 	state.SetActivePort(actualPort)
-	guiURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
+	displayHost := *listenHost
+	if displayHost == "" || displayHost == "0.0.0.0" {
+		displayHost = "127.0.0.1"
+	} else if displayHost == "::" {
+		displayHost = "[::1]"
+	} else if strings.Contains(displayHost, ":") && !strings.HasPrefix(displayHost, "[") {
+		displayHost = "[" + displayHost + "]"
+	}
+	guiURL := fmt.Sprintf("http://%s:%d", displayHost, actualPort)
 	desktopURL := fmt.Sprintf("%s/#token=%s", guiURL, sessionToken)
 
 	srv := &http.Server{Handler: mux}

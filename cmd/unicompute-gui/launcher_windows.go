@@ -60,7 +60,7 @@ func launchDesktopWindow(url string) (*exec.Cmd, error) {
 	}
 
 	// Fallback to default shell handler if no Chromium browser path matched
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf("Start-Process '%s'", url))
+	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

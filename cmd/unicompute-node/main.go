@@ -35,6 +35,7 @@ func main() {
 	authToken := flag.String("auth-token", os.Getenv("UNICOMPUTE_AUTH_TOKEN"), "Coordinator signaling authentication token")
 	enableRemoteShell := flag.Bool("enable-remote-shell", false, "Enable remote shell execution on this node (requires allowlist)")
 	shellAllowlist := flag.String("shell-allowlist", "", "Comma-separated peer IDs allowed to execute remote shell commands")
+	allowUnsolicitedChunks := flag.Bool("allow-unsolicited-chunks", false, "Allow peers to push unsolicited chunks to local storage (capped at 64 MiB/peer)")
 	stunServer := flag.String("stun", "stun.l.google.com:19302", "STUN server address (comma-separated for multiple)")
 	stunServer6 := flag.String("stun6", "", "IPv6 STUN server address (comma-separated for multiple)")
 	turnServer := flag.String("turn", "", "TURN server address (e.g., turn:relay.example.com:3478, comma-separated for multiple)")
@@ -166,9 +167,12 @@ func main() {
 		STUNServersV6:     stunListV6,
 		TURNServers:       turnConfigs,
 		RelayAddr:         *relayAddr,
-		FallbackTimeout:   2000 * time.Millisecond,
-		EnableRemoteShell: *enableRemoteShell,
-		ShellAllowlist:    shellList,
+		FallbackTimeout:                 2000 * time.Millisecond,
+		EnableRemoteShell:               *enableRemoteShell,
+		ShellAllowlist:                  shellList,
+		AllowUnsolicitedChunks:          *allowUnsolicitedChunks,
+		DisableUnsolicitedChunks:        !*allowUnsolicitedChunks,
+		MaxUnsolicitedChunkBytesPerPeer: node.DefaultMaxUnsolicitedChunkBytesPerPeer,
 	})
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to initialize node: %v\n", err)
@@ -328,6 +332,9 @@ func main() {
 	fmt.Println("\nInteractive Mode Active!")
 	fmt.Println("Type 'help' to see commands, or Ctrl+C to exit.")
 	fmt.Print("> ")
+
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
@@ -908,7 +915,12 @@ func main() {
 				fmt.Println("=====================================================================================")
 			case "quit", "exit":
 				fmt.Println("Exiting node...")
-				os.Exit(0)
+				cancel()
+				select {
+				case sigCh <- os.Interrupt:
+				default:
+				}
+				return
 			default:
 				fmt.Printf("Unknown command: %s. Type 'help' for command list.\n", cmd)
 			}
@@ -916,8 +928,6 @@ func main() {
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
 
 	log.Println("[INFO] Shutting down UniCompute node gracefully...")

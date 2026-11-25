@@ -1,3 +1,6 @@
+// Package relay provides standalone/legacy relay implementations (ContributorRelay and
+// EmbeddedTURN) for NAT traversal testing and dedicated relay nodes. These are standalone
+// packages and are not auto-invoked by transport.Manager.ConnectPeer.
 package relay
 
 import (

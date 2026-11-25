@@ -330,7 +330,7 @@ def create_document():
 
     add_p(
         "Specifically, Objective 1 encompasses: (1) full-lifecycle WebRTC peer transport with dual-channel SCTP multiplexing, "
-        "(2) dual-stack IPv4/IPv6 STUN probing and RFC 6598 CGNAT detection, (3) direct P2P hole punching with 2.0-second blind relay fallback, "
+        "(2) dual-stack IPv4/IPv6 STUN probing and RFC 6598 CGNAT detection, (3) direct P2P hole punching via Pion ICE (with standalone/legacy relay primitives in pkg/relay), "
         "(4) node-local content-addressed storage (CAS) enforcing hard quotas, atomic two-phase commits, and bit-rot scrubbing, (5) air-gapped "
         "containerized code execution with process resource envelopes, and (6) empirical verification of Invariant CP-1 (Data Plane Independence)."
     )
@@ -426,7 +426,7 @@ def create_document():
     add_h2("2.4 WebRTC DataChannels & High-Performance SCTP Transport")
     add_p(
         "WebRTC DataChannels (RFC 8831 [12] / RFC 8832 [13]) provide high-performance, bidirectional peer-to-peer data transport in userspace. DataChannels "
-        "encapsulate the Stream Control Transmission Protocol (SCTP, RFC 4960 [16]) over Datagram Transport Layer Security (DTLS 1.3, RFC 9147), which is "
+        "encapsulate the Stream Control Transmission Protocol (SCTP, RFC 4960 [16]) over Datagram Transport Layer Security (DTLS 1.2, pion/dtls/v2), which is "
         "in turn framed across UDP. This transport architecture provides critical capabilities for volunteer edge computing:"
     )
     add_bullet(
@@ -630,14 +630,14 @@ def create_document():
         bold_prefix="Flow Control & Backpressure: "
     )
     add_bullet(
-        "Direct ICE connectivity checks are bounded by a strict 2.0-second fallback ceiling. If direct UDP hole punching "
-        "does not succeed within 2.0 seconds, the manager immediately initiates fallback to an available relay.",
-        bold_prefix="2.0-Second Fast Fallback Ceiling: "
+        "Direct ICE connectivity checks wait directly on the caller context using configured STUN/TURN candidates. "
+        "FallbackTimeout governs the configured ICE wait/logging policy rather than invoking a separate non-TURN relay layer.",
+        bold_prefix="ICE Connectivity Waiting: "
     )
 
-    add_h2("3.4 Contributor Relay Subsystem (`pkg/relay`)")
+    add_h2("3.4 Standalone Contributor Relay Subsystem (`pkg/relay`)")
     add_p(
-        "When symmetric NAT firewalls on both sides block direct hole punching, traffic transitions to an embedded contributor relay:"
+        "The pkg/relay package provides standalone/legacy relay primitives (ContributorRelay and EmbeddedTURN) tested independently and not auto-invoked by transport.Manager.ConnectPeer:"
     )
     add_bullet(
         "The contributor relay implements a custom binary framing protocol identified by magic bytes 0x554E4952 ('UNIR') "
@@ -693,22 +693,22 @@ def create_document():
     )
     add_bullet(
         "The container root filesystem is mounted read-only (--read-only). Source files are bind-mounted read-only at /src. "
-        "Compilation and execution occur entirely within an ephemeral, in-memory 64 MB tmpfs mounted at /tmp with nosuid and nodev options.",
+        "Execution occurs within an ephemeral, in-memory 64 MB tmpfs mounted at /tmp with nosuid, nodev, and noexec for Python workloads (exec enabled only for C/C++ compilation).",
         bold_prefix="Read-Only Filesystem & In-Memory Tmpfs: "
     )
     add_bullet(
-        "All Linux kernel capabilities are stripped (--cap-drop ALL), setuid privilege escalations are blocked "
+        "All Linux kernel capabilities are stripped (--cap-drop ALL), IPC namespaces are isolated (--ipc=none), setuid privilege escalations are blocked "
         "(--security-opt no-new-privileges:true), and the process runs as unprivileged user nobody:nogroup (--user 65534:65534).",
         bold_prefix="Privilege Stripping: "
     )
     add_bullet(
-        "Containers are restricted to 128 MB RAM with swap disabled (--memory 128m --memory-swap 128m), CPU usage is capped "
+        "Containers are restricted to 256 MB RAM with swap disabled (--memory 256m --memory-swap 256m), CPU usage is capped "
         "at 1.0 core (--cpus 1.0), processes are limited to 64 threads (--pids-limit 64), and output file sizes are limited to 16 MB (--ulimit fsize).",
         bold_prefix="Strict Operational Resource Envelopes: "
     )
     add_bullet(
-        "Execution is bounded by a context timeout (1–30 seconds). If a job times out, the Docker CLI process is terminated "
-        "and an asynchronous forced removal command (docker rm -f <container_name>) is dispatched within an independent cleanup context, preventing orphan container leaks.",
+        "Execution is bounded by a context timeout (1–30 seconds). When a job exits with an error or times out, the Docker CLI process is terminated "
+        "and a forced removal command (docker rm -f <container_name>) is dispatched within an independent cleanup context, preventing orphan container leaks.",
         bold_prefix="Timeout & Orphan Container Cleanup: "
     )
     add_bullet(
@@ -767,13 +767,13 @@ def create_document():
         rows=[
             ["Primary Network Topology", "Star (Client-Server)", "P2P Overlay + Relay", "P2P (libp2p DHT)", "Mesh P2P + WSS Signaling"],
             ["NAT & Firewall Traversal", "None (Outbound HTTP only)", "Custom Relays", "libp2p AutoNAT / Relays", "Dual-Stack ICE + CGNAT Probe + DCUtR"],
-            ["Carrier-Grade NAT Support", "Not Supported", "Relay Fallback Only", "Circuit Relay Only", "Direct IPv6 Bypass + Blind Relay"],
-            ["Relay Protocol & Cost", "N/A (Central Server Bottleneck)", "Centralized Proxy Servers", "Public Circuit Relays", "UNIR Blind Relays (Peer-Contributed)"],
+            ["Carrier-Grade NAT Support", "Not Supported", "Relay Fallback Only", "Circuit Relay Only", "Direct IPv6 Bypass + TURN/Standalone Relay"],
+            ["Relay Protocol & Cost", "N/A (Central Server Bottleneck)", "Centralized Proxy Servers", "Public Circuit Relays", "TURN + Standalone UNIR Relays (pkg/relay)"],
             ["Data Transport Layer", "HTTP / 1.1 or HTTP / 2", "TCP / Libp2p Streams", "Bitswap over TCP/QUIC", "WebRTC SCTP (16 MiB Buffer)"],
             ["Local Storage Abstraction", "Ephemeral Scratch Directory", "Temporary Host Folder", "Global IPFS Merkle DAG", "CAS Vault (Atomic Staging, Quotas)"],
             ["Bit-Rot & Integrity Audit", "Server-Side Verification", "None on Local Disk", "Merkle DAG Hash Check", "Automated Local SHA-256 Scrubbing"],
             ["Execution Sandbox Type", "Unsandboxed Process", "Heavy Hyper-V / Docker VM", "Server Docker Containers", "Air-Gapped Docker (--network none)"],
-            ["Host Resource Footprint", "Minimal (<20 MB RAM)", "Heavy (>1.8 GB Idle RAM)", "Moderate (~500 MB RAM)", "Lightweight (128 MB RAM Cap)"],
+            ["Host Resource Footprint", "Minimal (<20 MB RAM)", "Heavy (>1.8 GB Idle RAM)", "Moderate (~500 MB RAM)", "Lightweight (256 MB RAM Cap)"],
             ["Windows Laptop Readiness", "Native Win32 Service", "Requires BIOS VT-x & Admin", "Linux Servers Only", "Native Win32 Binaries, Zero-Admin"],
             ["Control Plane Independence", "Zero (Fails if Server Dies)", "Tied to Blockchain / Hub", "DHT Lookup Dependent", "Complete (Invariant CP-1 Proven)"]
         ],
@@ -790,12 +790,12 @@ def create_document():
     add_bullet(
         "Golem requires full Linux virtual machines on Windows hosts, necessitating hardware virtualization enabled in BIOS, "
         "administrative installation rights, and over 1.8 GB of idle memory. Objective 1 runs as a portable, CGO-free Win32 executable that dispatches "
-        "tasks into lightweight containers bounded by strict memory caps (128 MB) and 1.0 CPU core, operating smoothly on everyday student laptops.",
+        "tasks into lightweight containers bounded by strict memory caps (256 MB) and 1.0 CPU core, operating smoothly on everyday student laptops.",
         bold_prefix="Versus Golem Network: "
     )
     add_bullet(
         "Bacalhau is designed for stationary, high-bandwidth Linux data centers running IPFS. When consumer laptops sleep or "
-        "close their lids, standard IPFS Bitswap discovery queries stall for minutes. Objective 1 implements an optimized 2.0-second fallback ceiling, "
+        "close their lids, standard IPFS Bitswap discovery queries stall for minutes. Objective 1 implements fast ICE connectivity checks, "
         "dual DataChannel multiplexing, and direct IPv6 hole punching tailored specifically for transient consumer edge networks.",
         bold_prefix="Versus Bacalhau / IPFS: "
     )

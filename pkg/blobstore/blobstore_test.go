@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -436,5 +437,64 @@ func TestBlobStore_Scrub(t *testing.T) {
 	info1, _ := store.Stat(cid1)
 	if info1.IsCorrupt {
 		t.Fatalf("healthy blob falsely marked corrupt")
+	}
+}
+
+func TestBlobStore_StrictIDAllowlistAndUppercaseSHA256(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewDiskBlobStore(Config{
+		RootDir:    tmpDir,
+		QuotaBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	badIDs := []string{
+		"",
+		"id'quote",
+		`id"doublequote`,
+		"id<tag>",
+		"id>angle",
+		"id with space",
+		"id\tcontrol",
+		"id\nnewline",
+		"id\x00null",
+		"id;semicolon",
+		"id&amp",
+		strings.Repeat("a", 129),
+	}
+
+	for _, id := range badIDs {
+		if _, err := store.Put(id, bytes.NewReader([]byte("x"))); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Put(%q) expected ErrInvalidID, got %v", id, err)
+		}
+		if _, err := store.Get(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Get(%q) expected ErrInvalidID, got %v", id, err)
+		}
+		if _, err := store.Verify(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Verify(%q) expected ErrInvalidID, got %v", id, err)
+		}
+		if err := store.Delete(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Delete(%q) expected ErrInvalidID, got %v", id, err)
+		}
+	}
+
+	// Valid uppercase 64-char SHA-256 hex ID must succeed cleanly
+	data := []byte("uppercase sha256 verification payload")
+	h := sha256.Sum256(data)
+	upperCID := strings.ToUpper(hex.EncodeToString(h[:]))
+
+	n, err := store.Put(upperCID, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Put with uppercase SHA-256 failed: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Fatalf("expected %d written, got %d", len(data), n)
+	}
+	valid, err := store.Verify(upperCID)
+	if err != nil || !valid {
+		t.Fatalf("Verify with uppercase SHA-256 failed: valid=%v, err=%v", valid, err)
 	}
 }

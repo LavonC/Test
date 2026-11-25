@@ -210,7 +210,7 @@ def generate_exact_3page_doc():
         "sandboxed worker execution fleet for UniCompute. It provides the core data plane while strictly isolating itself from higher-order "
         "distributed algorithms (multi-node Cauchy Reed-Solomon erasure coding, FastCDC chunk deduplication, client convergent encryption, and global "
         "task schedulers), which belong to Objectives 2–5. Specifically, Objective 1 owns: (1) full WebRTC P2P DataChannel lifecycle management, "
-        "(2) dual-stack NAT and Carrier-Grade NAT (CGNAT) traversal, (3) direct UDP hole punching with blind contributor relay fallback, "
+        "(2) dual-stack NAT and Carrier-Grade NAT (CGNAT) traversal, (3) direct UDP hole punching over Pion ICE (with standalone/legacy pkg/relay primitives), "
         "(4) node-local content-addressed storage with byte quotas and atomic renames, (5) air-gapped container execution, and (6) empirical "
         "proof of Invariant CP-1 (complete data plane autonomy under coordinator failure).",
         bold_prefix="Scope and Separation of Concerns: "
@@ -241,7 +241,7 @@ def generate_exact_3page_doc():
         "spare network capacity as blind, opaque TCP forwarders. Relays pair peers via 128-bit cryptographic tokens without inspecting or decrypting payloads."
     )
     add_p(
-        "Transport across established links uses WebRTC DataChannels (RFC 8831 [13]), encapsulating SCTP (RFC 4960 [14]) over DTLS 1.3. "
+        "Transport across established links uses WebRTC DataChannels (RFC 8831 [13]), encapsulating SCTP (RFC 4960 [14]) over DTLS 1.2 (pion/dtls/v2). "
         "To prevent Head-of-Line blocking, Objective 1 multiplexes two independent channels: an ordered 'chunk' stream for storage blobs and a low-latency "
         "'stream' channel for interactive logs. Crucially, maximum transport throughput is governed by the Bandwidth-Delay Product (BDP) receive window: "
         "Throughput_max <= W_recv / RTT (RFC 1323 [15]). Standard WebRTC stacks configure a conservative 1 MiB SCTP receive buffer, which over a 100 ms WAN "
@@ -273,10 +273,10 @@ def generate_exact_3page_doc():
     )
     add_bullet("Connects over outbound WebSockets (port 443). To counter consumer NAT mapping timeouts (which RFC 4787 [11] and edge measurement literature [17] show occur within 30–60s), the client runs a 20s ping ticker, a 60s read deadline, and auto-reconnects with exponential backoff (1–8s).", bold_prefix="1. Resilient Signaling (pkg/signaling): ")
     add_bullet("Parses RFC 6598 CIDR ranges (100.64.0.0/10) and probes dual-stack STUN endpoints. To prevent RFC 8445 retransmission timeouts across unroutable candidates, nat.IsVirtualInterface() prunes Hyper-V, WSL2, Docker, and VPN adapters before gathering. Traps Win32 socket resets (WSAECONNRESET 10054 / WSAENETRESET 10052) as non-fatal warnings.", bold_prefix="2. Dual-Stack NAT Classifier (pkg/nat): ")
-    add_bullet("Configures Pion WebRTC with a 16 MiB SCTP buffer and 15s ICE keepalives. Chunks are framed into 60–128 KiB segments and gated by dc.BufferedAmount() against a 4 MiB threshold to prevent worker RAM bloat. Falls back to relays if direct hole punching stalls past 2.0s.", bold_prefix="3. WebRTC Data Transport (pkg/transport): ")
-    add_bullet("Implements the binary UNIR protocol (magic 0x554E4952, v0.01). Relays match communicating pairs via 128-bit random tokens, enforce contributor rate limits (RateLimitBytes), and execute zero-copy blind TCP splicing.", bold_prefix="4. Blind Contributor Relay (pkg/relay): ")
-    add_bullet("Manages disk storage with SHA-256 validation, path traversal sanitation (validateID), two-phase atomic staging, real-time byte quotas with instant deletion reclamation, and automated bit-rot scrubbing (Scrub()).", bold_prefix="5. Content-Addressed Vault (pkg/blobstore): ")
-    add_bullet("Executes untrusted C, C++, and Python workloads inside short-lived Docker containers: --network none (air-gap), --read-only root filesystem, --cap-drop ALL, --security-opt no-new-privileges:true, --memory 128m --memory-swap 128m, --cpus 1.0, --pids-limit 64, nobody UID 65534, ephemeral 64 MB tmpfs, 1–30s timeout with forced container cleanup (docker rm -f), and 3 KiB capped stdout/stderr buffers.", bold_prefix="6. Air-Gapped Code Sandbox (pkg/codeexec): ")
+    add_bullet("Configures Pion WebRTC with a 16 MiB SCTP buffer and 15s ICE keepalives. Chunks are framed into 60–128 KiB segments and gated by dc.BufferedAmount() against a 4 MiB threshold to prevent worker RAM bloat. Waits directly on Pion ICE/STUN/TURN connectivity checks.", bold_prefix="3. WebRTC Data Transport (pkg/transport): ")
+    add_bullet("Standalone/legacy package implementing the binary UNIR protocol (magic 0x554E4952, v0.01). Relays match communicating pairs via 128-bit random tokens, enforce contributor rate limits (RateLimitBytes), and execute zero-copy blind TCP splicing (not auto-invoked by ConnectPeer).", bold_prefix="4. Blind Contributor Relay (pkg/relay): ")
+    add_bullet("Manages disk storage with SHA-256 validation, strict path/ID allowlist validation (validateID), two-phase atomic staging with Sync(), real-time byte quotas with instant deletion reclamation, and automated bit-rot scrubbing (Scrub()).", bold_prefix="5. Content-Addressed Vault (pkg/blobstore): ")
+    add_bullet("Executes untrusted C, C++, and Python workloads inside short-lived Docker containers: --network none (air-gap), --read-only root filesystem, --cap-drop ALL, --ipc=none, --security-opt no-new-privileges:true, --memory 256m --memory-swap 256m, --cpus 1.0, --pids-limit 64, nobody UID 65534, ephemeral 64 MB tmpfs (noexec for Python), 1–30s timeout with error/timeout container cleanup (docker rm -f), and 3 KiB capped stdout/stderr buffers.", bold_prefix="6. Air-Gapped Code Sandbox (pkg/codeexec): ")
 
     add_h1("4. Invariant CP-1 Verification: Data Plane Independence", space_before=5)
     add_p(
@@ -345,10 +345,10 @@ def generate_exact_3page_doc():
         rows=[
             ["Network Architecture", "Client-Server (HTTP Ingestion)", "P2P Overlay + Proxy Relays", "P2P (libp2p DHT)", "Mesh P2P + WSS Signaling Hub"],
             ["NAT Traversal Model", "None (Outbound Poll Only)", "Custom Relays", "libp2p AutoNAT / Relays", "Dual-Stack ICE + CGNAT Probe + DCUtR"],
-            ["Carrier-Grade NAT Handling", "Unsupported", "Relay Fallback Only", "Circuit Relay Only", "Direct IPv6 Bypass + UNIR Blind Relay"],
+            ["Carrier-Grade NAT Handling", "Unsupported", "Relay Fallback Only", "Circuit Relay Only", "Direct IPv6 Bypass + TURN / Standalone Relay"],
             ["Data Transport Layer", "HTTP / 1.1 or HTTP / 2", "TCP / Libp2p Streams", "Bitswap over TCP/QUIC", "WebRTC SCTP (16 MiB Buffer)"],
             ["Local Storage Vault", "Ephemeral Scratchpad", "Temporary Host Folder", "Global IPFS Merkle DAG", "CAS Vault (Atomic Staging, Quotas)"],
-            ["Execution Sandbox", "Unsandboxed Process", "Heavy Hypervisor VM (>1.8 GB)", "Server Docker Containers", "Air-Gapped Docker (--network none, 128 MB)"],
+            ["Execution Sandbox", "Unsandboxed Process", "Heavy Hypervisor VM (>1.8 GB)", "Server Docker Containers", "Air-Gapped Docker (--network none, 256 MB)"],
             ["Control Plane Autonomy", "Zero (Fails if Server Dies)", "Tied to Blockchain / Hub", "DHT Lookup Dependent", "Complete (Invariant CP-1 Proven)"]
         ],
         col_widths=[1.5, 1.3, 1.4, 1.4, 1.4]

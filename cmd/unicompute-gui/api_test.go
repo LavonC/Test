@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -862,6 +864,114 @@ func TestAPI_CoordinatorSettings_ReconnectErrorReturnedAndTokenNeverEchoed(t *te
 	}
 	if errMsg, ok := respData["reconnect_error"].(string); !ok || errMsg == "" {
 		t.Errorf("expected non-empty reconnect_error when ReconnectSignaling fails, got %v", respData["reconnect_error"])
+	}
+}
+
+func TestAPI_MethodEnforcementAndQueryTokenRestriction(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+
+	// 1. GET on POST-only endpoints must return 405 Method Not Allowed
+	postOnlyPaths := []string{
+		"/api/storage/scrub",
+		"/api/shell/exec",
+		"/api/code/run",
+		"/api/gpu/run",
+		"/api/gpu/hipify",
+		"/api/storage/put",
+		"/api/storage/del",
+		"/api/coordinator/connect",
+		"/api/peer/connect",
+		"/api/peer/disconnect",
+		"/api/peer/ping",
+		"/api/peer/stream",
+	}
+	for _, p := range postOnlyPaths {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s expected 405 Method Not Allowed, got %d", p, rec.Code)
+		}
+	}
+
+	// 2. POST on GET-only endpoints must return 405 Method Not Allowed
+	getOnlyPaths := []string{
+		"/api/status",
+		"/api/coordinator/status",
+		"/api/fleet",
+		"/api/peers",
+		"/api/gpu",
+		"/api/storage/blobs",
+		"/api/storage/get",
+		"/api/samples",
+		"/api/events",
+	}
+	for _, p := range getOnlyPaths {
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s expected 405 Method Not Allowed, got %d", p, rec.Code)
+		}
+	}
+
+	// 3. Query-string ?token= must be rejected with 401 on REST endpoints
+	req := httptest.NewRequest(http.MethodGet, "/api/status?token="+token, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/status?token=<valid> expected 401 Unauthorized, got %d", rec.Code)
+	}
+}
+
+func TestAPI_LocalShellExecUsesSharedConcurrencyLimit(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	s.mu.Lock()
+	s.nodeConfig.EnableRemoteShell = true
+	s.mu.Unlock()
+
+	cmdStr := "sleep 0.4"
+	if runtime.GOOS == "windows" {
+		cmdStr = "Start-Sleep -Milliseconds 400"
+	}
+
+	token := s.SessionToken()
+	var wg sync.WaitGroup
+	busyCount := 0
+	var busyMu sync.Mutex
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload, _ := json.Marshal(map[string]string{
+				"peer_id": "local",
+				"command": cmdStr,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/shell/exec", bytes.NewReader(payload))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if strings.Contains(rec.Body.String(), "worker shell busy") {
+				busyMu.Lock()
+				busyCount++
+				busyMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if busyCount == 0 {
+		t.Fatalf("expected concurrent local /api/shell/exec requests > 2 to trigger shared 'worker shell busy' limit")
 	}
 }
 

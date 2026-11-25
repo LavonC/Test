@@ -13,6 +13,7 @@ import (
 )
 
 const MaxShellOutputBytes = 256 * 1024 // 256 KiB cap per stream
+const DefaultMaxConcurrentShells = 2
 
 type cappedBuffer struct {
 	mu        sync.Mutex
@@ -57,16 +58,33 @@ type Executor interface {
 }
 
 // SystemExecutor executes commands on the underlying operating system.
-type SystemExecutor struct{}
+type SystemExecutor struct {
+	slots chan struct{}
+}
 
-// NewSystemExecutor instantiates a cross-platform system shell executor.
+// NewSystemExecutor instantiates a cross-platform system shell executor with bounded concurrency.
 func NewSystemExecutor() *SystemExecutor {
-	return &SystemExecutor{}
+	return &SystemExecutor{
+		slots: make(chan struct{}, DefaultMaxConcurrentShells),
+	}
 }
 
 // Execute runs the requested command in a subshell, capturing stdout, stderr, exit code, and runtime.
 func (e *SystemExecutor) Execute(ctx context.Context, req ShellRequest) ShellResponse {
 	start := time.Now()
+
+	if e.slots != nil {
+		select {
+		case e.slots <- struct{}{}:
+			defer func() { <-e.slots }()
+		default:
+			return ShellResponse{
+				ExecID:   req.ExecID,
+				ExitCode: -1,
+				Error:    "worker shell busy",
+			}
+		}
+	}
 
 	timeoutMs := req.TimeoutMs
 	if timeoutMs <= 0 {

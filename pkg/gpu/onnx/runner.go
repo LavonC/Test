@@ -52,8 +52,6 @@ type SessionEngine struct {
 	config       ModelConfig
 	checkpoint   Checkpoint
 	isPaused     bool
-	pauseChan    chan struct{}
-	resumeChan   chan struct{}
 	preemptChan  chan string
 	currentStep  int64
 	currentEpoch int
@@ -68,8 +66,6 @@ func NewSessionEngine(cfg ModelConfig, initialCkpt Checkpoint) *SessionEngine {
 	return &SessionEngine{
 		config:       cfg,
 		checkpoint:   initialCkpt,
-		pauseChan:    make(chan struct{}, 1),
-		resumeChan:   make(chan struct{}, 1),
 		preemptChan:  make(chan string, 1),
 		currentStep:  initialCkpt.Step,
 		currentEpoch: initialCkpt.Epoch,
@@ -129,11 +125,13 @@ func (e *SessionEngine) RunTrainingLoop(
 	checkpointEvery int,
 	checkpointSavePath string,
 ) (TrainingResult, error) {
+	e.mu.Lock()
 	result := TrainingResult{
 		TotalSteps: e.currentStep,
 		FinalLoss:  e.currentLoss,
 		Simulated:  true,
 	}
+	e.mu.Unlock()
 
 	if checkpointEvery <= 0 {
 		checkpointEvery = 10
@@ -143,8 +141,10 @@ func (e *SessionEngine) RunTrainingLoop(
 		// Check for external preemption signal (watchdog or cancellation)
 		select {
 		case <-ctx.Done():
+			e.mu.Lock()
 			result.TotalSteps = e.currentStep
 			result.FinalLoss = e.currentLoss
+			e.mu.Unlock()
 			result.Preempted = true
 			result.PreemptReason = "context canceled: " + ctx.Err().Error()
 			hash, _ := e.flushCheckpoint(checkpointSavePath)
@@ -153,8 +153,10 @@ func (e *SessionEngine) RunTrainingLoop(
 			return result, ctx.Err()
 
 		case reason := <-e.preemptChan:
+			e.mu.Lock()
 			result.TotalSteps = e.currentStep
 			result.FinalLoss = e.currentLoss
+			e.mu.Unlock()
 			result.Preempted = true
 			result.PreemptReason = reason
 			hash, err := e.flushCheckpoint(checkpointSavePath)
@@ -169,6 +171,7 @@ func (e *SessionEngine) RunTrainingLoop(
 		}
 
 		// Perform simulated or real backward pass & SGD weight update
+		e.mu.Lock()
 		e.currentStep++
 		decay := 0.999
 		if e.currentLoss == 0 {
@@ -182,6 +185,7 @@ func (e *SessionEngine) RunTrainingLoop(
 			}
 			e.checkpoint.Weights[k] = weights
 		}
+		e.mu.Unlock()
 
 		// Save periodic checkpoint every N batches
 		if batch%checkpointEvery == 0 {
@@ -197,19 +201,39 @@ func (e *SessionEngine) RunTrainingLoop(
 	if err != nil {
 		return result, err
 	}
+	e.mu.Lock()
 	result.TotalSteps = e.currentStep
 	result.FinalLoss = e.currentLoss
 	result.CheckpointPath = checkpointSavePath
 	result.CheckpointHash = hash
-	result.UpdatedWeights = e.checkpoint.Weights
+	result.UpdatedWeights = cloneWeights(e.checkpoint.Weights)
+	e.mu.Unlock()
 
 	return result, nil
 }
 
+func cloneWeights(src map[string][]float32) map[string][]float32 {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string][]float32, len(src))
+	for k, v := range src {
+		cp := make([]float32, len(v))
+		copy(cp, v)
+		dst[k] = cp
+	}
+	return dst
+}
+
 func (e *SessionEngine) flushCheckpoint(path string) (string, error) {
+	e.mu.Lock()
 	e.checkpoint.Step = e.currentStep
 	e.checkpoint.Epoch = e.currentEpoch
 	e.checkpoint.Loss = e.currentLoss
 	e.checkpoint.Timestamp = time.Now()
-	return SaveCheckpoint(e.checkpoint, path)
+	ckptCopy := e.checkpoint
+	ckptCopy.Weights = cloneWeights(e.checkpoint.Weights)
+	ckptCopy.OptimizerState = cloneWeights(e.checkpoint.OptimizerState)
+	e.mu.Unlock()
+	return SaveCheckpoint(ckptCopy, path)
 }

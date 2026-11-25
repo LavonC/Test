@@ -3,10 +3,14 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -20,11 +24,12 @@ import (
 	"github.com/unicompute/obj1/pkg/instrumentation"
 	"github.com/unicompute/obj1/pkg/nat"
 	"github.com/unicompute/obj1/pkg/protocol"
-	"github.com/unicompute/obj1/pkg/relay"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/signaling"
 	"github.com/unicompute/obj1/pkg/transport"
 )
+
+const DefaultMaxUnsolicitedChunkBytesPerPeer int64 = 64 * 1024 * 1024 // 64 MiB cap per peer
 
 var _ Substrate = (*Node)(nil)
 
@@ -39,10 +44,13 @@ type NodeConfig struct {
 	STUNServersV4     []string
 	STUNServersV6     []string
 	TURNServers       []transport.TURNServerConfig
-	RelayAddr         string        // Optional contributor relay address
-	FallbackTimeout   time.Duration // Fast fallback threshold (default 2s)
-	EnableRemoteShell bool          // Opt-in gate for remote shell execution
-	ShellAllowlist    []string      // Explicit peer IDs allowed to execute shell commands
+	RelayAddr                       string        // Optional contributor relay address (deprecated)
+	FallbackTimeout                 time.Duration // ICE wait timeout configuration
+	EnableRemoteShell               bool          // Opt-in gate for remote shell execution
+	ShellAllowlist                  []string      // Explicit peer IDs allowed to execute shell commands
+	AllowUnsolicitedChunks          bool          // Explicit opt-in for unsolicited OnChunkReceived disk writes
+	DisableUnsolicitedChunks        bool          // Reject unsolicited OnChunkReceived disk writes unless AllowUnsolicitedChunks is true
+	MaxUnsolicitedChunkBytesPerPeer int64         // Per-peer byte cap for unsolicited chunk writes (default 64 MiB)
 }
 
 // Node represents a full Objective 1 peer node combining storage substrate,
@@ -55,8 +63,10 @@ type Node struct {
 	signaling   *signaling.Client
 	classifier  *nat.Classifier
 	natReport   *nat.NATReport
-	tracker     *instrumentation.Tracker
-	relayClient *relay.RelayClient
+	tracker          *instrumentation.Tracker
+	privKey          ed25519.PrivateKey
+	unsolicitedBytes map[string]int64
+	shellSlots       chan struct{}
 
 	onChunkRecv func(peerID, chunkID string, size int64)
 	onStreamMsg func(peerID string, data []byte)
@@ -99,6 +109,12 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to init blobstore: %w", err)
 	}
 
+	privKey, err := loadOrCreateIdentityKey(filepath.Join(cfg.StorageDir, "node_identity.key"))
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("failed to init node identity key: %w", err)
+	}
+
 	tracker := instrumentation.NewTracker()
 	classifier := nat.NewClassifier(cfg.STUNServersV4, cfg.STUNServersV6)
 
@@ -113,9 +129,11 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	n := &Node{
 		cfg:               cfg,
 		store:             store,
+		privKey:           privKey,
 		tracker:           tracker,
 		classifier:        classifier,
-		relayClient:       &relay.RelayClient{},
+		unsolicitedBytes:  make(map[string]int64),
+		shellSlots:        make(chan struct{}, remoteshell.DefaultMaxConcurrentShells),
 		fleetNodes:        make(map[string]bool),
 		shellExecutor:     remoteshell.NewSystemExecutor(),
 		shellAllowedPeers: shellAllowed,
@@ -177,13 +195,14 @@ func (n *Node) Start(ctx context.Context) error {
 	// 2. Connect to signaling hub (if URL provided)
 	var sigErr error
 	if n.cfg.SignalingURL != "" {
-		sigClient, err := signaling.NewClient(n.cfg.SignalingURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
+		sigClient, err := signaling.NewClientAsyncWithKey(n.cfg.SignalingURL, n.cfg.NodeID, n.privKey, n.handleSignalingEnvelope, n.cfg.AuthToken)
+		if sigClient != nil {
+			n.signaling = sigClient
+		}
 		if err != nil {
 			// Invariant CP-1: Signaling failure must not prevent transport/local initialization;
 			// capture warning/error to return after transport setup.
 			sigErr = fmt.Errorf("failed to connect to signaling hub: %w", err)
-		} else {
-			n.signaling = sigClient
 		}
 	}
 
@@ -229,14 +248,17 @@ func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
 
 	if env.Type == protocol.MsgPeerListResponse {
 		var list protocol.PeerListPayload
-		_ = json.Unmarshal(env.Payload, &list)
-		n.mu.Lock()
-		for _, id := range list.Nodes {
-			if id != n.cfg.NodeID {
-				n.fleetNodes[id] = true
+		if json.Unmarshal(env.Payload, &list) == nil {
+			n.mu.Lock()
+			fresh := make(map[string]bool, len(list.Nodes))
+			for _, id := range list.Nodes {
+				if id != n.cfg.NodeID {
+					fresh[id] = true
+				}
 			}
+			n.fleetNodes = fresh
+			n.mu.Unlock()
 		}
-		n.mu.Unlock()
 		return
 	}
 
@@ -252,8 +274,20 @@ func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
 func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 	peerID := pc.RemotePeerID
 
+	var connOnce sync.Once
 	var discOnce sync.Once
 	pc.SetOnStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			connOnce.Do(func() {
+				n.mu.RLock()
+				cb := n.onPeerConn
+				n.mu.RUnlock()
+				if cb != nil {
+					cb(peerID)
+				}
+			})
+			return
+		}
 		if state == webrtc.PeerConnectionStateDisconnected ||
 			state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateClosed {
@@ -287,6 +321,20 @@ func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 	})
 
 	pc.SetOnChunkReceived(func(chunkID string, data []byte) {
+		n.mu.Lock()
+		disabled := n.cfg.DisableUnsolicitedChunks && !n.cfg.AllowUnsolicitedChunks
+		capBytes := n.cfg.MaxUnsolicitedChunkBytesPerPeer
+		if capBytes <= 0 {
+			capBytes = DefaultMaxUnsolicitedChunkBytesPerPeer
+		}
+		used := n.unsolicitedBytes[peerID]
+		if disabled || used+int64(len(data)) > capBytes {
+			n.mu.Unlock()
+			return
+		}
+		n.unsolicitedBytes[peerID] = used + int64(len(data))
+		n.mu.Unlock()
+
 		// Save received chunk into local blob store
 		_, err := n.store.Put(chunkID, bytes.NewReader(data))
 		n.mu.RLock()
@@ -309,13 +357,6 @@ func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 			cb(peerID, data)
 		}
 	})
-
-	n.mu.RLock()
-	cb := n.onPeerConn
-	n.mu.RUnlock()
-	if cb != nil {
-		cb(peerID)
-	}
 }
 
 // ConnectPeer establishes a direct or relayed WebRTC data plane connection to a target peer.
@@ -459,6 +500,21 @@ func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
 
 			if exec == nil {
 				exec = remoteshell.NewSystemExecutor()
+			}
+
+			select {
+			case n.shellSlots <- struct{}{}:
+				defer func() { <-n.shellSlots }()
+			default:
+				errResp := remoteshell.ShellResponse{
+					ExecID:   req.ExecID,
+					ExitCode: -1,
+					Error:    "worker shell busy",
+				}
+				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
+					_ = n.SendStream(peerID, respBytes)
+				}
+				return
 			}
 
 			resp := exec.Execute(context.Background(), req)
@@ -720,13 +776,15 @@ func (n *Node) GetFleetNodes(ctx context.Context) ([]string, error) {
 
 	if sig != nil {
 		nodes, err := sig.QueryPeers(ctx)
-		if err == nil && len(nodes) > 0 {
+		if err == nil && nodes != nil {
 			n.mu.Lock()
+			fresh := make(map[string]bool, len(nodes))
 			for _, id := range nodes {
 				if id != n.cfg.NodeID {
-					n.fleetNodes[id] = true
+					fresh[id] = true
 				}
 			}
+			n.fleetNodes = fresh
 			n.mu.Unlock()
 		}
 	}
@@ -848,7 +906,7 @@ func (n *Node) ReconnectSignaling(ctx context.Context, newURL string) error {
 		return nil
 	}
 
-	sigClient, err := signaling.NewClient(newURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
+	sigClient, err := signaling.NewClientWithKey(newURL, n.cfg.NodeID, n.privKey, n.handleSignalingEnvelope, n.cfg.AuthToken)
 	if err != nil {
 		tm.SetSignalingClient(nil)
 		return fmt.Errorf("failed to connect to signaling hub: %w", err)
@@ -904,5 +962,27 @@ func (n *Node) CodeExecutorActive() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.codeExecutor != nil
+}
+
+func loadOrCreateIdentityKey(keyPath string) (ed25519.PrivateKey, error) {
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
+		if len(data) != ed25519.PrivateKeySize {
+			return nil, fmt.Errorf("invalid identity key length in %s: got %d bytes", keyPath, len(data))
+		}
+		return ed25519.PrivateKey(data), nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(keyPath, priv, 0600); err != nil {
+		return nil, err
+	}
+	return priv, nil
 }
 

@@ -52,7 +52,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initUI();
   initWebSocket();
-  loadStatus();
   pollFleetAndPeers();
   loadSamples();
   loadBlobs();
@@ -60,12 +59,12 @@ document.addEventListener('DOMContentLoaded', () => {
   loadWorkerSettings();
   loadTasks();
 
-  // Periodic polling every 3 seconds to keep fleet and metrics synchronized
+  // Periodic polling every 5 seconds to keep fleet and metrics synchronized without spamming Render
   setInterval(() => {
     pollFleetAndPeers();
     loadCoordinatorStatus();
     loadTasks();
-  }, 3000);
+  }, 5000);
 });
 
 function initUI() {
@@ -198,14 +197,9 @@ function initTitlebar() {
     });
   });
 
-  // Join Code Copy Action
-  const copyBtn = document.getElementById('btnCopyJoinCode');
-  copyBtn.addEventListener('click', copyJoinCode);
-
   document.getElementById('btnQuickWire').addEventListener('click', () => switchTab('tab-logs'));
   document.getElementById('btnQuickRefresh').addEventListener('click', () => {
     pollFleetAndPeers();
-    loadStatus();
     loadBlobs();
     loadCoordinatorStatus();
     loadTasks();
@@ -227,17 +221,6 @@ function initTitlebar() {
       document.exitFullscreen().catch(() => {});
     }
   });
-}
-
-function copyJoinCode() {
-  const code = document.getElementById('activeJoinCode').innerText;
-  navigator.clipboard.writeText(code).then(() => {
-    const btn = document.getElementById('btnCopyJoinCode');
-    btn.innerHTML = '<span class="material-symbols-outlined text-xs" style="color: #10b981;">check</span>';
-    setTimeout(() => {
-      btn.innerHTML = '<span class="material-symbols-outlined text-xs">content_copy</span>';
-    }, 1600);
-  }).catch(() => {});
 }
 
 function initTopologyControls() {
@@ -361,17 +344,6 @@ function initTopologyControls() {
     sel.value = selectedPeer.isLocal ? 'local' : selectedPeer.id;
     document.getElementById('codeStdinInput').value = 'whoami';
   });
-
-  // Incoming Modal Actions
-  document.getElementById('btnAcceptIncoming').addEventListener('click', () => {
-    document.getElementById('incomingModal').classList.add('hidden');
-    appendLog('P2P_ACCEPT', 'Accepted incoming WebRTC DataChannel connection.');
-    pollFleetAndPeers();
-  });
-  document.getElementById('btnDeclineIncoming').addEventListener('click', () => {
-    document.getElementById('incomingModal').classList.add('hidden');
-    appendLog('P2P_DECLINE', 'Declined connection request.');
-  });
 }
 
 function openPCInspector(node) {
@@ -494,7 +466,11 @@ function executeCodeSandbox() {
 
   const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
   const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.innerHTML = `<div class="term-row term-info">[DISPATCH] Executing ${language} job on ${targetLabel}...</div>`;
+  consoleEl.textContent = '';
+  const dispatchRow = document.createElement('div');
+  dispatchRow.className = 'term-row term-info';
+  dispatchRow.textContent = `[DISPATCH] Executing ${language} job on ${targetLabel}...`;
+  consoleEl.appendChild(dispatchRow);
   document.getElementById('codeMetricsBadge').textContent = 'EXECUTING...';
 
   const startTime = Date.now();
@@ -509,17 +485,38 @@ function executeCodeSandbox() {
     document.getElementById('lastExecDuration').textContent = `${res.duration_ms || elapsed} ms`;
     document.getElementById('codeMetricsBadge').textContent = res.exit_code === 0 ? 'EXIT 0' : `EXIT ${res.exit_code}`;
 
-    let html = `<div class="term-row term-success">=== Job ${res.job_id || 'code-task'} Finished in ${res.duration_ms || elapsed} ms ===</div>`;
-    if (res.stdout) html += `<div class="term-row">${escapeHTML(res.stdout)}</div>`;
-    if (res.stderr) html += `<div class="term-row term-err">${escapeHTML(res.stderr)}</div>`;
-    if (res.error) html += `<div class="term-row term-err">Execution Error: ${escapeHTML(res.error)}</div>`;
-    consoleEl.innerHTML = html;
+    consoleEl.textContent = '';
+    const hdr = document.createElement('div');
+    hdr.className = 'term-row term-success';
+    hdr.textContent = `=== Job ${res.job_id || 'code-task'} Finished in ${res.duration_ms || elapsed} ms ===`;
+    consoleEl.appendChild(hdr);
+    if (res.stdout) {
+      const rOut = document.createElement('div');
+      rOut.className = 'term-row';
+      rOut.textContent = res.stdout;
+      consoleEl.appendChild(rOut);
+    }
+    if (res.stderr) {
+      const rErr = document.createElement('div');
+      rErr.className = 'term-row term-err';
+      rErr.textContent = res.stderr;
+      consoleEl.appendChild(rErr);
+    }
+    if (res.error) {
+      const rMsg = document.createElement('div');
+      rMsg.className = 'term-row term-err';
+      rMsg.textContent = `Execution Error: ${res.error}`;
+      consoleEl.appendChild(rMsg);
+    }
 
     appendLog('CODEEXEC', `Task ${res.job_id || 'task'} on ${targetLabel}: exit ${res.exit_code} (${res.duration_ms || elapsed} ms)`);
     loadTasks();
   })
   .catch(err => {
-    consoleEl.innerHTML += `<div class="term-row term-err">Network error: ${err.message}</div>`;
+    const rNet = document.createElement('div');
+    rNet.className = 'term-row term-err';
+    rNet.textContent = `Network error: ${err.message}`;
+    consoleEl.appendChild(rNet);
   });
 }
 
@@ -529,7 +526,11 @@ function executeHostShell() {
 
   const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
   const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.innerHTML = `<div class="term-row term-info">[EXEC] Running host shell '${cmd}' on ${targetLabel}...</div>`;
+  consoleEl.textContent = '';
+  const execRow = document.createElement('div');
+  execRow.className = 'term-row term-info';
+  execRow.textContent = `[EXEC] Running host shell '${cmd}' on ${targetLabel}...`;
+  consoleEl.appendChild(execRow);
 
   fetch('/api/shell/exec', {
     method: 'POST',
@@ -538,14 +539,36 @@ function executeHostShell() {
   })
   .then(r => r.json())
   .then(res => {
-    let html = `<div class="term-row term-success">=== Shell Exit: ${res.exit_code} (${res.duration_ms} ms) ===</div>`;
-    if (res.stdout) html += `<div class="term-row">${escapeHTML(res.stdout)}</div>`;
-    if (res.stderr) html += `<div class="term-row term-err">${escapeHTML(res.stderr)}</div>`;
-    if (res.error) html += `<div class="term-row term-err">Error: ${escapeHTML(res.error)}</div>`;
-    consoleEl.innerHTML = html;
+    consoleEl.textContent = '';
+    const hdr = document.createElement('div');
+    hdr.className = 'term-row term-success';
+    hdr.textContent = `=== Shell Exit: ${res.exit_code} (${res.duration_ms} ms) ===`;
+    consoleEl.appendChild(hdr);
+    if (res.stdout) {
+      const rOut = document.createElement('div');
+      rOut.className = 'term-row';
+      rOut.textContent = res.stdout;
+      consoleEl.appendChild(rOut);
+    }
+    if (res.stderr) {
+      const rErr = document.createElement('div');
+      rErr.className = 'term-row term-err';
+      rErr.textContent = res.stderr;
+      consoleEl.appendChild(rErr);
+    }
+    if (res.error) {
+      const rMsg = document.createElement('div');
+      rMsg.className = 'term-row term-err';
+      rMsg.textContent = `Error: ${res.error}`;
+      consoleEl.appendChild(rMsg);
+    }
   })
   .catch(err => {
-    consoleEl.innerHTML = `<div class="term-row term-err">Shell execution failed: ${err.message}</div>`;
+    consoleEl.textContent = '';
+    const rErr = document.createElement('div');
+    rErr.className = 'term-row term-err';
+    rErr.textContent = `Shell execution failed: ${err.message}`;
+    consoleEl.appendChild(rErr);
   });
 }
 
@@ -585,18 +608,26 @@ function runHipifyAnalysis() {
     const list = document.getElementById('hipifyIssueList');
 
     panel.classList.remove('hidden');
+    list.textContent = '';
     if (res.report && res.report.target_amd_supported) {
       badge.textContent = 'PORTABLE TO AMD';
       badge.className = 'badge-emerald font-mono text-[10px]';
       count.textContent = `${res.replacements_made || 0} replacements made`;
-      list.innerHTML = `<div class="text-secondary font-mono text-xs">Ready for execution on AMD RDNA / ROCm hardware.</div>`;
+      const okDiv = document.createElement('div');
+      okDiv.className = 'text-secondary font-mono text-xs';
+      okDiv.textContent = 'Ready for execution on AMD RDNA / ROCm hardware.';
+      list.appendChild(okDiv);
     } else if (res.report) {
       badge.textContent = 'BLOCKED ON AMD';
       badge.className = 'badge-rose font-mono text-[10px]';
-      count.textContent = `${res.report.issues ? res.report.issues.length : 0} fatal blocker(s) detected`;
-      list.innerHTML = (res.report.issues || []).map(iss => `
-        <div class="text-rose font-mono text-xs">Line ${iss.line_number}: [${iss.construct}] ${iss.reason}</div>
-      `).join('');
+      const issues = res.report.issues || [];
+      count.textContent = `${issues.length} fatal blocker(s) detected`;
+      issues.forEach(iss => {
+        const issDiv = document.createElement('div');
+        issDiv.className = 'text-rose font-mono text-xs';
+        issDiv.textContent = `Line ${iss.line_number}: [${iss.construct}] ${iss.reason}`;
+        list.appendChild(issDiv);
+      });
     }
   });
 }
@@ -667,24 +698,55 @@ function loadBlobs() {
         casHash.textContent = topId.length > 14 ? topId.substring(0, 8) + '...' + topId.substring(topId.length - 4) : topId;
       }
 
+      tbody.textContent = '';
       if (!blobs || blobs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No blobs stored in local vault.</td></tr>`;
+        const emptyTr = document.createElement('tr');
+        const emptyTd = document.createElement('td');
+        emptyTd.colSpan = 4;
+        emptyTd.className = 'empty-cell';
+        emptyTd.textContent = 'No blobs stored in local vault.';
+        emptyTr.appendChild(emptyTd);
+        tbody.appendChild(emptyTr);
         return;
       }
-      tbody.innerHTML = blobs.map(b => {
+
+      blobs.forEach(b => {
         const bSize = b.size_bytes !== undefined ? b.size_bytes : (b.size || 0);
         const bDate = b.created_at || b.mod_time || new Date().toISOString();
-        return `
-        <tr>
-          <td><code class="text-primary font-mono text-xs">${b.id}</code></td>
-          <td>${(bSize / 1024).toFixed(1)} KiB</td>
-          <td>${new Date(bDate).toLocaleTimeString()}</td>
-          <td class="text-right space-x-2">
-            <button class="btn-tool-text text-secondary hover:text-white" onclick="viewBlob('${b.id}')">View</button>
-            <button class="btn-tool-text text-rose hover:text-white" onclick="deleteBlob('${b.id}')">Delete</button>
-          </td>
-        </tr>
-      `}).join('');
+
+        const tr = document.createElement('tr');
+
+        const tdId = document.createElement('td');
+        const codeEl = document.createElement('code');
+        codeEl.className = 'text-primary font-mono text-xs';
+        codeEl.textContent = b.id;
+        tdId.appendChild(codeEl);
+
+        const tdSize = document.createElement('td');
+        tdSize.textContent = `${(bSize / 1024).toFixed(1)} KiB`;
+
+        const tdTime = document.createElement('td');
+        tdTime.textContent = new Date(bDate).toLocaleTimeString();
+
+        const tdActions = document.createElement('td');
+        tdActions.className = 'text-right space-x-2';
+
+        const viewBtn = document.createElement('button');
+        viewBtn.type = 'button';
+        viewBtn.className = 'btn-tool-text text-secondary hover:text-white';
+        viewBtn.textContent = 'View';
+        viewBtn.addEventListener('click', () => viewBlob(b.id));
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn-tool-text text-rose hover:text-white';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', () => deleteBlob(b.id));
+
+        tdActions.append(viewBtn, delBtn);
+        tr.append(tdId, tdSize, tdTime, tdActions);
+        tbody.appendChild(tr);
+      });
     });
 }
 
@@ -752,14 +814,23 @@ function scrubStorageVault() {
       return r.json();
     })
     .then(res => {
+      out.textContent = '';
+      const span = document.createElement('span');
       if (!res.corrupted || res.corrupted.length === 0) {
-        out.innerHTML = '<span class="text-secondary">✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot.</span>';
+        span.className = 'text-secondary';
+        span.textContent = '✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot.';
       } else {
-        out.innerHTML = `<span class="text-rose">⚠ Warning: detected ${res.corrupted.length} corrupted blob(s)!</span>`;
+        span.className = 'text-rose';
+        span.textContent = `⚠ Warning: detected ${res.corrupted.length} corrupted blob(s)!`;
       }
+      out.appendChild(span);
     })
     .catch(err => {
-      out.innerHTML = `<span class="text-rose">⚠ Cryptographic scrub error: ${err.message}</span>`;
+      out.textContent = '';
+      const span = document.createElement('span');
+      span.className = 'text-rose';
+      span.textContent = `⚠ Cryptographic scrub error: ${err.message}`;
+      out.appendChild(span);
     });
 }
 
@@ -867,66 +938,65 @@ function handleLiveEvent(evt) {
   }
 }
 
+function applyStatusData(data) {
+  if (!data || !data.node_id) return;
+  lastStatusData = data;
+  currentLocalId = data.node_id;
+  document.getElementById('localNodeIdLabel').textContent = data.node_id;
+
+  if (data.nat) {
+    document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Unknown'}`;
+  }
+
+  // Update GPU Card (Objective 3)
+  if (data.gpu_profile) {
+    if (!data.gpu_profile.total_vram_bytes || data.gpu_profile.total_vram_bytes === 0) {
+      document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'CPU Fallback (No Dedicated GPU)';
+      document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'System'} • DirectML: ${data.gpu_profile.directml_supported}`;
+      document.getElementById('gpuVramLabel').textContent = '0 / 0 MB';
+      document.getElementById('gpuVramAlloc').textContent = '0 MB';
+      document.getElementById('gpuVramBar').style.width = '0%';
+    } else {
+      document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'Dedicated GPU';
+      document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'Hardware'} • DirectML: ${data.gpu_profile.directml_supported}`;
+      const totalMB = (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0);
+      const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : totalMB;
+      document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
+      document.getElementById('gpuVramAlloc').textContent = `${Math.max(0, totalMB - availMB)} MB`;
+      document.getElementById('gpuVramBar').style.width = `${totalMB > 0 ? ((totalMB - availMB) / totalMB) * 100 : 0}%`;
+    }
+
+    if (data.gpu_profile.temperature_c > 0) {
+      document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
+    }
+  }
+
+  // Update Watchdog Radar
+  if (data.watchdog) {
+    document.getElementById('wdPowerLabel').textContent = data.watchdog.on_battery ? 'Battery: UNPLUGGED' : 'AC Power: ONLINE';
+    document.getElementById('wdActivityLabel').textContent = data.watchdog.user_active ? 'User: ACTIVE' : 'User: IDLE';
+    document.getElementById('wdStateLabel').textContent = `State: ${data.watchdog.state.toUpperCase()}`;
+    document.getElementById('navWatchdogBadge').textContent = `${data.watchdog.state.toUpperCase()} (50ms)`;
+  }
+
+  // Storage
+  if (data.storage) {
+    const usedMB = (data.storage.used_bytes / (1024*1024)).toFixed(0);
+    const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
+    document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
+    document.getElementById('navStorageBadge').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
+    const pct = data.storage.quota_bytes > 0 ? Math.min(100, (data.storage.used_bytes / data.storage.quota_bytes) * 100) : 0;
+    document.getElementById('storageUsageBar').style.width = pct.toFixed(1) + '%';
+    document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
+    document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
+  }
+}
+
 function loadStatus() {
   fetch('/api/status')
     .then(r => r.json())
     .then(data => {
-      lastStatusData = data;
-      currentLocalId = data.node_id;
-      document.getElementById('localNodeIdLabel').textContent = data.node_id;
-
-      // Update Join Code
-      if (data.join_token) {
-        document.getElementById('activeJoinCode').textContent = data.join_token;
-      }
-
-      if (data.nat) {
-        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Unknown'}`;
-      }
-
-      // Update GPU Card (Objective 3)
-      if (data.gpu_profile) {
-        if (!data.gpu_profile.total_vram_bytes || data.gpu_profile.total_vram_bytes === 0) {
-          document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'CPU Fallback (No Dedicated GPU)';
-          document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'System'} • DirectML: ${data.gpu_profile.directml_supported}`;
-          document.getElementById('gpuVramLabel').textContent = '0 / 0 MB';
-          document.getElementById('gpuVramAlloc').textContent = '0 MB';
-          document.getElementById('gpuVramBar').style.width = '0%';
-        } else {
-          document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'Dedicated GPU';
-          document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'Hardware'} • DirectML: ${data.gpu_profile.directml_supported}`;
-          const totalMB = (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0);
-          const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : totalMB;
-          document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
-          document.getElementById('gpuVramAlloc').textContent = `${Math.max(0, totalMB - availMB)} MB`;
-          document.getElementById('gpuVramBar').style.width = `${totalMB > 0 ? ((totalMB - availMB) / totalMB) * 100 : 0}%`;
-        }
-
-        if (data.gpu_profile.temperature_c > 0) {
-          document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
-        }
-      }
-
-      // Update Watchdog Radar
-      if (data.watchdog) {
-        document.getElementById('wdPowerLabel').textContent = data.watchdog.on_battery ? 'Battery: UNPLUGGED' : 'AC Power: ONLINE';
-        document.getElementById('wdActivityLabel').textContent = data.watchdog.user_active ? 'User: ACTIVE' : 'User: IDLE';
-        document.getElementById('wdStateLabel').textContent = `State: ${data.watchdog.state.toUpperCase()}`;
-        document.getElementById('navWatchdogBadge').textContent = `${data.watchdog.state.toUpperCase()} (50ms)`;
-      }
-
-      // Storage
-      if (data.storage) {
-        const usedMB = (data.storage.used_bytes / (1024*1024)).toFixed(0);
-        const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
-        document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-        document.getElementById('navStorageBadge').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-        const pct = data.storage.quota_bytes > 0 ? Math.min(100, (data.storage.used_bytes / data.storage.quota_bytes) * 100) : 0;
-        document.getElementById('storageUsageBar').style.width = pct.toFixed(1) + '%';
-        document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
-        document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
-      }
-
+      applyStatusData(data);
       // Immediately synchronize local node on topology canvas
       if (topology) {
         topology.updateFleet(currentFleet, connectedPeers, currentLocalId, data);
@@ -940,10 +1010,7 @@ function pollFleetAndPeers() {
     fetch('/api/peers').then(r => r.json()).catch(() => ({ peers: [] })),
     fetch('/api/status').then(r => r.json()).catch(() => lastStatusData || {})
   ]).then(([fleetData, peersData, statusData]) => {
-    if (statusData && statusData.node_id) {
-      lastStatusData = statusData;
-      currentLocalId = statusData.node_id;
-    }
+    applyStatusData(statusData);
     currentFleet = (fleetData && fleetData.nodes) || [];
     connectedPeers = (peersData && peersData.peers) || [];
 
@@ -1041,11 +1108,19 @@ function appendLog(type, msg, category = 'all') {
   if (type.includes('CODE') || type.includes('SHELL')) typeColor = 'text-tertiary';
   if (type.includes('STORAGE') || type.includes('BLOB')) typeColor = 'text-primary';
 
-  div.innerHTML = `
-    <span class="text-outline">[${new Date().toLocaleTimeString()}]</span>
-    <span class="${typeColor} font-semibold font-mono">[${type}]</span>
-    <span class="text-on-surface">${escapeHTML(msg)}</span>
-  `;
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'text-outline';
+  timeSpan.textContent = `[${new Date().toLocaleTimeString()}] `;
+
+  const typeSpan = document.createElement('span');
+  typeSpan.className = `${typeColor} font-semibold font-mono`;
+  typeSpan.textContent = `[${type}] `;
+
+  const msgSpan = document.createElement('span');
+  msgSpan.className = 'text-on-surface';
+  msgSpan.textContent = msg == null ? '' : String(msg);
+
+  div.append(timeSpan, typeSpan, msgSpan);
   container.appendChild(div);
 
   if (document.getElementById('chkAutoScroll').checked) {
@@ -1054,8 +1129,13 @@ function appendLog(type, msg, category = 'all') {
 }
 
 function escapeHTML(str) {
-  if (!str) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /* =========================================================================
@@ -1108,59 +1188,6 @@ function initCoordinatorHub() {
           restartBtn.innerHTML = orig;
           appendLog('DAEMON', `Coordinator reconnect error: ${err.message}`);
         });
-    });
-  }
-
-  const copyBtn = document.getElementById('btnCopyCoordToken');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', () => {
-      const token = document.getElementById('coordDisplayedToken').textContent.trim();
-      navigator.clipboard.writeText(token).then(() => {
-        const orig = copyBtn.innerHTML;
-        copyBtn.innerHTML = '<span class="material-symbols-outlined text-xs text-secondary">check</span><span>Copied!</span>';
-        setTimeout(() => { copyBtn.innerHTML = orig; }, 1800);
-      }).catch(() => {});
-    });
-  }
-
-  const rotateBtn = document.getElementById('btnRotateToken');
-  if (rotateBtn) {
-    rotateBtn.addEventListener('click', () => {
-      fetch('/api/coordinator/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rotate_token: true })
-      })
-      .then(r => r.json())
-      .then(data => {
-        if (data.join_token) {
-          document.getElementById('coordDisplayedToken').textContent = data.join_token;
-          document.getElementById('activeJoinCode').textContent = data.join_token;
-          appendLog('COORDINATOR', `Rotated discovery join token: ${data.join_token}`);
-        }
-      });
-    });
-  }
-
-  // Relay Slider
-  const slider = document.getElementById('coordRelaySlider');
-  const sliderText = document.getElementById('coordSliderValueText');
-  if (slider && sliderText) {
-    slider.addEventListener('input', () => {
-      const val = parseFloat(slider.value).toFixed(1);
-      sliderText.textContent = `${val}s`;
-    });
-    slider.addEventListener('change', () => {
-      const val = parseFloat(slider.value);
-      fetch('/api/coordinator/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ relay_threshold: val })
-      })
-      .then(r => r.json())
-      .then(res => {
-        appendLog('COORDINATOR', `Blind relay fallback threshold set to ${res.relay_threshold}s`);
-      });
     });
   }
 
@@ -1301,7 +1328,7 @@ function loadCoordinatorStatus() {
       if (socketElem) socketElem.textContent = data.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)';
 
       const mtlsElem = document.getElementById('coordMtls');
-      if (mtlsElem) mtlsElem.textContent = 'DTLS / SCTP (WebRTC DataChannel)';
+      if (mtlsElem) mtlsElem.textContent = 'DTLS 1.2 / SCTP (Pion WebRTC)';
 
       const daemonStat = document.getElementById('coordDaemonStatus');
       const authBadge = document.getElementById('coordAuthBadge');
@@ -1370,22 +1397,6 @@ function loadCoordinatorStatus() {
         }
       }
 
-      const tokenElem = document.getElementById('coordDisplayedToken');
-      if (tokenElem && data.join_token) {
-        tokenElem.textContent = data.join_token;
-        const topJoin = document.getElementById('activeJoinCode');
-        if (topJoin) topJoin.textContent = data.join_token;
-      }
-
-      if (data.relay_threshold) {
-        const slider = document.getElementById('coordRelaySlider');
-        const sliderText = document.getElementById('coordSliderValueText');
-        if (slider && document.activeElement !== slider) {
-          slider.value = data.relay_threshold;
-        }
-        if (sliderText) sliderText.textContent = `${data.relay_threshold.toFixed(1)}s`;
-      }
-
       const directCount = data.direct_peers_count ?? 0;
       const relayedCount = data.relayed_peers_count ?? 0;
       const avgRttVal = data.avg_rtt_ms ?? 0;
@@ -1401,7 +1412,7 @@ function loadCoordinatorStatus() {
       if (relayedPeers) relayedPeers.textContent = `${relayedCount} Nodes`;
 
       const relayFallback = document.getElementById('coordRelayFallback');
-      if (relayFallback) relayFallback.textContent = `${(data.relay_threshold ?? 2.0).toFixed(1)}s Fallback Active`;
+      if (relayFallback) relayFallback.textContent = 'TURN ICE Candidate';
 
       const throttled = document.getElementById('coordThrottledPeers');
       if (throttled) throttled.textContent = `${data.throttled_count ?? 0} Nodes`;
@@ -1477,36 +1488,50 @@ function loadWorkerSettings() {
       // Render interactive chip list
       const container = document.getElementById('codeAllowlistChips');
       if (container) {
+        container.textContent = '';
         if (currentWorkerAllowlist.length === 0) {
-          container.innerHTML = '<span class="text-xs text-outline italic p-1">Default Deny — no remote peers can execute code on this machine.</span>';
+          const emptySpan = document.createElement('span');
+          emptySpan.className = 'text-xs text-outline italic p-1';
+          emptySpan.textContent = 'Default Deny — no remote peers can execute code on this machine.';
+          container.appendChild(emptySpan);
         } else {
-          container.innerHTML = '';
           currentWorkerAllowlist.forEach(p => {
             const span = document.createElement('span');
             if (p === '*') {
               span.className = 'px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5';
-              span.innerHTML = `
-                <span class="material-symbols-outlined text-sm">warning</span>
-                <span>Wildcard (*) active — any authenticated cluster peer can submit Docker code jobs.</span>
-                <button type="button" class="btn-remove-chip ml-1 text-amber-300 hover:text-white font-bold leading-none cursor-pointer" data-peer="*" title="Remove wildcard">&times;</button>
-              `;
+              const warnIcon = document.createElement('span');
+              warnIcon.className = 'material-symbols-outlined text-sm';
+              warnIcon.textContent = 'warning';
+              const label = document.createElement('span');
+              label.textContent = 'Wildcard (*) active — any authenticated cluster peer can submit Docker code jobs.';
+              const rmBtn = document.createElement('button');
+              rmBtn.type = 'button';
+              rmBtn.className = 'btn-remove-chip ml-1 text-amber-300 hover:text-white font-bold leading-none cursor-pointer';
+              rmBtn.title = 'Remove wildcard';
+              rmBtn.textContent = '\u00d7';
+              rmBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const nextList = currentWorkerAllowlist.filter(item => item !== '*');
+                saveWorkerAllowlist(nextList);
+              });
+              span.append(warnIcon, label, rmBtn);
             } else {
               span.className = 'px-2.5 py-1 rounded-md text-xs font-mono bg-surface-high text-on-surface border border-outline-variant/50 flex items-center gap-1.5';
-              span.innerHTML = `
-                <span>${escapeHTML(p)}</span>
-                <button type="button" class="btn-remove-chip ml-1 text-outline hover:text-error font-bold leading-none cursor-pointer" data-peer="${escapeHTML(p)}" title="Remove peer">&times;</button>
-              `;
+              const label = document.createElement('span');
+              label.textContent = p;
+              const rmBtn = document.createElement('button');
+              rmBtn.type = 'button';
+              rmBtn.className = 'btn-remove-chip ml-1 text-outline hover:text-error font-bold leading-none cursor-pointer';
+              rmBtn.title = 'Remove peer';
+              rmBtn.textContent = '\u00d7';
+              rmBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const nextList = currentWorkerAllowlist.filter(item => item !== p);
+                saveWorkerAllowlist(nextList);
+              });
+              span.append(label, rmBtn);
             }
             container.appendChild(span);
-          });
-
-          container.querySelectorAll('.btn-remove-chip').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-              e.stopPropagation();
-              const toRemove = btn.dataset.peer;
-              const nextList = currentWorkerAllowlist.filter(item => item !== toRemove);
-              saveWorkerAllowlist(nextList);
-            });
           });
         }
       }
@@ -1613,33 +1638,6 @@ function initTaskQueue() {
     refreshBtn.addEventListener('click', loadTasks);
   }
 
-  const dispatchBtn = document.getElementById('btnDispatchSampleTask');
-  if (dispatchBtn) {
-    dispatchBtn.addEventListener('click', () => {
-      const targetNode = (currentFleet && currentFleet.length > 0) ? currentFleet[0] : (currentLocalId || 'local-worker');
-      const sampleJob = {
-        job_id: `#JOB-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_ad: 'docker:python3.13 (256MB RAM, air-gapped)',
-        target_match: `Matched -> ${targetNode}`,
-        stage_dag: 'DOCKER_SANDBOX_EXEC',
-        priority: 'P1 NORMAL',
-        status: 'SUBMITTED (0%)',
-        timestamp: new Date().toLocaleTimeString()
-      };
-
-      fetch('/api/tasks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sampleJob)
-      })
-      .then(r => r.json())
-      .then(() => {
-        loadTasks();
-        appendLog('TASK_DISPATCH', `Dispatched task ${sampleJob.job_id} to cluster queue`);
-      });
-    });
-  }
-
   loadTasks();
 }
 
@@ -1656,9 +1654,15 @@ function loadTasks() {
         countBadge.textContent = `Showing ${data.tasks.length} Active Tasks`;
       }
 
-      tbody.innerHTML = '';
+      tbody.textContent = '';
       if (data.tasks.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">No active tasks in cluster queue.</td></tr>';
+        const emptyTr = document.createElement('tr');
+        const emptyTd = document.createElement('td');
+        emptyTd.colSpan = 6;
+        emptyTd.className = 'empty-cell';
+        emptyTd.textContent = 'No active tasks in cluster queue.';
+        emptyTr.appendChild(emptyTd);
+        tbody.appendChild(emptyTr);
         return;
       }
 
@@ -1666,25 +1670,46 @@ function loadTasks() {
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-surface-high/60 transition-colors';
 
+        const priority = String(task.priority || '');
         let priClass = 'priority-p2';
-        if (task.priority.includes('P0') || task.priority.includes('CRITICAL')) priClass = 'priority-p0';
-        else if (task.priority.includes('P1') || task.priority.includes('HIGH')) priClass = 'priority-p1';
-        else if (task.priority.includes('P3') || task.priority.includes('LOW')) priClass = 'priority-p3';
+        if (priority.includes('P0') || priority.includes('CRITICAL')) priClass = 'priority-p0';
+        else if (priority.includes('P1') || priority.includes('HIGH')) priClass = 'priority-p1';
+        else if (priority.includes('P3') || priority.includes('LOW')) priClass = 'priority-p3';
 
+        const status = String(task.status || '');
         let statusClass = 'task-status-running';
-        if (task.status.includes('COMPLETED')) statusClass = 'task-status-completed';
-        else if (task.status.includes('DISPATCHED')) statusClass = 'task-status-dispatched';
-        else if (task.status.includes('QUEUED')) statusClass = 'task-status-queued';
-        else if (task.status.includes('FAILED')) statusClass = 'task-status-failed';
+        if (status.includes('COMPLETED')) statusClass = 'task-status-completed';
+        else if (status.includes('DISPATCHED')) statusClass = 'task-status-dispatched';
+        else if (status.includes('QUEUED')) statusClass = 'task-status-queued';
+        else if (status.includes('FAILED')) statusClass = 'task-status-failed';
 
-        tr.innerHTML = `
-          <td class="font-bold text-primary font-mono">${escapeHTML(task.job_id)}</td>
-          <td class="text-on-surface font-mono">${escapeHTML(task.class_ad)}</td>
-          <td class="text-secondary font-mono">${escapeHTML(task.target_match)}</td>
-          <td class="text-on-surface-variant font-mono">${escapeHTML(task.stage_dag)}</td>
-          <td><span class="${priClass}">${escapeHTML(task.priority)}</span></td>
-          <td class="${statusClass} font-mono">${escapeHTML(task.status)}${task.duration_ms ? ` (${task.duration_ms}ms)` : ''}</td>
-        `;
+        const tdJob = document.createElement('td');
+        tdJob.className = 'font-bold text-primary font-mono';
+        tdJob.textContent = task.job_id || '';
+
+        const tdClassAd = document.createElement('td');
+        tdClassAd.className = 'text-on-surface font-mono';
+        tdClassAd.textContent = task.class_ad || '';
+
+        const tdMatch = document.createElement('td');
+        tdMatch.className = 'text-secondary font-mono';
+        tdMatch.textContent = task.target_match || '';
+
+        const tdStage = document.createElement('td');
+        tdStage.className = 'text-on-surface-variant font-mono';
+        tdStage.textContent = task.stage_dag || '';
+
+        const tdPri = document.createElement('td');
+        const priSpan = document.createElement('span');
+        priSpan.className = priClass;
+        priSpan.textContent = priority;
+        tdPri.appendChild(priSpan);
+
+        const tdStatus = document.createElement('td');
+        tdStatus.className = `${statusClass} font-mono`;
+        tdStatus.textContent = `${status}${task.duration_ms ? ` (${task.duration_ms}ms)` : ''}`;
+
+        tr.append(tdJob, tdClassAd, tdMatch, tdStage, tdPri, tdStatus);
         tbody.appendChild(tr);
       });
     })
