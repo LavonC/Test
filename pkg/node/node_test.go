@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/signaling"
 	"github.com/unicompute/obj1/pkg/transport"
@@ -840,4 +841,144 @@ func TestNode_SetOnPeerDisconnected(t *testing.T) {
 		t.Fatalf("timed out waiting for SetOnPeerDisconnected callback")
 	}
 }
+
+type stubCodeExecutor struct{}
+
+func (s *stubCodeExecutor) Execute(_ context.Context, req codeexec.Request) codeexec.Response {
+	return codeexec.Response{
+		JobID:    req.JobID,
+		Language: req.Language,
+		Stdout:   "dispatched:" + req.Stdin,
+		ExitCode: 0,
+	}
+}
+
+func TestNode_StartSignaling401ThenReconnect_TransportReadyAndDispatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	storeDir1 := filepath.Join(tmpDir, "node1_storage")
+	storeDir2 := filepath.Join(tmpDir, "node2_storage")
+	storeDir3 := filepath.Join(tmpDir, "node3_storage")
+
+	const clusterSecret = "d1-test-cluster-secret"
+	hub, err := signaling.NewHub("127.0.0.1:0", clusterSecret)
+	if err != nil {
+		t.Fatalf("failed to start auth-protected signaling hub: %v", err)
+	}
+	defer hub.Close()
+
+	sigURL := hub.URL()
+
+	// Boot worker n2 with valid token
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "d1-worker-node",
+		PoolID:       "d1-pool",
+		StorageDir:   storeDir2,
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: sigURL,
+		AuthToken:    clusterSecret,
+	})
+	if err != nil {
+		t.Fatalf("failed to create worker node: %v", err)
+	}
+	defer n2.Close()
+	n2.SetCodeExecutor(&stubCodeExecutor{}, "d1-caller-node")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("worker Start failed: %v", err)
+	}
+
+	// Boot caller n1 WITHOUT token against 401-protected coordinator
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "d1-caller-node",
+		PoolID:       "d1-pool",
+		StorageDir:   storeDir1,
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: sigURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to create caller node: %v", err)
+	}
+	defer n1.Close()
+
+	startErr := n1.Start(ctx)
+	if startErr == nil {
+		t.Fatalf("expected Start without auth token to return signaling error against 401 hub")
+	}
+
+	// Transport must still be initialized despite initial signaling failure
+	n1.mu.RLock()
+	tmAfterStart := n1.transport
+	startedAfterStart := n1.started
+	n1.mu.RUnlock()
+	if tmAfterStart == nil {
+		t.Fatalf("expected n.transport != nil after Start() signaling failure")
+	}
+	if !startedAfterStart {
+		t.Fatalf("expected n.started == true after Start() signaling failure")
+	}
+
+	// Provide valid token and reconnect signaling
+	n1.SetAuthToken(clusterSecret)
+	if err := n1.ReconnectSignaling(ctx, sigURL); err != nil {
+		t.Fatalf("ReconnectSignaling with valid token failed: %v", err)
+	}
+
+	n1.mu.RLock()
+	tmAfterReconn := n1.transport
+	n1.mu.RUnlock()
+	if tmAfterReconn == nil {
+		t.Fatalf("expected n.transport != nil after ReconnectSignaling")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	// Connect peer and dispatch a code job over WebRTC DataChannel
+	conn, err := n1.ConnectPeer(ctx, "d1-worker-node")
+	if err != nil {
+		t.Fatalf("ConnectPeer after ReconnectSignaling failed: %v", err)
+	}
+	defer conn.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	codeResp, err := n1.ExecuteRemoteCode(ctx, "d1-worker-node", codeexec.Request{
+		JobID:          "d1-dispatch-job",
+		Language:       "python",
+		Source:         "print('ok')",
+		Stdin:          "hello-d1",
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCode failed: %v", err)
+	}
+	if codeResp.ExitCode != 0 || codeResp.Stdout != "dispatched:hello-d1" {
+		t.Fatalf("unexpected ExecuteRemoteCode response: %+v", codeResp)
+	}
+
+	// Also verify ReconnectSignaling lazily initializes n.transport if Start() was never called
+	n3, err := NewNode(NodeConfig{
+		NodeID:       "d1-lazy-node",
+		PoolID:       "d1-pool",
+		StorageDir:   storeDir3,
+		StorageQuota: 10 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create lazy node: %v", err)
+	}
+	defer n3.Close()
+	n3.SetAuthToken(clusterSecret)
+	if err := n3.ReconnectSignaling(ctx, sigURL); err != nil {
+		t.Fatalf("lazy ReconnectSignaling failed: %v", err)
+	}
+	n3.mu.RLock()
+	lazyTM := n3.transport
+	n3.mu.RUnlock()
+	if lazyTM == nil {
+		t.Fatalf("expected ReconnectSignaling to lazily initialize n.transport when nil")
+	}
+}
+
 

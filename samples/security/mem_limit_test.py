@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-UniCompute Security Test: Memory Limit Enforcement (128 MB Cap)
-Verifies that the Docker container sandbox enforces '--memory 128m --memory-swap 128m'.
+UniCompute Security Test: Memory Limit Enforcement (256 MB Cap)
+Verifies that the Docker container sandbox enforces '--memory 256m --memory-swap 256m'.
 Continuously allocates 10 MB blocks in RAM until the container is capped
 by the Linux OOM (Out Of Memory) killer or raises MemoryError.
 """
@@ -10,7 +10,7 @@ import sys
 import time
 
 print("==================================================")
-print("  UniCompute Security: 128 MB RAM Limit Audit     ")
+print("  UniCompute Security: 256 MB RAM Limit Audit     ")
 print("==================================================")
 print("Allocating memory in 10 MB chunks...")
 
@@ -18,7 +18,7 @@ chunks = []
 total_mb = 0
 
 try:
-    for step in range(1, 30):
+    for step in range(1, 35):
         # Allocate 10 MB of real dirty pages (not just virtual space)
         chunk = bytearray(10 * 1024 * 1024)
         # Touch every page so the kernel actually commits the RAM
@@ -29,7 +29,7 @@ try:
         print(f"[ALLOCATION] Successfully allocated {total_mb} MB RAM", flush=True)
         time.sleep(0.05)
 
-    print(f"[FAIL] Allocated {total_mb} MB without hitting the 128 MB container cap!")
+    print(f"[FAIL] Allocated {total_mb} MB without hitting the 256 MB container cap!")
     sys.exit(1)
 
 except MemoryError:

@@ -2,8 +2,12 @@ package gpu
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/unicompute/obj1/pkg/gpu/onnx"
 )
 
 func TestProbeHardware(t *testing.T) {
@@ -86,3 +90,60 @@ func TestExecuteTask_RelativeCheckpointBlob(t *testing.T) {
 		t.Errorf("expected ../escape.bin to be rejected, got: %s", respEscape.Status)
 	}
 }
+
+func TestExecuteTask_RelativeCheckpointResumeFromDifferentCWD(t *testing.T) {
+	storageDir := t.TempDir()
+	otherCWD := t.TempDir()
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd failed: %v", err)
+	}
+	if err := os.Chdir(otherCWD); err != nil {
+		t.Fatalf("Chdir failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(origWD)
+	})
+
+	ckptRel := filepath.Join("checkpoints", "prev-job", "checkpoint.ckpt")
+	ckptAbs := filepath.Join(storageDir, ckptRel)
+	_, err = onnx.SaveCheckpoint(onnx.Checkpoint{
+		JobID:        "prev-job",
+		Step:         42,
+		Epoch:        3,
+		Loss:         0.25,
+		LearningRate: 0.001,
+		Weights: map[string][]float32{
+			"w1": {0.5, -0.25},
+		},
+	}, ckptAbs)
+	if err != nil {
+		t.Fatalf("SaveCheckpoint failed: %v", err)
+	}
+
+	mgr, err := NewManager(ManagerConfig{
+		StorageDir: storageDir,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	resp := mgr.ExecuteTask(context.Background(), GPUTaskRequest{
+		JobID:          "resumed-job",
+		CheckpointBlob: ckptRel,
+		Manifest: TaskCapsuleManifest{
+			TaskType:        "train",
+			TotalBatches:    5,
+			CheckpointEvery: 5,
+		},
+	})
+	if resp.Status != "completed" {
+		t.Fatalf("expected completed status, got %q (err: %s)", resp.Status, resp.Error)
+	}
+	if resp.ProcessedBatches != 47 {
+		t.Fatalf("expected checkpoint resume from step 42 + 5 batches = 47, got %d", resp.ProcessedBatches)
+	}
+}
+

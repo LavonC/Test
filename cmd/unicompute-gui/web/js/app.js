@@ -175,13 +175,26 @@ function initTitlebar() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url })
     })
-    .then(r => r.json())
-    .then(() => {
-      appendLog('COORDINATOR', `Switching signaling hub to: ${url}`);
+    .then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data.error || `HTTP ${r.status}`);
+      }
+      return data;
+    })
+    .then(data => {
+      if (data && data.reconnect_error) {
+        appendLog('COORDINATOR', `Failed to switch signaling hub to ${url}: ${data.reconnect_error}`);
+      } else {
+        appendLog('COORDINATOR', `Switching signaling hub to: ${url}`);
+      }
       setTimeout(() => {
         pollFleetAndPeers();
         loadCoordinatorStatus();
       }, 600);
+    })
+    .catch(err => {
+      appendLog('COORDINATOR', `Coordinator switch failed: ${err.message}`);
     });
   });
 
@@ -1073,9 +1086,19 @@ function initCoordinatorHub() {
             body: JSON.stringify({ url })
           });
         })
-        .then(r => r.json())
-        .then(() => {
-          appendLog('DAEMON', 'Reconnecting to signaling coordinator...');
+        .then(async r => {
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            throw new Error(data.error || `HTTP ${r.status}`);
+          }
+          return data;
+        })
+        .then(data => {
+          if (data && data.reconnect_error) {
+            appendLog('DAEMON', `Coordinator reconnect failed: ${data.reconnect_error}`);
+          } else {
+            appendLog('DAEMON', 'Reconnecting to signaling coordinator...');
+          }
           setTimeout(() => {
             restartBtn.innerHTML = orig;
             loadCoordinatorStatus();
@@ -1159,14 +1182,30 @@ function initCoordinatorHub() {
   if (btnSaveToken && inputToken) {
     btnSaveToken.addEventListener('click', () => {
       const tok = inputToken.value.trim();
+      if (!tok) {
+        appendLog('COORDINATOR', 'Enter a cluster auth token before saving (use Clear to remove)');
+        inputToken.focus();
+        return;
+      }
       fetchWithAuth('/api/coordinator/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ auth_token: tok })
       })
-      .then(r => r.json())
-      .then(() => {
-        appendLog('COORDINATOR', tok ? 'Cluster auth token updated & signaling reconnected' : 'Cleared cluster auth token');
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(data.error || `HTTP ${r.status}`);
+        }
+        return data;
+      })
+      .then(data => {
+        inputToken.value = '';
+        if (data && data.reconnect_error) {
+          appendLog('COORDINATOR', `Cluster auth token saved, but signaling reconnect failed: ${data.reconnect_error}`);
+        } else {
+          appendLog('COORDINATOR', 'Cluster auth token updated & signaling reconnected');
+        }
         loadCoordinatorStatus();
         loadWorkerSettings();
       })
@@ -1185,9 +1224,19 @@ function initCoordinatorHub() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clear_auth_token: true })
       })
-      .then(r => r.json())
-      .then(() => {
-        appendLog('COORDINATOR', 'Cleared cluster auth token & reconnecting');
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(data.error || `HTTP ${r.status}`);
+        }
+        return data;
+      })
+      .then(data => {
+        if (data && data.reconnect_error) {
+          appendLog('COORDINATOR', `Cleared cluster auth token, but signaling reconnect failed: ${data.reconnect_error}`);
+        } else {
+          appendLog('COORDINATOR', 'Cleared cluster auth token & reconnecting');
+        }
         loadCoordinatorStatus();
         loadWorkerSettings();
       })
@@ -1273,7 +1322,7 @@ function loadCoordinatorStatus() {
           bannerAuth.classList.remove('hidden');
         }
         if (pillAuthToken) {
-          pillAuthToken.textContent = 'Not Set';
+          pillAuthToken.textContent = data.auth_token_set === true ? 'Invalid Token' : 'Not Set';
           pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
         }
       } else {
@@ -1570,7 +1619,7 @@ function initTaskQueue() {
       const targetNode = (currentFleet && currentFleet.length > 0) ? currentFleet[0] : (currentLocalId || 'local-worker');
       const sampleJob = {
         job_id: `#JOB-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_ad: 'docker:python3.13 (128MB RAM, air-gapped)',
+        class_ad: 'docker:python3.13 (256MB RAM, air-gapped)',
         target_match: `Matched -> ${targetNode}`,
         stage_dag: 'DOCKER_SANDBOX_EXEC',
         priority: 'P1 NORMAL',

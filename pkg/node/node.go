@@ -127,6 +127,32 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	return n, nil
 }
 
+// ensureTransportLocked initializes the WebRTC transport manager if nil.
+// Caller must hold n.mu.
+func (n *Node) ensureTransportLocked() (*transport.Manager, error) {
+	if n.transport != nil {
+		return n.transport, nil
+	}
+
+	stunList := append([]string(nil), n.cfg.STUNServersV4...)
+	if len(n.cfg.STUNServersV6) > 0 {
+		stunList = append(stunList, n.cfg.STUNServersV6...)
+	}
+
+	tm, err := transport.NewManager(transport.Config{
+		NodeID:          n.cfg.NodeID,
+		STUNServers:     stunList,
+		TURNServers:     n.cfg.TURNServers,
+		FallbackTimeout: n.cfg.FallbackTimeout,
+	}, n.signaling, n.tracker)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transport manager: %w", err)
+	}
+	tm.SetOnNewConnection(n.bindIncomingPeerConnection)
+	n.transport = tm
+	return tm, nil
+}
+
 // Start boots the node, classifies NAT, registers with signaling, and initializes P2P transport.
 func (n *Node) Start(ctx context.Context) error {
 	n.mu.Lock()
@@ -149,38 +175,25 @@ func (n *Node) Start(ctx context.Context) error {
 	n.natReport = report
 
 	// 2. Connect to signaling hub (if URL provided)
+	var sigErr error
 	if n.cfg.SignalingURL != "" {
 		sigClient, err := signaling.NewClient(n.cfg.SignalingURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
 		if err != nil {
-			// Invariant CP-1: Signaling failure must not prevent local operations,
-			// but we return the warning/error for awareness
-			return fmt.Errorf("failed to connect to signaling hub: %w", err)
+			// Invariant CP-1: Signaling failure must not prevent transport/local initialization;
+			// capture warning/error to return after transport setup.
+			sigErr = fmt.Errorf("failed to connect to signaling hub: %w", err)
+		} else {
+			n.signaling = sigClient
 		}
-		n.signaling = sigClient
 	}
 
-	// 3. Initialize WebRTC P2P Transport Manager
-	stunList := n.cfg.STUNServersV4
-	if len(n.cfg.STUNServersV6) > 0 {
-		stunList = append(stunList, n.cfg.STUNServersV6...)
+	// 3. Always initialize WebRTC P2P Transport Manager even if signaling failed
+	if _, err := n.ensureTransportLocked(); err != nil {
+		return err
 	}
-
-	tm, err := transport.NewManager(transport.Config{
-		NodeID:          n.cfg.NodeID,
-		STUNServers:     stunList,
-		TURNServers:     n.cfg.TURNServers,
-		FallbackTimeout: n.cfg.FallbackTimeout,
-	}, n.signaling, n.tracker)
-	if err != nil {
-		return fmt.Errorf("failed to create transport manager: %w", err)
-	}
-	n.transport = tm
-
-	// Hook incoming peer connections
-	tm.SetOnNewConnection(n.bindIncomingPeerConnection)
 
 	n.started = true
-	return nil
+	return sigErr
 }
 
 func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
@@ -814,27 +827,34 @@ func (n *Node) ReconnectSignaling(ctx context.Context, newURL string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	if n.closed {
+		return errors.New("node is closed")
+	}
+
 	if n.signaling != nil {
 		_ = n.signaling.Close()
 		n.signaling = nil
 	}
 
 	n.cfg.SignalingURL = newURL
+	tm, err := n.ensureTransportLocked()
+	if err != nil {
+		return err
+	}
+	n.started = true
+
 	if newURL == "" {
-		if n.transport != nil {
-			n.transport.SetSignalingClient(nil)
-		}
+		tm.SetSignalingClient(nil)
 		return nil
 	}
 
 	sigClient, err := signaling.NewClient(newURL, n.cfg.NodeID, n.handleSignalingEnvelope, n.cfg.AuthToken)
 	if err != nil {
+		tm.SetSignalingClient(nil)
 		return fmt.Errorf("failed to connect to signaling hub: %w", err)
 	}
 	n.signaling = sigClient
-	if n.transport != nil {
-		n.transport.SetSignalingClient(sigClient)
-	}
+	tm.SetSignalingClient(sigClient)
 	return nil
 }
 

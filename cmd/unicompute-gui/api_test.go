@@ -827,6 +827,43 @@ func TestAPI_CoordinatorConnect_WithAuthToken(t *testing.T) {
 	if !s.node.HasAuthToken() {
 		t.Errorf("expected node.HasAuthToken() == true after connect")
 	}
+	if errMsg, ok := respData["reconnect_error"].(string); !ok || errMsg == "" {
+		t.Errorf("expected non-empty reconnect_error when coordinator is unreachable, got %v", respData["reconnect_error"])
+	}
 }
+
+func TestAPI_CoordinatorSettings_ReconnectErrorReturnedAndTokenNeverEchoed(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:59998/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	secret := "settings-reconnect-secret-42"
+
+	postBody, _ := json.Marshal(map[string]any{
+		"auth_token": secret,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewReader(postBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("security violation: raw auth_token echoed in /api/coordinator/settings response")
+	}
+
+	var respData map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &respData); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if errMsg, ok := respData["reconnect_error"].(string); !ok || errMsg == "" {
+		t.Errorf("expected non-empty reconnect_error when ReconnectSignaling fails, got %v", respData["reconnect_error"])
+	}
+}
+
 
 

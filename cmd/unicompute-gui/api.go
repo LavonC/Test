@@ -421,17 +421,22 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = s.node.ReconnectSignaling(ctx, url)
+	reconnErr := s.node.ReconnectSignaling(ctx, url)
 
-	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), map[string]any{
-		"url":            url,
-		"auth_token_set": s.node.HasAuthToken(),
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":         "reconnecting",
 		"url":            url,
 		"auth_token_set": s.node.HasAuthToken(),
-	})
+	}
+	msg := fmt.Sprintf("Connecting to coordinator: %s", url)
+	if reconnErr != nil {
+		resp["status"] = "reconnect_failed"
+		resp["reconnect_error"] = reconnErr.Error()
+		msg = fmt.Sprintf("Failed to connect to coordinator %s: %v", url, reconnErr)
+	}
+
+	s.Broadcast("coordinator_reconnect", "", msg, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Request) {
@@ -624,23 +629,25 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 		authTokenSet := s.node.HasAuthToken()
 		s.mu.Unlock()
 
+		var reconnErr error
 		if tokenUpdated && coordURL != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = s.node.ReconnectSignaling(ctx, coordURL)
+			reconnErr = s.node.ReconnectSignaling(ctx, coordURL)
 		}
 
-		s.Broadcast("coordinator_settings_updated", "", fmt.Sprintf("Relay threshold set to %.1fs", thresh), map[string]any{
+		resp := map[string]any{
 			"relay_threshold": thresh,
 			"join_token":      token,
 			"auth_token_set":  authTokenSet,
-		})
+		}
+		if reconnErr != nil {
+			resp["reconnect_error"] = reconnErr.Error()
+		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"relay_threshold": thresh,
-			"join_token":      token,
-			"auth_token_set":  authTokenSet,
-		})
+		s.Broadcast("coordinator_settings_updated", "", fmt.Sprintf("Relay threshold set to %.1fs", thresh), resp)
+
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -1053,7 +1060,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 				JobID:       req.JobID,
 				ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
 				TargetMatch: fmt.Sprintf("Matched -> %s (Local)", s.nodeConfig.NodeID),
-				StageDAG:    "DAG_STAGE_CONTAINER_EXEC",
+				StageDAG:    "CONTAINER_EXEC",
 				Priority:    "P1 HIGH",
 				Status:      "FAILED (NO_DOCKER)",
 				DurationMs:  0,
@@ -1079,7 +1086,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 			JobID:       req.JobID,
 			ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
 			TargetMatch: fmt.Sprintf("Matched -> %s (Local)", s.nodeConfig.NodeID),
-			StageDAG:    "DAG_STAGE_CONTAINER_EXEC",
+			StageDAG:    "CONTAINER_EXEC",
 			Priority:    "P1 HIGH",
 			Status:      taskStatus,
 			DurationMs:  durMs,
@@ -1106,7 +1113,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 				JobID:       req.JobID,
 				ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
 				TargetMatch: fmt.Sprintf("Matched -> %s", body.PeerID),
-				StageDAG:    "DAG_STAGE_CONTAINER_EXEC",
+				StageDAG:    "CONTAINER_EXEC",
 				Priority:    "P1 HIGH",
 				Status:      "FAILED (P2P_CONNECT)",
 				DurationMs:  time.Since(startRun).Milliseconds(),
@@ -1134,7 +1141,7 @@ func (s *ServerState) handleCodeRun(w http.ResponseWriter, r *http.Request) {
 		JobID:       req.JobID,
 		ClassAd:     fmt.Sprintf("SandboxTier == Tier2 && Lang == %q", body.Language),
 		TargetMatch: fmt.Sprintf("Matched -> %s", body.PeerID),
-		StageDAG:    "DAG_STAGE_CONTAINER_EXEC",
+		StageDAG:    "CONTAINER_EXEC",
 		Priority:    "P1 HIGH",
 		Status:      taskStatus,
 		DurationMs:  durMs,

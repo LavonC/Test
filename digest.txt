@@ -2501,6 +2501,7 @@ func (s *ServerState) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/coordinator/connect", s.authMiddleware(s.handleCoordinatorConnect))
 	mux.HandleFunc("/api/coordinator/status", s.authMiddleware(s.handleCoordinatorStatus))
 	mux.HandleFunc("/api/coordinator/settings", s.authMiddleware(s.handleCoordinatorSettings))
+	mux.HandleFunc("/api/worker/settings", s.authMiddleware(s.handleWorkerSettings))
 	mux.HandleFunc("/api/tasks", s.authMiddleware(s.handleTasks))
 	mux.HandleFunc("/api/fleet", s.authMiddleware(s.handleFleet))
 	mux.HandleFunc("/api/peers", s.authMiddleware(s.handlePeers))
@@ -2570,9 +2571,10 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		URL string `json:"url"`
+		URL       string  `json:"url"`
+		AuthToken *string `json:"auth_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		http.Error(w, "invalid coordinator url", http.StatusBadRequest)
@@ -2582,14 +2584,26 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 	url := strings.TrimSpace(body.URL)
 	s.mu.Lock()
 	s.coordinatorURL = url
+	if body.AuthToken != nil {
+		tok := strings.TrimSpace(*body.AuthToken)
+		s.nodeConfig.AuthToken = tok
+		s.node.SetAuthToken(tok)
+	}
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = s.node.ReconnectSignaling(ctx, url)
 
-	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), body.URL)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "reconnecting", "url": url})
+	s.Broadcast("coordinator_reconnect", "", fmt.Sprintf("Connecting to coordinator: %s", url), map[string]any{
+		"url":            url,
+		"auth_token_set": s.node.HasAuthToken(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "reconnecting",
+		"url":            url,
+		"auth_token_set": s.node.HasAuthToken(),
+	})
 }
 
 func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Request) {
@@ -2611,6 +2625,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 	client := &http.Client{Timeout: 1200 * time.Millisecond}
 	status := "RUNNING"
+	authRequired := false
 	fleetCount := 0
 	nodeIDs := []string{}
 
@@ -2625,18 +2640,21 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 				req.Header.Set("Authorization", "Bearer "+authToken)
 			}
 			nodesResp, err := client.Do(req)
-			if err == nil && nodesResp.StatusCode == http.StatusOK {
+			if err == nil {
 				defer nodesResp.Body.Close()
-				var nData struct {
-					Count int      `json:"count"`
-					Nodes []string `json:"nodes"`
+				if nodesResp.StatusCode == http.StatusOK {
+					var nData struct {
+						Count int      `json:"count"`
+						Nodes []string `json:"nodes"`
+					}
+					if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
+						fleetCount = nData.Count
+						nodeIDs = nData.Nodes
+					}
+				} else if nodesResp.StatusCode == http.StatusUnauthorized {
+					status = "AUTH_REQUIRED"
+					authRequired = true
 				}
-				if json.NewDecoder(nodesResp.Body).Decode(&nData) == nil {
-					fleetCount = nData.Count
-					nodeIDs = nData.Nodes
-				}
-			} else if nodesResp != nil {
-				nodesResp.Body.Close()
 			}
 		}
 	} else {
@@ -2705,6 +2723,8 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              status,
+		"auth_required":       authRequired,
+		"auth_token_set":      authToken != "",
 		"uptime":              uptimeStr,
 		"coordinator_url":     coordURL,
 		"coordinator_host":    coordHost,
@@ -2728,11 +2748,13 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var body struct {
 			RelayThreshold *float64 `json:"relay_threshold"`
 			RotateToken    bool     `json:"rotate_token"`
 			JoinToken      string   `json:"join_token"`
+			AuthToken      *string  `json:"auth_token"`
+			ClearAuthToken bool     `json:"clear_auth_token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid settings payload: "+err.Error(), http.StatusBadRequest)
@@ -2756,24 +2778,117 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 		} else if body.JoinToken != "" {
 			s.joinToken = strings.TrimSpace(body.JoinToken)
 		}
+
+		tokenUpdated := false
+		if body.ClearAuthToken {
+			s.nodeConfig.AuthToken = ""
+			s.node.SetAuthToken("")
+			tokenUpdated = true
+		} else if body.AuthToken != nil {
+			tok := strings.TrimSpace(*body.AuthToken)
+			s.nodeConfig.AuthToken = tok
+			s.node.SetAuthToken(tok)
+			tokenUpdated = true
+		}
 		thresh := s.relayThreshold
 		token := s.joinToken
+		coordURL := s.coordinatorURL
+		authTokenSet := s.node.HasAuthToken()
 		s.mu.Unlock()
+
+		if tokenUpdated && coordURL != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.node.ReconnectSignaling(ctx, coordURL)
+		}
 
 		s.Broadcast("coordinator_settings_updated", "", fmt.Sprintf("Relay threshold set to %.1fs", thresh), map[string]any{
 			"relay_threshold": thresh,
 			"join_token":      token,
+			"auth_token_set":  authTokenSet,
 		})
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"relay_threshold": thresh,
+			"join_token":      token,
+			"auth_token_set":  authTokenSet,
+		})
+		return
 	}
 
 	s.mu.RLock()
 	thresh := s.relayThreshold
 	token := s.joinToken
+	authTokenSet := s.node.HasAuthToken()
 	s.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"relay_threshold": thresh,
 		"join_token":      token,
+		"auth_token_set":  authTokenSet,
+	})
+}
+
+func (s *ServerState) handleWorkerSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var body struct {
+			CodeAllowlist *[]string `json:"code_allowlist"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CodeAllowlist == nil {
+			http.Error(w, "invalid worker settings payload", http.StatusBadRequest)
+			return
+		}
+		if len(*body.CodeAllowlist) > 100 {
+			http.Error(w, "code_allowlist exceeds maximum 100 entries", http.StatusBadRequest)
+			return
+		}
+		clean := make([]string, 0, len(*body.CodeAllowlist))
+		for _, entry := range *body.CodeAllowlist {
+			trimmed := strings.TrimSpace(entry)
+			if trimmed == "" {
+				continue
+			}
+			if len(trimmed) > 128 {
+				http.Error(w, "allowlist entry exceeds 128 characters", http.StatusBadRequest)
+				return
+			}
+			clean = append(clean, trimmed)
+		}
+
+		s.node.SetCodeAllowlist(clean...)
+
+		allowlist := s.node.CodeAllowlist()
+		wildcard := false
+		for _, p := range allowlist {
+			if p == "*" {
+				wildcard = true
+				break
+			}
+		}
+		state := map[string]any{
+			"code_allowlist":   allowlist,
+			"docker_active":    s.node.CodeExecutorActive(),
+			"wildcard_allowed": wildcard,
+		}
+
+		s.Broadcast("worker_settings_updated", "", "Worker code execution allowlist updated", state)
+		writeJSON(w, http.StatusOK, state)
+		return
+	}
+
+	allowlist := s.node.CodeAllowlist()
+	wildcard := false
+	for _, p := range allowlist {
+		if p == "*" {
+			wildcard = true
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"code_allowlist":   allowlist,
+		"docker_active":    s.node.CodeExecutorActive(),
+		"wildcard_allowed": wildcard,
 	})
 }
 
@@ -4039,6 +4154,289 @@ func TestAPI_OriginAllowRemoteGUI(t *testing.T) {
 
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK when allowRemoteGUI == true for same-origin non-loopback Origin, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestAPI_CoordinatorAuthToken_NeverEchoed(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	secretAuthToken := "super-secret-cluster-auth-key-999"
+
+	// 1. POST /api/coordinator/settings with auth_token
+	postBody, _ := json.Marshal(map[string]any{
+		"auth_token": secretAuthToken,
+	})
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewReader(postBody))
+	reqPost.Header.Set("Authorization", "Bearer "+token)
+	reqPost.Header.Set("Content-Type", "application/json")
+	recPost := httptest.NewRecorder()
+	mux.ServeHTTP(recPost, reqPost)
+
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on POST /api/coordinator/settings, got %d: %s", recPost.Code, recPost.Body.String())
+	}
+
+	postRespStr := recPost.Body.String()
+	if strings.Contains(postRespStr, secretAuthToken) {
+		t.Fatalf("security violation: raw auth_token was echoed in POST response: %s", postRespStr)
+	}
+
+	var postData map[string]any
+	if err := json.Unmarshal(recPost.Body.Bytes(), &postData); err != nil {
+		t.Fatalf("failed to decode POST response: %v", err)
+	}
+	if postData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true in POST response, got %v", postData["auth_token_set"])
+	}
+
+	// 2. GET /api/coordinator/settings: verify auth_token_set: true and no raw token
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/coordinator/settings", nil)
+	reqGet.Header.Set("Authorization", "Bearer "+token)
+	recGet := httptest.NewRecorder()
+	mux.ServeHTTP(recGet, reqGet)
+
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on GET /api/coordinator/settings, got %d: %s", recGet.Code, recGet.Body.String())
+	}
+
+	getRespStr := recGet.Body.String()
+	if strings.Contains(getRespStr, secretAuthToken) {
+		t.Fatalf("security violation: raw auth_token was echoed in GET response: %s", getRespStr)
+	}
+
+	var getData map[string]any
+	if err := json.Unmarshal(recGet.Body.Bytes(), &getData); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if getData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true in GET response, got %v", getData["auth_token_set"])
+	}
+
+	// 3. Clear token
+	clearBody, _ := json.Marshal(map[string]any{
+		"clear_auth_token": true,
+	})
+	reqClear := httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewReader(clearBody))
+	reqClear.Header.Set("Authorization", "Bearer "+token)
+	reqClear.Header.Set("Content-Type", "application/json")
+	recClear := httptest.NewRecorder()
+	mux.ServeHTTP(recClear, reqClear)
+
+	if recClear.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on clear token, got %d: %s", recClear.Code, recClear.Body.String())
+	}
+
+	var clearData map[string]any
+	if err := json.Unmarshal(recClear.Body.Bytes(), &clearData); err != nil {
+		t.Fatalf("failed to decode clear response: %v", err)
+	}
+	if clearData["auth_token_set"] != false {
+		t.Errorf("expected auth_token_set: false after clear, got %v", clearData["auth_token_set"])
+	}
+}
+
+func TestAPI_WorkerAllowlist_GetAndSet(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+
+	// 1. Unauthenticated request must return 401
+	unauthReq := httptest.NewRequest(http.MethodGet, "/api/worker/settings", nil)
+	unauthRec := httptest.NewRecorder()
+	mux.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized without Bearer token, got %d", unauthRec.Code)
+	}
+
+	// 2. Initial GET returns empty allowlist and wildcard_allowed: false
+	getReq := httptest.NewRequest(http.MethodGet, "/api/worker/settings", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var initData struct {
+		CodeAllowlist   []string `json:"code_allowlist"`
+		DockerActive    bool     `json:"docker_active"`
+		WildcardAllowed bool     `json:"wildcard_allowed"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &initData); err != nil {
+		t.Fatalf("failed to decode JSON: %v", err)
+	}
+	if len(initData.CodeAllowlist) != 0 {
+		t.Errorf("expected empty initial allowlist, got %v", initData.CodeAllowlist)
+	}
+	if initData.WildcardAllowed {
+		t.Errorf("expected wildcard_allowed: false initially")
+	}
+
+	// 3. Valid POST /api/worker/settings
+	validBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{"peer-b", "peer-a"},
+	})
+	postReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(validBody))
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Content-Type", "application/json")
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST, got %d: %s", postRec.Code, postRec.Body.String())
+	}
+
+	// Verify node.CodeAllowlist() is updated and sorted
+	allowed := s.node.CodeAllowlist()
+	if len(allowed) != 2 || allowed[0] != "peer-a" || allowed[1] != "peer-b" {
+		t.Errorf("expected sorted [peer-a, peer-b], got %v", allowed)
+	}
+
+	// 4. Wildcard POST
+	wildBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{"*"},
+	})
+	wildReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(wildBody))
+	wildReq.Header.Set("Authorization", "Bearer "+token)
+	wildReq.Header.Set("Content-Type", "application/json")
+	wildRec := httptest.NewRecorder()
+	mux.ServeHTTP(wildRec, wildReq)
+	if wildRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on wildcard POST, got %d: %s", wildRec.Code, wildRec.Body.String())
+	}
+	var wildData struct {
+		CodeAllowlist   []string `json:"code_allowlist"`
+		WildcardAllowed bool     `json:"wildcard_allowed"`
+	}
+	if err := json.Unmarshal(wildRec.Body.Bytes(), &wildData); err != nil {
+		t.Fatalf("failed to decode wildcard response: %v", err)
+	}
+	if !wildData.WildcardAllowed {
+		t.Errorf("expected wildcard_allowed: true")
+	}
+
+	// 5. Rejects invalid payload (non-array, nil)
+	badReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", strings.NewReader(`{"code_allowlist": "not-an-array"}`))
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on invalid payload, got %d", badRec.Code)
+	}
+
+	// 6. Rejects oversized entry (> 128 chars)
+	longEntry := strings.Repeat("x", 129)
+	oversizedBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": []string{longEntry},
+	})
+	overReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(oversizedBody))
+	overReq.Header.Set("Authorization", "Bearer "+token)
+	overReq.Header.Set("Content-Type", "application/json")
+	overRec := httptest.NewRecorder()
+	mux.ServeHTTP(overRec, overReq)
+	if overRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on oversized entry, got %d", overRec.Code)
+	}
+
+	// 7. Rejects oversized list (> 100 entries)
+	tooMany := make([]string, 101)
+	for i := range tooMany {
+		tooMany[i] = "peer"
+	}
+	tooManyBody, _ := json.Marshal(map[string]any{
+		"code_allowlist": tooMany,
+	})
+	tooManyReq := httptest.NewRequest(http.MethodPost, "/api/worker/settings", bytes.NewReader(tooManyBody))
+	tooManyReq.Header.Set("Authorization", "Bearer "+token)
+	tooManyReq.Header.Set("Content-Type", "application/json")
+	tooManyRec := httptest.NewRecorder()
+	mux.ServeHTTP(tooManyRec, tooManyReq)
+	if tooManyRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on >100 entries, got %d", tooManyRec.Code)
+	}
+}
+
+func TestCoordinatorStatus_401AuthRequired(t *testing.T) {
+	// Mock coordinator where /health returns 200 OK, but /api/nodes returns 401 Unauthorized
+	mockCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy","service":"unicompute-coordinator"}`))
+		case "/api/nodes":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized: cluster auth token required"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockCoord.Close()
+
+	coordWSURL := "ws://" + mockCoord.Listener.Addr().String() + "/ws"
+	s, mux, cleanup := setupTestServer(t, coordWSURL)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator/status", nil)
+	req.Header.Set("Authorization", "Bearer "+s.SessionToken())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("failed to decode response JSON: %v", err)
+	}
+
+	if data["status"] != "AUTH_REQUIRED" {
+		t.Errorf("expected status 'AUTH_REQUIRED' on 401, got %v", data["status"])
+	}
+	if data["auth_required"] != true {
+		t.Errorf("expected auth_required: true on 401, got %v", data["auth_required"])
+	}
+}
+
+func TestAPI_CoordinatorConnect_WithAuthToken(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	secret := "connect-secret-token-777"
+
+	postBody, _ := json.Marshal(map[string]any{
+		"url":        "ws://127.0.0.1:9090/ws",
+		"auth_token": secret,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/coordinator/connect", bytes.NewReader(postBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	respStr := rec.Body.String()
+	if strings.Contains(respStr, secret) {
+		t.Fatalf("security violation: raw auth_token echoed in /api/coordinator/connect response: %s", respStr)
+	}
+
+	var respData map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &respData); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if respData["auth_token_set"] != true {
+		t.Errorf("expected auth_token_set: true, got %v", respData["auth_token_set"])
+	}
+	if !s.node.HasAuthToken() {
+		t.Errorf("expected node.HasAuthToken() == true after connect")
 	}
 }
 
@@ -6592,6 +6990,20 @@ FILE: cmd/unicompute-gui/web/index.html
           </div>
         </div>
 
+        <!-- Auth Required Alert Banner -->
+        <div class="hidden bg-amber-500/15 border border-amber-500/40 rounded-xl p-4 flex items-center justify-between gap-4" id="bannerAuthRequired">
+          <div class="flex items-center gap-3">
+            <span class="material-symbols-outlined text-amber-400 text-2xl">lock</span>
+            <div>
+              <h4 class="font-headline font-semibold text-sm text-amber-300">Coordinator Authentication Required (401)</h4>
+              <p class="text-xs text-on-surface-variant">The coordinator cluster requires a secret token (UNICOMPUTE_AUTH_TOKEN) to join the fleet.</p>
+            </div>
+          </div>
+          <button class="font-mono text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors" id="btnJumpToAuthToken">
+            Configure Token &darr;
+          </button>
+        </div>
+
         <!-- 3-Column Card Bento -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
           <!-- Card 1: Daemon Status Toggle Card -->
@@ -6607,10 +7019,13 @@ FILE: cmd/unicompute-gui/web/index.html
                     <p class="font-mono text-[11px] text-outline">UniCompute Daemon</p>
                   </div>
                 </div>
-                <!-- Status Toggle -->
-                <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
-                  <span class="status-dot-pulse"></span>
-                  <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
+                <!-- Status Toggle & Live Auth Badge -->
+                <div class="flex items-center gap-2">
+                  <span class="hidden px-2 py-0.5 rounded text-[10px] font-mono font-semibold" id="coordAuthBadge"></span>
+                  <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
+                    <span class="status-dot-pulse"></span>
+                    <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
+                  </div>
                 </div>
               </div>
 
@@ -6734,6 +7149,118 @@ FILE: cmd/unicompute-gui/web/index.html
                 <div class="bg-primary h-full" id="coordBarRelay" style="width: 0%" title="Relayed"></div>
                 <div class="bg-outline-variant/40 h-full" id="coordBarSpare" style="width: 100%" title="Spare capacity"></div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Cluster Auth & Worker Code Allowlist Controls -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Card: Coordinator Cluster Auth Token -->
+          <div class="telemetry-card flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center text-amber-400 border border-amber-500/30">
+                    <span class="material-symbols-outlined">security</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Coordinator Cluster Auth Token</h3>
+                    <p class="font-mono text-[11px] text-outline">Bearer token for protected coordinator hubs</p>
+                  </div>
+                </div>
+                <!-- Token Configured vs Not Set pill -->
+                <span id="pillAuthTokenStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
+                  Not Set
+                </span>
+              </div>
+
+              <!-- Input & Show/Hide -->
+              <div class="space-y-2 mt-2">
+                <label class="block text-xs font-mono text-outline">Cluster Auth Secret</label>
+                <div class="relative flex items-center">
+                  <input type="password" id="inputCoordAuthToken" autocomplete="off" placeholder="Enter cluster auth token (UNICOMPUTE_AUTH_TOKEN)"
+                    class="w-full bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-2 pr-10 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
+                  <button type="button" id="btnToggleAuthTokenVis" title="Show/Hide Token"
+                    class="absolute right-2 text-outline hover:text-on-surface p-1 transition-colors">
+                    <span class="material-symbols-outlined text-base">visibility</span>
+                  </button>
+                </div>
+                <p class="text-[11px] text-outline italic">Stored in memory for this running session only; never echoed back by the API.</p>
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="flex items-center justify-between pt-3 border-t border-outline-variant/30 mt-4">
+              <button id="btnClearAuthToken" class="btn-surface font-mono text-xs flex items-center gap-1.5 px-3 py-1.5 text-outline hover:text-error transition-colors">
+                <span class="material-symbols-outlined text-sm">delete</span>
+                <span>Clear</span>
+              </button>
+              <button id="btnSaveAuthToken" class="btn-primary-compact font-mono text-xs flex items-center gap-1.5 px-4 py-1.5">
+                <span class="material-symbols-outlined text-sm">lock_open</span>
+                <span>Save &amp; Reconnect</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Card: Worker Code Execution Allowlist -->
+          <div class="telemetry-card flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
+                    <span class="material-symbols-outlined">terminal</span>
+                  </div>
+                  <div>
+                    <h3 class="font-headline font-semibold text-sm text-on-surface">Worker Code Execution Allowlist</h3>
+                    <p class="font-mono text-[11px] text-outline">Authorized remote peers for container sandbox</p>
+                  </div>
+                </div>
+                <!-- Runtime Status Badge -->
+                <span id="badgeDockerStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
+                  Checking Docker...
+                </span>
+              </div>
+
+              <!-- Interactive Chip List -->
+              <div class="space-y-1.5">
+                <div class="flex items-center justify-between text-xs font-mono">
+                  <span class="text-outline">Authorized Peers</span>
+                  <div class="flex items-center gap-2">
+                    <button id="btnAllowAllCode" class="text-[10px] text-amber-400 hover:underline font-mono">Allow All (*)</button>
+                    <span class="text-outline">|</span>
+                    <button id="btnDenyAllCode" class="text-[10px] text-error hover:underline font-mono">Deny All</button>
+                  </div>
+                </div>
+
+                <!-- Chips Container -->
+                <div id="codeAllowlistChips" class="min-h-[52px] p-2 bg-surface-lowest rounded-lg border border-outline-variant/40 flex flex-wrap gap-1.5 items-center">
+                  <!-- Dynamically populated chips -->
+                </div>
+              </div>
+
+              <!-- Add Peer Input & Suggestions -->
+              <div class="space-y-2 mt-3">
+                <div class="flex items-center gap-2">
+                  <input type="text" id="inputAddAllowPeer" placeholder="Peer ID (e.g. peer-a)"
+                    class="flex-1 bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-1.5 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
+                  <button id="btnAddAllowPeer" class="btn-surface font-mono text-xs px-3 py-1.5 flex items-center gap-1 font-semibold text-primary">
+                    <span class="material-symbols-outlined text-sm">add</span>
+                    <span>+ Add</span>
+                  </button>
+                </div>
+
+                <!-- Discovered Online Fleet Peer Suggestions -->
+                <div id="fleetSuggestionsWrap" class="hidden text-[11px] font-mono text-outline flex flex-wrap items-center gap-1.5 pt-1">
+                  <span>Fleet peers:</span>
+                  <div id="fleetSuggestionsList" class="flex flex-wrap gap-1"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Footer note -->
+            <div class="pt-2 border-t border-outline-variant/30 text-[11px] text-outline font-mono flex items-center justify-between">
+              <span>Policy: Zero-Trust Default Deny</span>
+              <span class="text-on-surface-variant">Air-gapped execution</span>
             </div>
           </div>
         </div>
@@ -7096,21 +7623,21 @@ FILE: cmd/unicompute-gui/web/index.html
           </div>
         </div>
 
-        <!-- Reed-Solomon Legend & Quick Overview -->
+        <!-- CAS Blobstore Overview -->
         <div class="telemetry-card flex flex-wrap items-center justify-between gap-4 p-4">
           <div class="flex items-center gap-4">
-            <span class="text-xs font-mono text-outline font-semibold uppercase">Shard Topology:</span>
+            <span class="text-xs font-mono text-outline font-semibold uppercase">Storage Substrate:</span>
             <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
-              <span class="text-on-surface">Data Shard (D1-D4)</span>
+              <span class="w-3 h-3 rounded bg-emerald-500/80 border border-secondary/50"></span>
+              <span class="text-on-surface">SHA-256 Content-Addressed Local Chunk Storage</span>
             </div>
             <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-purple-500/80 border border-tertiary/50"></span>
-              <span class="text-on-surface">Parity Recovery Shard (P1-P2)</span>
+              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
+              <span class="text-on-surface">WebRTC Chunk Transfer</span>
             </div>
           </div>
           <div class="text-xs font-mono text-on-surface-variant">
-            Tolerates up to <span class="text-secondary font-semibold">2 Simultaneous Peer Failures</span> per dataset slice.
+            Per-node disk quota with <span class="text-secondary font-semibold">automatic Bitrot scrubber</span> verification.
           </div>
         </div>
 
@@ -7125,7 +7652,7 @@ FILE: cmd/unicompute-gui/web/index.html
                   <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-emerald-500/15 text-secondary border border-secondary/30 font-semibold">Active Vault</span>
                   <span class="text-xs font-mono text-outline" id="rsCasTotalSize">0 B</span>
                 </div>
-                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices striped across mesh peers with SHA-256 CAS verification</p>
+                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices stored in local SHA-256 CAS with SHA-256 CAS verification</p>
               </div>
             </div>
             <!-- Merkle Verification Badge -->
@@ -7256,9 +7783,9 @@ FILE: cmd/unicompute-gui/web/index.html
               <thead>
                 <tr>
                   <th>Job ID</th>
-                  <th>Bilateral ClassAd Requirement</th>
+                  <th>Target Peer / Runtime</th>
                   <th>Target Node / Match</th>
-                  <th>Stage DAG Routing</th>
+                  <th>Execution Mode</th>
                   <th>Priority</th>
                   <th>Status</th>
                 </tr>
@@ -7427,6 +7954,10 @@ window.fetch = function(url, options = {}) {
   return _originalFetch(url, options);
 };
 
+function fetchWithAuth(url, options = {}) {
+  return window.fetch(url, options);
+}
+
 let topology = null;
 let currentLocalId = '';
 let currentFleet = [];
@@ -7435,6 +7966,7 @@ let selectedPeer = null;
 let isLogPaused = false;
 let currentLogFilter = 'all';
 let lastStatusData = null;
+let currentWorkerAllowlist = [];
 
 document.addEventListener('DOMContentLoaded', () => {
   topology = new TopologyRenderer('topologyCanvas', 'canvasContainer');
@@ -7446,6 +7978,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSamples();
   loadBlobs();
   loadCoordinatorStatus();
+  loadWorkerSettings();
   loadTasks();
 
   // Periodic polling every 3 seconds to keep fleet and metrics synchronized
@@ -7515,6 +8048,8 @@ function switchTab(tabId) {
   if (tabId === 'tab-coordinator') {
     pillHealth?.classList.add('active');
     pillCode?.classList.remove('active');
+    loadCoordinatorStatus();
+    loadWorkerSettings();
   } else {
     pillCode?.classList.add('active');
     pillHealth?.classList.remove('active');
@@ -8223,6 +8758,10 @@ function handleLiveEvent(evt) {
     loadCoordinatorStatus();
   }
 
+  if (t === 'worker_settings_updated') {
+    loadWorkerSettings();
+  }
+
   if (t.includes('task')) {
     loadTasks();
   }
@@ -8250,7 +8789,7 @@ function loadStatus() {
       }
 
       if (data.nat) {
-        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Cone'}`;
+        document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Unknown'}`;
       }
 
       // Update GPU Card (Objective 3)
@@ -8352,6 +8891,7 @@ function pollFleetAndPeers() {
     if (topology) {
       topology.updateFleet(currentFleet, connectedPeers, currentLocalId, lastStatusData);
     }
+    updateFleetSuggestions();
   }).catch(() => {});
 }
 
@@ -8521,6 +9061,104 @@ function initCoordinatorHub() {
       });
     });
   }
+
+  // Cluster Auth Token Controls
+  const inputToken = document.getElementById('inputCoordAuthToken');
+  const btnToggleVis = document.getElementById('btnToggleAuthTokenVis');
+  if (btnToggleVis && inputToken) {
+    btnToggleVis.addEventListener('click', () => {
+      const isPass = inputToken.type === 'password';
+      inputToken.type = isPass ? 'text' : 'password';
+      const icon = btnToggleVis.querySelector('.material-symbols-outlined');
+      if (icon) {
+        icon.textContent = isPass ? 'visibility_off' : 'visibility';
+      }
+    });
+  }
+
+  const btnSaveToken = document.getElementById('btnSaveAuthToken');
+  if (btnSaveToken && inputToken) {
+    btnSaveToken.addEventListener('click', () => {
+      const tok = inputToken.value.trim();
+      fetchWithAuth('/api/coordinator/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth_token: tok })
+      })
+      .then(r => r.json())
+      .then(() => {
+        appendLog('COORDINATOR', tok ? 'Cluster auth token updated & signaling reconnected' : 'Cleared cluster auth token');
+        loadCoordinatorStatus();
+        loadWorkerSettings();
+      })
+      .catch(err => {
+        appendLog('COORDINATOR', `Failed to update auth token: ${err.message}`);
+      });
+    });
+  }
+
+  const btnClearToken = document.getElementById('btnClearAuthToken');
+  if (btnClearToken && inputToken) {
+    btnClearToken.addEventListener('click', () => {
+      inputToken.value = '';
+      fetchWithAuth('/api/coordinator/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_auth_token: true })
+      })
+      .then(r => r.json())
+      .then(() => {
+        appendLog('COORDINATOR', 'Cleared cluster auth token & reconnecting');
+        loadCoordinatorStatus();
+        loadWorkerSettings();
+      })
+      .catch(err => {
+        appendLog('COORDINATOR', `Failed to clear auth token: ${err.message}`);
+      });
+    });
+  }
+
+  const btnJump = document.getElementById('btnJumpToAuthToken');
+  if (btnJump && inputToken) {
+    btnJump.addEventListener('click', () => {
+      inputToken.focus();
+    });
+  }
+
+  // Worker Code Allowlist Controls
+  const inputAllowPeer = document.getElementById('inputAddAllowPeer');
+  const btnAddAllow = document.getElementById('btnAddAllowPeer');
+  if (btnAddAllow && inputAllowPeer) {
+    const handleAdd = () => {
+      const peer = inputAllowPeer.value.trim();
+      if (!peer) return;
+      if (!currentWorkerAllowlist.includes(peer)) {
+        saveWorkerAllowlist([...currentWorkerAllowlist, peer]);
+      }
+      inputAllowPeer.value = '';
+    };
+    btnAddAllow.addEventListener('click', handleAdd);
+    inputAllowPeer.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleAdd();
+      }
+    });
+  }
+
+  const btnAllowAll = document.getElementById('btnAllowAllCode');
+  if (btnAllowAll) {
+    btnAllowAll.addEventListener('click', () => {
+      saveWorkerAllowlist(['*']);
+    });
+  }
+
+  const btnDenyAll = document.getElementById('btnDenyAllCode');
+  if (btnDenyAll) {
+    btnDenyAll.addEventListener('click', () => {
+      saveWorkerAllowlist([]);
+    });
+  }
 }
 
 function loadCoordinatorStatus() {
@@ -8538,7 +9176,55 @@ function loadCoordinatorStatus() {
       if (mtlsElem) mtlsElem.textContent = 'DTLS / SCTP (WebRTC DataChannel)';
 
       const daemonStat = document.getElementById('coordDaemonStatus');
-      if (daemonStat) daemonStat.textContent = data.status || 'RUNNING';
+      const authBadge = document.getElementById('coordAuthBadge');
+      const bannerAuth = document.getElementById('bannerAuthRequired');
+      const pillAuthToken = document.getElementById('pillAuthTokenStatus');
+
+      if (data.status === 'AUTH_REQUIRED' || data.auth_required) {
+        if (daemonStat) {
+          daemonStat.textContent = 'AUTH_REQUIRED';
+          daemonStat.className = 'text-amber-400 font-mono text-[11px] font-semibold';
+        }
+        if (authBadge) {
+          authBadge.textContent = 'Auth Required (401)';
+          authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40';
+          authBadge.classList.remove('hidden');
+        }
+        if (bannerAuth) {
+          bannerAuth.classList.remove('hidden');
+        }
+        if (pillAuthToken) {
+          pillAuthToken.textContent = 'Not Set';
+          pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
+        }
+      } else {
+        if (daemonStat) {
+          daemonStat.textContent = data.status || 'RUNNING';
+          daemonStat.className = 'text-secondary font-mono text-[11px] font-semibold';
+        }
+        if (bannerAuth) {
+          bannerAuth.classList.add('hidden');
+        }
+        if (data.auth_token_set) {
+          if (pillAuthToken) {
+            pillAuthToken.textContent = 'Token Configured';
+            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
+          }
+          if (authBadge) {
+            authBadge.textContent = 'Authenticated';
+            authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-secondary border border-secondary/30';
+            authBadge.classList.remove('hidden');
+          }
+        } else {
+          if (pillAuthToken) {
+            pillAuthToken.textContent = 'Not Set';
+            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline';
+          }
+          if (authBadge) {
+            authBadge.classList.add('hidden');
+          }
+        }
+      }
 
       if (topology) {
         if (topology.coordinator) {
@@ -8625,6 +9311,114 @@ function loadCoordinatorStatus() {
     }).catch(() => {});
 }
 
+function saveWorkerAllowlist(newList) {
+  fetchWithAuth('/api/worker/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code_allowlist: newList })
+  })
+  .then(r => r.json())
+  .then(data => {
+    appendLog('WORKER', `Updated code execution allowlist: [${(data.code_allowlist || []).join(', ')}]`);
+    loadWorkerSettings();
+  })
+  .catch(err => {
+    appendLog('WORKER', `Failed to update code allowlist: ${err.message}`);
+  });
+}
+
+function loadWorkerSettings() {
+  fetchWithAuth('/api/worker/settings')
+    .then(r => r.json())
+    .then(data => {
+      if (!data) return;
+      currentWorkerAllowlist = data.code_allowlist || [];
+
+      // Runtime Status Badge
+      const badge = document.getElementById('badgeDockerStatus');
+      if (badge) {
+        if (data.docker_active) {
+          badge.textContent = 'Docker Sandbox Active';
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
+        } else {
+          badge.textContent = 'Docker Unavailable (Forwarding Only)';
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
+        }
+      }
+
+      // Render interactive chip list
+      const container = document.getElementById('codeAllowlistChips');
+      if (container) {
+        if (currentWorkerAllowlist.length === 0) {
+          container.innerHTML = '<span class="text-xs text-outline italic p-1">Default Deny — no remote peers can execute code on this machine.</span>';
+        } else {
+          container.innerHTML = '';
+          currentWorkerAllowlist.forEach(p => {
+            const span = document.createElement('span');
+            if (p === '*') {
+              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5';
+              span.innerHTML = `
+                <span class="material-symbols-outlined text-sm">warning</span>
+                <span>Wildcard (*) active — any authenticated cluster peer can submit Docker code jobs.</span>
+                <button type="button" class="btn-remove-chip ml-1 text-amber-300 hover:text-white font-bold leading-none cursor-pointer" data-peer="*" title="Remove wildcard">&times;</button>
+              `;
+            } else {
+              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono bg-surface-high text-on-surface border border-outline-variant/50 flex items-center gap-1.5';
+              span.innerHTML = `
+                <span>${escapeHTML(p)}</span>
+                <button type="button" class="btn-remove-chip ml-1 text-outline hover:text-error font-bold leading-none cursor-pointer" data-peer="${escapeHTML(p)}" title="Remove peer">&times;</button>
+              `;
+            }
+            container.appendChild(span);
+          });
+
+          container.querySelectorAll('.btn-remove-chip').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const toRemove = btn.dataset.peer;
+              const nextList = currentWorkerAllowlist.filter(item => item !== toRemove);
+              saveWorkerAllowlist(nextList);
+            });
+          });
+        }
+      }
+
+      // Update fleet peer suggestions
+      updateFleetSuggestions();
+    })
+    .catch(() => {});
+}
+
+function updateFleetSuggestions() {
+  const wrap = document.getElementById('fleetSuggestionsWrap');
+  const list = document.getElementById('fleetSuggestionsList');
+  if (!wrap || !list) return;
+
+  const candidatePeers = (currentFleet || []).filter(p => {
+    return p && p !== currentLocalId && !currentWorkerAllowlist.includes(p) && !currentWorkerAllowlist.includes('*');
+  });
+
+  if (candidatePeers.length === 0) {
+    wrap.classList.add('hidden');
+    list.innerHTML = '';
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  list.innerHTML = '';
+  candidatePeers.forEach(p => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'px-2 py-0.5 rounded bg-surface-high hover:bg-surface-highest border border-outline-variant/30 text-[11px] text-primary font-mono cursor-pointer transition-colors';
+    btn.textContent = `+ ${p}`;
+    btn.title = `Authorize ${p}`;
+    btn.addEventListener('click', () => {
+      saveWorkerAllowlist([...currentWorkerAllowlist, p]);
+    });
+    list.appendChild(btn);
+  });
+}
+
 function initShardMatrix() {
   const verifyBtn = document.getElementById('btnVerifyAllMerkle');
   if (verifyBtn) {
@@ -8697,9 +9491,9 @@ function initTaskQueue() {
       const targetNode = (currentFleet && currentFleet.length > 0) ? currentFleet[0] : (currentLocalId || 'local-worker');
       const sampleJob = {
         job_id: `#JOB-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_ad: 'Arch == "x86_64" && HasLocalCAS == true',
+        class_ad: 'docker:python3.13 (128MB RAM, air-gapped)',
         target_match: `Matched -> ${targetNode}`,
-        stage_dag: 'STAGE_DATA_LOCAL_EXEC',
+        stage_dag: 'DOCKER_SANDBOX_EXEC',
         priority: 'P1 NORMAL',
         status: 'SUBMITTED (0%)',
         timestamp: new Date().toLocaleTimeString()
@@ -8731,7 +9525,7 @@ function loadTasks() {
       if (!tbody) return;
 
       if (countBadge) {
-        countBadge.textContent = `Showing ${data.tasks.length} Active DAG Tasks`;
+        countBadge.textContent = `Showing ${data.tasks.length} Active Tasks`;
       }
 
       tbody.innerHTML = '';
@@ -9628,6 +10422,7 @@ func main() {
 			if len(parts) > 0 {
 				if tsNano, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
 					rtt := time.Duration(time.Now().UnixNano() - tsNano)
+					n.RecordPeerRTT(peerID, rtt)
 					fmt.Printf("\n[PONG] Reply from %s: RTT=%.2fms\n> ", peerID, float64(rtt)/float64(time.Millisecond))
 					return
 				}
@@ -17500,6 +18295,37 @@ func TestExecuteTask_PathTraversalRejection(t *testing.T) {
 	}
 }
 
+func TestExecuteTask_RelativeCheckpointBlob(t *testing.T) {
+	storageDir := t.TempDir()
+	mgr, err := NewManager(ManagerConfig{
+		StorageDir: storageDir,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+
+	// 1. Valid relative path inside StorageDir must NOT be rejected with path traversal error
+	respValid := mgr.ExecuteTask(ctx, GPUTaskRequest{
+		JobID:          "valid-job-rel",
+		CheckpointBlob: "checkpoints/job1.bin",
+	})
+	if respValid.Status == "rejected" {
+		t.Errorf("expected relative path inside StorageDir to be accepted, got rejected: %v", respValid.Error)
+	}
+
+	// 2. Traversal ../escape.bin must be rejected
+	respEscape := mgr.ExecuteTask(ctx, GPUTaskRequest{
+		JobID:          "valid-job-rel",
+		CheckpointBlob: "../escape.bin",
+	})
+	if respEscape.Status != "rejected" {
+		t.Errorf("expected ../escape.bin to be rejected, got: %s", respEscape.Status)
+	}
+}
+
 ================================================
 FILE: pkg/gpu/hipify/analyzer.go
 ================================================
@@ -18102,7 +18928,11 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 	// Validate req.CheckpointBlob to prevent path traversal
 	if req.CheckpointBlob != "" {
 		absStorage, err1 := filepath.Abs(m.cfg.StorageDir)
-		absBlob, err2 := filepath.Abs(filepath.Clean(req.CheckpointBlob))
+		target := req.CheckpointBlob
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(m.cfg.StorageDir, target)
+		}
+		absBlob, err2 := filepath.Abs(filepath.Clean(target))
 		rel, err3 := filepath.Rel(absStorage, absBlob)
 		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(rel, "..") || rel == ".." {
 			resp.Status = "rejected"
@@ -19421,18 +20251,21 @@ func (w *Watchdog) pollLoop() {
 					w.status.State = StatePausedBattery
 					w.status.LastPauseReason = "Host switched to battery power"
 					w.status.LastPauseTime = time.Now()
+					reason := w.status.LastPauseReason
+					cb := w.onPause
 					w.mu.Unlock()
-					if w.onPause != nil {
-						w.onPause(w.status.LastPauseReason)
+					if cb != nil {
+						cb(reason)
 					}
 					continue
 				}
 			} else if !onBattery && w.state == StatePausedBattery {
 				w.state = StateRunning
 				w.status.State = StateRunning
+				cb := w.onResume
 				w.mu.Unlock()
-				if w.onResume != nil {
-					w.onResume()
+				if cb != nil {
+					cb()
 				}
 				continue
 			}
@@ -20995,6 +21828,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21823,6 +22657,54 @@ func (n *Node) ReconnectSignaling(ctx context.Context, newURL string) error {
 		n.transport.SetSignalingClient(sigClient)
 	}
 	return nil
+}
+
+// SetAuthToken updates the coordinator cluster authentication token.
+func (n *Node) SetAuthToken(token string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cfg.AuthToken = strings.TrimSpace(token)
+}
+
+// HasAuthToken reports whether a coordinator cluster authentication token is set.
+func (n *Node) HasAuthToken() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.cfg.AuthToken != ""
+}
+
+// SetCodeAllowlist replaces the worker Docker code execution allowlist with
+// a normalized map of allowed peer IDs (trimming whitespace and skipping empty entries).
+func (n *Node) SetCodeAllowlist(peers ...string) {
+	allowed := make(map[string]struct{}, len(peers))
+	for _, p := range peers {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			allowed[trimmed] = struct{}{}
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.codeAllowedPeers = allowed
+}
+
+// CodeAllowlist returns a sorted slice of currently allowed peer IDs.
+func (n *Node) CodeAllowlist() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	res := make([]string, 0, len(n.codeAllowedPeers))
+	for p := range n.codeAllowedPeers {
+		res = append(res, p)
+	}
+	sort.Strings(res)
+	return res
+}
+
+// CodeExecutorActive reports whether an active code executor is configured.
+func (n *Node) CodeExecutorActive() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.codeExecutor != nil
 }
 
 ================================================
@@ -25138,6 +26020,82 @@ func TestSignaling_DuplicateNodeIDRejected(t *testing.T) {
 	}
 }
 
+func TestHub_RejectsSpoofedSenderID(t *testing.T) {
+	authToken := "cluster-auth-token-xyz"
+	hub, err := NewHub("127.0.0.1:0", authToken)
+	if err != nil {
+		t.Fatalf("failed to start hub: %v", err)
+	}
+	defer hub.Close()
+
+	wsURL := hub.URL()
+
+	recvC := make(chan protocol.Envelope, 10)
+
+	// Register authenticated peer-A
+	peerA, err := NewClient(wsURL, "peer-A", func(env protocol.Envelope) {}, authToken)
+	if err != nil {
+		t.Fatalf("failed to create peerA: %v", err)
+	}
+	defer peerA.Close()
+
+	// Register authenticated peer-C
+	peerC, err := NewClient(wsURL, "peer-C", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			recvC <- env
+		}
+	}, authToken)
+	if err != nil {
+		t.Fatalf("failed to create peerC: %v", err)
+	}
+	defer peerC.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 1. peer-A attempts to send a spoofed envelope claiming SenderID: "peer-B" targeting peer-C
+	spoofedPayload, _ := json.Marshal(map[string]string{"attack": "impersonation"})
+	spoofedEnv := protocol.Envelope{
+		Type:     protocol.MsgSDPOffer,
+		SenderID: "peer-B",
+		TargetID: "peer-C",
+		Payload:  spoofedPayload,
+	}
+
+	if err := peerA.Send(spoofedEnv); err != nil {
+		t.Fatalf("peerA Send failed: %v", err)
+	}
+
+	// Verify peer-C does NOT receive the spoofed message
+	select {
+	case env := <-recvC:
+		t.Fatalf("security violation: peer-C received spoofed message from SenderID %s: %s", env.SenderID, string(env.Payload))
+	case <-time.After(300 * time.Millisecond):
+		// Expected: hub dropped the spoofed message
+	}
+
+	// 2. Legitimate message from peer-A to peer-C should still succeed
+	legitPayload, _ := json.Marshal(map[string]string{"status": "legit"})
+	legitEnv := protocol.Envelope{
+		Type:     protocol.MsgSDPOffer,
+		SenderID: "peer-A",
+		TargetID: "peer-C",
+		Payload:  legitPayload,
+	}
+
+	if err := peerA.Send(legitEnv); err != nil {
+		t.Fatalf("peerA legitimate Send failed: %v", err)
+	}
+
+	select {
+	case received := <-recvC:
+		if received.SenderID != "peer-A" {
+			t.Errorf("expected SenderID peer-A, got: %s", received.SenderID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for legitimate message at peer-C")
+	}
+}
+
 ================================================
 FILE: pkg/transport/connection.go
 ================================================
@@ -26117,7 +27075,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	m.mu.Unlock()
 
 	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			m.removeSession(targetPeerID, sessionID)
 		}
 	})
@@ -26290,7 +27248,7 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	m.mu.Unlock()
 
 	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			m.removeSession(remotePeerID, sdp.SessionID)
 		}
 	})
@@ -27826,21 +28784,30 @@ function Record-Result {
         [string]$TestName,
         [bool]$Passed,
         [string]$Duration,
-        [string]$Details
+        [string]$Details,
+        [string]$Status = ""
     )
+    if (-not $Status) {
+        $Status = if ($Passed) { "PASS" } else { "FAIL" }
+    }
     $obj = [PSCustomObject]@{
         Category = $Category
         TestName = $TestName
-        Status   = if ($Passed) { "PASS" } else { "FAIL" }
+        Status   = $Status
         Duration = $Duration
         Details  = $Details
     }
     $script:scorecard += $obj
-    if (-not $Passed) {
+    if ($Status -eq "PASS") {
+        Write-Host " [PASS] $TestName ($Duration)" -ForegroundColor Green
+    } elseif ($Status -eq "BLOCKED") {
+        $script:allPassed = $false
+        Write-Host " [BLOCKED] $TestName ($Duration) - $Details" -ForegroundColor Red
+    } elseif ($Status -eq "SKIP") {
+        Write-Host " [SKIP] $TestName ($Duration) - $Details" -ForegroundColor Yellow
+    } else {
         $script:allPassed = $false
         Write-Host " [FAIL] $TestName ($Duration) - $Details" -ForegroundColor Red
-    } else {
-        Write-Host " [PASS] $TestName ($Duration)" -ForegroundColor Green
     }
 }
 
@@ -27873,7 +28840,11 @@ foreach ($pkg in $pkgs) {
         go test -c -o $testBin "./pkg/$pkg" 2>&1 | Out-Null
         if (Test-Path $testBin) {
             Sign-Binary $testBin
-            $out = & ".\$testBin" "-test.v" 2>&1
+            try {
+                $out = & ".\$testBin" "-test.v" 2>&1
+            } catch {
+                $out = $_.ToString()
+            }
             $testCode = $LASTEXITCODE
             Remove-Item $testBin -Force -ErrorAction SilentlyContinue
             $LASTEXITCODE = $testCode
@@ -27884,10 +28855,11 @@ foreach ($pkg in $pkgs) {
 
     $outText = $out -join "`n"
     $isBlockedBySAC = ($out -join " ") -like "*Application Control policy*"
-    $passed = (($LASTEXITCODE -eq 0) -and ($outText -cnotlike "*FAIL*")) -or $isBlockedBySAC
-    if ($passed) {
-        $detail = if ($isBlockedBySAC) { "Policy-quarantined on Windows SAC; unit tests verified" } else { "Go test passed" }
-        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $true -Duration $dur -Details $detail
+    $passed = ($LASTEXITCODE -eq 0) -and ($outText -cnotlike "*FAIL*") -and (-not $isBlockedBySAC)
+    if ($isBlockedBySAC) {
+        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
+    } elseif ($passed) {
+        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $true -Duration $dur -Details "Go test passed"
     } else {
         $lastLines = ($out | Select-Object -Last 5) -join " "
         Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $false -Duration $dur -Details $lastLines
@@ -27899,29 +28871,15 @@ Write-Host " PHASE 2: OBJECTIVE 3 PHYSICAL HARDWARE & GOVERNANCE SUITE" -Foregro
 Write-Host "=======================================================================" -ForegroundColor Cyan
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$verifyExe = "bin/verify-obj3.exe"
-go build -o $verifyExe ./cmd/verify-obj3 2>&1 | Out-Null
-Sign-Binary $verifyExe
-$verifyOut = $null
-if (Test-Path $verifyExe) {
-    try {
-        $verifyOut = & ".\$verifyExe" 2>&1
-    } catch {}
-}
-if (-not $verifyOut -or ($verifyOut -join " ") -like "*Application Control policy*") {
-    $verifyTest = "bin/verify-obj3.test.exe"
-    if (-not (Test-Path $verifyTest)) {
-        go test -c -o $verifyTest ./cmd/verify-obj3 2>&1 | Out-Null
-    }
-    if (Test-Path $verifyTest) {
-        $verifyOut = & ".\$verifyTest" "-test.v" 2>&1
-    }
-}
+$verifyOut = go run ./cmd/verify-obj3 2>&1
 $sw.Stop()
 $dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
 
-if (($verifyOut -join "`n") -like "*ALL OBJECTIVE 3 TESTS PASSED*") {
-    Record-Result -Category "Hardware/Governance" -TestName "Objective 3 Live Suite" -Passed $true -Duration $dur -Details "RTX 4050 probe, Watchdog, HIPIFY, Win32 JobObject"
+$isBlockedBySAC = ($verifyOut -join " ") -like "*Application Control policy*"
+if ($isBlockedBySAC) {
+    Record-Result -Category "Hardware/Governance" -TestName "Objective 3 Live Suite" -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
+} elseif (($verifyOut -join "`n") -like "*ALL OBJECTIVE 3 TESTS PASSED*") {
+    Record-Result -Category "Hardware/Governance" -TestName "Objective 3 Live Suite" -Passed $true -Duration $dur -Details "GPU hardware probe, Watchdog, HIPIFY, Win32 JobObject"
 } else {
     Record-Result -Category "Hardware/Governance" -TestName "Objective 3 Live Suite" -Passed $false -Duration $dur -Details "Hardware verification failed"
 }
@@ -27934,56 +28892,54 @@ Write-Host "====================================================================
 Write-Host "`n--> Compiling & Running samples/c/hello.c..." -ForegroundColor Yellow
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $cExe = "bin/test_sample_hello.exe"
-g++.exe samples/c/hello.c -O2 -o $cExe 2>&1 | Out-Null
-Sign-Binary $cExe
+$gppAvailable = (Get-Command g++.exe -ErrorAction SilentlyContinue) -ne $null
 $cOut = $null
-if ($LASTEXITCODE -eq 0 -and (Test-Path $cExe)) {
-    try { $cOut = & ".\$cExe" 2>&1 } catch {}
-    Remove-Item $cExe -Force -ErrorAction SilentlyContinue
-}
-if (-not $cOut -or ($cOut -join " ") -like "*Application Control policy*") {
-    if (Test-Path "bin/remote_hello.exe") {
-        $cOut = & "bin/remote_hello.exe" 2>&1
+if ($gppAvailable) {
+    g++.exe samples/c/hello.c -O2 -o $cExe 2>&1 | Out-Null
+    Sign-Binary $cExe
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $cExe)) {
+        try { $cOut = & ".\$cExe" 2>&1 } catch { $cOut = $_.ToString() }
+        Remove-Item $cExe -Force -ErrorAction SilentlyContinue
     }
 }
 $sw.Stop()
-$passed = ($cOut -join "`n") -like "*Status: C worker execution passed.*"
-Record-Result -Category "Samples" -TestName "samples/c/hello.c" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s" -Details "FNV-1a hash verification verified"
+$dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
+$isBlockedBySAC = ($cOut -join " ") -like "*Application Control policy*"
+if (-not $gppAvailable) {
+    Record-Result -Category "Samples" -TestName "samples/c/hello.c" -Passed $false -Status "SKIP" -Duration $dur -Details "g++ compiler not available"
+} elseif ($isBlockedBySAC) {
+    Record-Result -Category "Samples" -TestName "samples/c/hello.c" -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
+} else {
+    $passed = ($cOut -join "`n") -like "*Status: C worker execution passed.*"
+    Record-Result -Category "Samples" -TestName "samples/c/hello.c" -Passed $passed -Duration $dur -Details "FNV-1a hash verification verified"
+}
 
 # Sample 2: C++ Fibonacci Benchmark (samples/cpp/fib.cpp)
 Write-Host "`n--> Compiling & Running samples/cpp/fib.cpp..." -ForegroundColor Yellow
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $cppExe = "bin/test_sample_fib.exe"
-g++.exe samples/cpp/fib.cpp -o $cppExe 2>&1 | Out-Null
-Sign-Binary $cppExe
+$gppAvailable = (Get-Command g++.exe -ErrorAction SilentlyContinue) -ne $null
 $cppOut = $null
-if ($LASTEXITCODE -eq 0 -and (Test-Path $cppExe)) {
-    try { $cppOut = & ".\$cppExe" 2>&1 } catch {}
-    Remove-Item $cppExe -Force -ErrorAction SilentlyContinue
-}
-if (-not $cppOut -or ($cppOut -join " ") -like "*Application Control policy*") {
-    $cppOut = python -c "
-print('==================================================')
-print('    UniCompute Worker: C++ Fibonacci Benchmark    ')
-print('==================================================')
-a, b = 0, 1
-for i in range(45):
-    print(f'{i:3d}: {a:20d}', end='')
-    if i > 1 and a > 0:
-        ratio = a / prev
-        print(f'  (Ratio: {ratio:.8f})')
-    else:
-        print()
-    prev = a
-    a, b = b, a + b
-print('==================================================')
-print('Approaching Golden Ratio (phi): 1.6180339887...')
-print('Status: C++ computation completed successfully.')
-" 2>&1
+if ($gppAvailable) {
+    g++.exe samples/cpp/fib.cpp -o $cppExe 2>&1 | Out-Null
+    Sign-Binary $cppExe
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $cppExe)) {
+        try { $cppOut = & ".\$cppExe" 2>&1 } catch { $cppOut = $_.ToString() }
+        Remove-Item $cppExe -Force -ErrorAction SilentlyContinue
+    }
 }
 $sw.Stop()
-$passed = ($null -ne $cppOut) -and (($cppOut -join "`n") -like "*Approaching Golden Ratio (phi)*")
-Record-Result -Category "Samples" -TestName "samples/cpp/fib.cpp" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s" -Details "Fibonacci 45 steps and Golden Ratio converged"
+$dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
+$isBlockedBySAC = ($cppOut -join " ") -like "*Application Control policy*"
+
+if (-not $gppAvailable) {
+    Record-Result -Category "Samples" -TestName "samples/cpp/fib.cpp" -Passed $false -Status "SKIP" -Duration $dur -Details "g++ compiler not available"
+} elseif ($isBlockedBySAC) {
+    Record-Result -Category "Samples" -TestName "samples/cpp/fib.cpp" -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
+} else {
+    $passed = ($null -ne $cppOut) -and (($cppOut -join "`n") -like "*Approaching Golden Ratio (phi)*")
+    Record-Result -Category "Samples" -TestName "samples/cpp/fib.cpp" -Passed $passed -Duration $dur -Details "Fibonacci 45 steps and Golden Ratio converged"
+}
 
 # Sample 3: Python Data Processing (samples/python/calc.py + input.txt)
 Write-Host "`n--> Running samples/python/calc.py with input.txt..." -ForegroundColor Yellow
@@ -28064,80 +29020,121 @@ if ($token) {
 }
 
 try {
-    # 4.1 Status API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $status = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/status" -Headers $authHeaders
-    $sw.Stop()
-    $passed = ($null -ne $status.node_id) -and ($null -ne $status.nat)
-    Record-Result -Category "GUI API" -TestName "/api/status" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Node ID=$($status.node_id), NAT=$($status.nat.nat_type)"
-
-    # 4.2 GPU API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $gpu = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu" -Headers $authHeaders
-    $sw.Stop()
-    $passed = $gpu.enabled -and ($null -ne $gpu.profile)
-    Record-Result -Category "GUI API" -TestName "/api/gpu" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Device=$($gpu.profile.device_name), Temp=$($gpu.profile.temperature_c)C"
-
-    # 4.3 Samples API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $samplesResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/samples" -Headers $authHeaders
-    $sw.Stop()
-    $passed = ($samplesResp.samples.Count -ge 8)
-    Record-Result -Category "GUI API" -TestName "/api/samples" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Found $($samplesResp.samples.Count) pre-loaded sample files"
-
-    # 4.4 HIPIFY API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $hipifyResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/hipify" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ source = "__global__ void k() { cudaMalloc(0, 0); }" } | ConvertTo-Json)
-    $sw.Stop()
-    $passed = $hipifyResp.success -and ($hipifyResp.translated_source -like "*hipMalloc*")
-    Record-Result -Category "GUI API" -TestName "/api/gpu/hipify" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Live CUDA-to-HIP translation verified"
-
-    # 4.5 CAS Storage Put & Scrub API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $putResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/storage/put" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ content = "Master Verification Test Payload 999" } | ConvertTo-Json)
-    $scrubResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/storage/scrub" -Method Post -ContentType "application/json" -Headers $authHeaders -Body "{}"
-    $sw.Stop()
-    $passed = ($null -ne $putResp.blob_id) -and ($scrubResp.status -eq "complete") -and ($scrubResp.corrupted.Count -eq 0)
-    Record-Result -Category "GUI API" -TestName "/api/storage/put & /scrub" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Blob ID=$($putResp.blob_id), Scrub Corrupted=0"
-
-    # 4.6 GPU Sandboxed Run API
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $runResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/run" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ task_type = "gemm"; batches = 10 } | ConvertTo-Json)
-    $sw.Stop()
-    $passed = ($runResp.status -eq "completed") -and ($runResp.processed_batches -eq 10)
-    Record-Result -Category "GUI API" -TestName "/api/gpu/run" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Batches=10, Time=$($runResp.execution_ms)ms"
-
-    # 4.7 Web HTML Index Serving
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $htmlResp = Invoke-WebRequest -Uri "http://127.0.0.1:$testPort/" -UseBasicParsing
-    $sw.Stop()
-    $passed = ($htmlResp.StatusCode -eq 200) -and ($htmlResp.Content -like "*UniCompute*")
-    Record-Result -Category "GUI API" -TestName "GET / (HTML5/Canvas)" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Control room frontend bundle served (Status 200)"
-
-    # 4.8 Unauthenticated Shell Exec Rejection (401)
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $unauthBlocked = $false
+    if (-not $token) {
+    $errContent = if (Test-Path $guiErrLog) { (Get-Content $guiErrLog -Raw -ErrorAction SilentlyContinue) } else { "" }
+    $outContent = if (Test-Path $guiLog) { (Get-Content $guiLog -Raw -ErrorAction SilentlyContinue) } else { "" }
+    $combined = ($errContent + " " + $outContent)
+    $isBlockedBySAC = $combined -like "*Application Control policy*"
+    if ($isBlockedBySAC) {
+        Record-Result -Category "GUI API" -TestName "GUI Daemon & REST Suite" -Passed $false -Status "BLOCKED" -Duration "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s" -Details "BLOCKED (Windows Smart App Control)"
+    } else {
+        Record-Result -Category "GUI API" -TestName "GUI Daemon & REST Suite" -Passed $false -Status "FAIL" -Duration "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s" -Details "Daemon failed to start: $errContent"
+    }
+} else {
     try {
-        $null = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/shell/exec" -Method Post -ContentType "application/json" -Body (@{ command = "echo test" } | ConvertTo-Json)
-    } catch {
-        if ($_.Exception.Response.StatusCode.value__ -eq 401 -or $_.Exception.Message -like "*401*") {
-            $unauthBlocked = $true
-        }
-    }
-    $sw.Stop()
-    Record-Result -Category "GUI API" -TestName "/api/shell/exec (Unauthenticated 401)" -Passed $unauthBlocked -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Unauthenticated remote shell access rejected with 401 Unauthorized"
-
-    # 4.9 Frontend JavaScript Syntax Verification
-    if (Get-Command node -ErrorAction SilentlyContinue) {
+        # 4.1 Status API
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $nodeAppOut = node --check cmd/unicompute-gui/web/js/app.js 2>&1
-        $appExit = $LASTEXITCODE
-        $nodeTopoOut = node --check cmd/unicompute-gui/web/js/topology.js 2>&1
-        $topoExit = $LASTEXITCODE
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/status" -Headers $authHeaders
         $sw.Stop()
-        $jsPassed = ($appExit -eq 0) -and ($topoExit -eq 0)
-        Record-Result -Category "GUI API" -TestName "Frontend JS Syntax" -Passed $jsPassed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "node --check on app.js and topology.js"
+        $passed = ($null -ne $status.node_id) -and ($null -ne $status.nat)
+        Record-Result -Category "GUI API" -TestName "/api/status" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Node ID=$($status.node_id), NAT=$($status.nat.nat_type)"
+
+        # 4.2 GPU API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $gpu = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu" -Headers $authHeaders
+        $sw.Stop()
+        $passed = $gpu.enabled -and ($null -ne $gpu.profile)
+        Record-Result -Category "GUI API" -TestName "/api/gpu" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Device=$($gpu.profile.device_name), Temp=$($gpu.profile.temperature_c)C"
+
+        # 4.3 Samples API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $samplesResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/samples" -Headers $authHeaders
+        $sw.Stop()
+        $passed = ($samplesResp.samples.Count -ge 8)
+        Record-Result -Category "GUI API" -TestName "/api/samples" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Found $($samplesResp.samples.Count) pre-loaded sample files"
+
+        # 4.4 HIPIFY API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $hipifyResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/hipify" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ source = "__global__ void k() { cudaMalloc(0, 0); }" } | ConvertTo-Json)
+        $sw.Stop()
+        $passed = $hipifyResp.success -and ($hipifyResp.translated_source -like "*hipMalloc*")
+        Record-Result -Category "GUI API" -TestName "/api/gpu/hipify" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Live CUDA-to-HIP translation verified"
+
+        # 4.5 CAS Storage Put & Scrub API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $putResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/storage/put" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ content = "Master Verification Test Payload 999" } | ConvertTo-Json)
+        $scrubResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/storage/scrub" -Method Post -ContentType "application/json" -Headers $authHeaders -Body "{}"
+        $sw.Stop()
+        $passed = ($null -ne $putResp.blob_id) -and ($scrubResp.status -eq "complete") -and ($scrubResp.corrupted.Count -eq 0)
+        Record-Result -Category "GUI API" -TestName "/api/storage/put & /scrub" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Blob ID=$($putResp.blob_id), Scrub Corrupted=0"
+
+        # 4.6 GPU Sandboxed Run API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $runResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/run" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ task_type = "gemm"; batches = 10 } | ConvertTo-Json)
+        $sw.Stop()
+        $passed = ($runResp.status -eq "completed") -and ($runResp.processed_batches -eq 10)
+        Record-Result -Category "GUI API" -TestName "/api/gpu/run" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Batches=10, Time=$($runResp.execution_ms)ms"
+
+        # 4.7 Web HTML Index Serving
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $htmlResp = Invoke-WebRequest -Uri "http://127.0.0.1:$testPort/" -UseBasicParsing
+        $sw.Stop()
+        $passed = ($htmlResp.StatusCode -eq 200) -and ($htmlResp.Content -like "*UniCompute*")
+        Record-Result -Category "GUI API" -TestName "GET / (HTML5/Canvas)" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Control room frontend bundle served (Status 200)"
+
+        # 4.8 Unauthenticated Shell Exec Rejection (401)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $unauthBlocked = $false
+        try {
+            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/shell/exec" -Method Post -ContentType "application/json" -Body (@{ command = "echo test" } | ConvertTo-Json)
+        } catch {
+            if ($_.Exception.Response.StatusCode.value__ -eq 401 -or $_.Exception.Message -like "*401*") {
+                $unauthBlocked = $true
+            }
+        }
+        $sw.Stop()
+        Record-Result -Category "GUI API" -TestName "/api/shell/exec (Unauthenticated 401)" -Passed $unauthBlocked -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Unauthenticated remote shell access rejected with 401 Unauthorized"
+
+        # 4.9 Coordinator Settings API (Auth Token Hygiene)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $coordSettingsResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/coordinator/settings" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ auth_token = "cluster-secret-verify-999" } | ConvertTo-Json)
+        $rawResp = $coordSettingsResp | ConvertTo-Json
+        $hasSecret = $rawResp -like "*cluster-secret-verify-999*"
+        $tokenSet = $coordSettingsResp.auth_token_set -eq $true
+        # Clear token
+        $clearResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/coordinator/settings" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ clear_auth_token = $true } | ConvertTo-Json)
+        $sw.Stop()
+        $passed = $tokenSet -and (-not $hasSecret) -and ($clearResp.auth_token_set -eq $false)
+        Record-Result -Category "GUI API" -TestName "/api/coordinator/settings" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Auth token secret hygiene verified (never echoed, auth_token_set=true/false)"
+
+        # 4.10 Worker Code Execution Allowlist API
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $allowResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/worker/settings" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ code_allowlist = @("peer-delta", "peer-alpha") } | ConvertTo-Json)
+        $getAllowResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/worker/settings" -Headers $authHeaders
+        # Wildcard allow
+        $wildResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/worker/settings" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ code_allowlist = @("*") } | ConvertTo-Json)
+        # Reset allowlist
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/worker/settings" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ code_allowlist = @() } | ConvertTo-Json)
+        $sw.Stop()
+        $passed = ($allowResp.code_allowlist.Count -eq 2) -and ($allowResp.code_allowlist[0] -eq "peer-alpha") -and ($getAllowResp.code_allowlist[1] -eq "peer-delta") -and ($wildResp.wildcard_allowed -eq $true)
+        Record-Result -Category "GUI API" -TestName "/api/worker/settings" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Worker code execution allowlist live get/set verified (sorting, wildcard)"
+
+    } catch {
+        Record-Result -Category "GUI API" -TestName "GUI API Call Exception" -Passed $false -Status "FAIL" -Duration "0ms" -Details $_.ToString()
     }
+}
+
+# 4.11 Frontend JavaScript Syntax Verification
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $nodeAppOut = node --check cmd/unicompute-gui/web/js/app.js 2>&1
+    $appExit = $LASTEXITCODE
+    $nodeTopoOut = node --check cmd/unicompute-gui/web/js/topology.js 2>&1
+    $topoExit = $LASTEXITCODE
+    $sw.Stop()
+    $jsPassed = ($appExit -eq 0) -and ($topoExit -eq 0)
+    Record-Result -Category "GUI API" -TestName "Frontend JS Syntax" -Passed $jsPassed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "node --check on app.js and topology.js"
+}
 
 } finally {
     Write-Host "`n--> Stopping GUI test daemon..." -ForegroundColor Yellow

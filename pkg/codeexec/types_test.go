@@ -47,3 +47,38 @@ func TestResponseRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %#v", got)
 	}
 }
+
+func TestDockerSandboxSecurityAndCppConfig(t *testing.T) {
+	exec := NewDockerExecutor(Config{})
+	if exec.cfg.MemoryLimit != "256m" {
+		t.Fatalf("expected default MemoryLimit 256m, got %q", exec.cfg.MemoryLimit)
+	}
+
+	srcName, image, cmd := languageRuntime("cpp")
+	if srcName != "main.cpp" || image != "gcc:14" {
+		t.Fatalf("unexpected cpp runtime: %q, %q", srcName, image)
+	}
+	if strings.Contains(cmd, "-O2") || !strings.Contains(cmd, "-O1") {
+		t.Fatalf("expected C++ compile command to use -O1 instead of -O2, got %q", cmd)
+	}
+
+	args := exec.buildDockerArgs("test-container", "/tmp/work", image, cmd)
+	joined := strings.Join(args, " ")
+
+	required := []string{
+		"--network none",
+		"--memory 256m",
+		"--memory-swap 256m",
+		"--cap-drop ALL",
+		"--read-only",
+		"--tmpfs /tmp:rw,exec,nosuid,nodev,size=64m",
+		"--user 65534:65534",
+		"--security-opt no-new-privileges:true",
+	}
+	for _, flag := range required {
+		if !strings.Contains(joined, flag) {
+			t.Errorf("expected docker args to contain %q; got %q", flag, joined)
+		}
+	}
+}
+

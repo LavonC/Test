@@ -703,7 +703,7 @@
               <span class="badge-emerald font-mono text-xs">AIR-GAPPED DOCKER</span>
             </div>
             <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Dispatch bounded C, C++, or Python jobs over WebRTC DataChannel (or execute locally). Executed in ephemeral Docker containers with read-only root, 128 MB RAM, zero network access, and unprivileged execution.
+              Dispatch bounded C, C++, or Python jobs over WebRTC DataChannel (or execute locally). Executed in ephemeral Docker containers with read-only root, 256 MB RAM, zero network access, and unprivileged execution.
             </p>
           </div>
           <div class="flex items-center gap-2">
@@ -713,7 +713,7 @@
             </div>
             <div class="telemetry-pill-static">
               <span class="pill-label">MEM CAP:</span>
-              <span class="pill-value-pri">128 MB</span>
+              <span class="pill-value-pri">256 MB</span>
             </div>
           </div>
         </div>
@@ -805,7 +805,7 @@
               </div>
               <div class="flex justify-between">
                 <span class="text-on-surface-variant">Memory Ceiling:</span>
-                <span class="text-primary font-semibold">128 MB (cgroups v2)</span>
+                <span class="text-primary font-semibold">256 MB (cgroups v2)</span>
               </div>
               <div class="flex justify-between">
                 <span class="text-on-surface-variant">Network Policy:</span>
@@ -1011,7 +1011,7 @@
             </button>
             <button id="btnShardNewDataset" class="btn-emerald font-semibold text-xs flex items-center gap-1.5">
               <span class="material-symbols-outlined text-xs">upload_file</span>
-              <span>Shard New Dataset</span>
+              <span>Chunk New Dataset</span>
             </button>
             <button id="btnRefreshBlobs" class="btn-primary-compact">Refresh</button>
           </div>
@@ -1157,7 +1157,7 @@
             </button>
             <button class="btn-emerald font-semibold text-xs flex items-center gap-1.5" id="btnDispatchSampleTask">
               <span class="material-symbols-outlined text-xs">send</span>
-              <span>Dispatch Sample DAG</span>
+              <span>Dispatch Sample Task</span>
             </button>
           </div>
         </div>
@@ -1293,7 +1293,7 @@
         <span class="status-dot-sm"></span> Task Activity Monitoring
       </span>
       <span class="footer-sep">•</span>
-      <span id="footerAllocLabel">Allocated: 128MB RAM / 10GB Vault / GPU Tier 3</span>
+      <span id="footerAllocLabel">Allocated: 256MB RAM / 10GB Vault / GPU Tier 3</span>
       <span class="footer-sep">•</span>
       <span id="footerP2PCount">0 P2P Links Active</span>
     </div>

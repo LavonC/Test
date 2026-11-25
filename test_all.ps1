@@ -8,7 +8,10 @@ $script:allPassed = $true
 
 # Use system Go directly
 
-$codeCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq "0B7334834AEBC5CD9D649685669D9AC4DAC77DCC" } | Select-Object -First 1
+$codeCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq "85C50DD08830130810C23EB191796899DCEEAA61" } | Select-Object -First 1
+if (-not $codeCert) {
+    $codeCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq "0B7334834AEBC5CD9D649685669D9AC4DAC77DCC" } | Select-Object -First 1
+}
 if (-not $codeCert) {
     $codeCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | Select-Object -First 1
 }
@@ -215,6 +218,15 @@ Record-Result -Category "Samples" -TestName "samples/security/timeout_test.py" -
 Write-Host "`n--> Running Standalone GPU & Model Capsule Suite (cmd/test-samples)..." -ForegroundColor Yellow
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $samplesOut = go run ./cmd/test-samples 2>&1
+if ($LASTEXITCODE -ne 0 -and ($samplesOut -join " ") -like "*Application Control policy*") {
+    $samplesExe = "bin/test-samples.exe"
+    go build -o $samplesExe ./cmd/test-samples 2>&1 | Out-Null
+    if (Test-Path $samplesExe) {
+        Sign-Binary $samplesExe
+        try { $samplesOut = & ".\$samplesExe" 2>&1 } catch { $samplesOut = $_.ToString() }
+        Remove-Item $samplesExe -Force -ErrorAction SilentlyContinue
+    }
+}
 $sw.Stop()
 $dur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
 
@@ -234,7 +246,7 @@ $passedLeak = ($samplesOut -join "`n") -like "*network_leak_test.py*Wire protoco
 Record-Result -Category "Samples" -TestName "samples/security/network_leak_test.py" -Passed $passedLeak -Duration $dur -Details "Air-gap verification protocol encapsulation verified"
 
 $passedMem = ($samplesOut -join "`n") -like "*mem_limit_test.py*Wire protocol encode/decode verified*"
-Record-Result -Category "Samples" -TestName "samples/security/mem_limit_test.py" -Passed $passedMem -Duration $dur -Details "128MB RAM cap audit protocol encapsulation verified"
+Record-Result -Category "Samples" -TestName "samples/security/mem_limit_test.py" -Passed $passedMem -Duration $dur -Details "256MB RAM cap audit protocol encapsulation verified"
 
 Write-Host "`n=======================================================================" -ForegroundColor Cyan
 Write-Host " PHASE 4: DESKTOP GUI DAEMON & API VERIFICATION" -ForegroundColor Cyan
@@ -245,19 +257,31 @@ Write-Host "`n--> Starting GUI daemon on port $testPort..." -ForegroundColor Yel
 $guiLog = [System.IO.Path]::GetTempFileName()
 $guiErrLog = [System.IO.Path]::GetTempFileName()
 $guiExe = "bin/unicompute-gui.exe"
+Remove-Item $guiExe -Force -ErrorAction SilentlyContinue
 go build -o $guiExe ./cmd/unicompute-gui 2>&1 | Out-Null
-Sign-Binary $guiExe
-$guiProc = Start-Process -FilePath "go" -ArgumentList @("run", "./cmd/unicompute-gui", "-headless", "-port", "$testPort", "-signaling", "ws://127.0.0.1:8080/ws") -RedirectStandardOutput $guiLog -RedirectStandardError $guiErrLog -PassThru
+$guiProc = $null
+$startErr = ""
+if ($LASTEXITCODE -eq 0 -and (Test-Path $guiExe)) {
+    Sign-Binary $guiExe
+    try {
+        $guiProc = Start-Process -FilePath $guiExe -ArgumentList @("-headless", "-port", "$testPort", "-signaling", "ws://127.0.0.1:8080/ws") -RedirectStandardOutput $guiLog -RedirectStandardError $guiErrLog -PassThru -ErrorAction Stop
+    } catch {
+        $startErr = $_.ToString()
+    }
+}
 
 $token = ""
-for ($i = 0; $i -lt 60; $i++) {
-    Start-Sleep -Milliseconds 250
-    if (Test-Path $guiLog) {
-        $logContent = Get-Content $guiLog -Raw -ErrorAction SilentlyContinue
-        if ($logContent -match "#token=([a-f0-9]+)") {
-            $token = $matches[1]
-            break
+if ($guiProc) {
+    for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Milliseconds 250
+        if (Test-Path $guiLog) {
+            $logContent = Get-Content $guiLog -Raw -ErrorAction SilentlyContinue
+            if ($logContent -match "#token=([a-f0-9]+)") {
+                $token = $matches[1]
+                break
+            }
         }
+        if ($guiProc.HasExited) { break }
     }
 }
 $authHeaders = @{}
@@ -269,12 +293,12 @@ try {
     if (-not $token) {
     $errContent = if (Test-Path $guiErrLog) { (Get-Content $guiErrLog -Raw -ErrorAction SilentlyContinue) } else { "" }
     $outContent = if (Test-Path $guiLog) { (Get-Content $guiLog -Raw -ErrorAction SilentlyContinue) } else { "" }
-    $combined = ($errContent + " " + $outContent)
+    $combined = ($errContent + " " + $outContent + " " + $startErr)
     $isBlockedBySAC = $combined -like "*Application Control policy*"
     if ($isBlockedBySAC) {
         Record-Result -Category "GUI API" -TestName "GUI Daemon & REST Suite" -Passed $false -Status "BLOCKED" -Duration "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s" -Details "BLOCKED (Windows Smart App Control)"
     } else {
-        Record-Result -Category "GUI API" -TestName "GUI Daemon & REST Suite" -Passed $false -Status "FAIL" -Duration "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s" -Details "Daemon failed to start: $errContent"
+        Record-Result -Category "GUI API" -TestName "GUI Daemon & REST Suite" -Passed $false -Status "FAIL" -Duration "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s" -Details "Daemon failed to start: $errContent $startErr"
     }
 } else {
     try {
@@ -399,12 +423,14 @@ Write-Host "====================================================================
 
 $scorecard | Format-Table -AutoSize Category, TestName, Status, Duration, Details
 
-$totalTests = $scorecard.Count
-$passedCount = ($scorecard | Where-Object { $_.Status -eq "PASS" }).Count
-$failedCount = $totalTests - $passedCount
+$totalTests = @($scorecard).Count
+$passedCount = @($scorecard | Where-Object { $_.Status -eq "PASS" }).Count
+$skippedCount = @($scorecard | Where-Object { $_.Status -eq "SKIP" }).Count
+$blockedCount = @($scorecard | Where-Object { $_.Status -eq "BLOCKED" }).Count
+$failedCount = @($scorecard | Where-Object { $_.Status -eq "FAIL" }).Count
 $totalDuration = "$([math]::Round(((Get-Date) - $startTime).TotalSeconds, 2))s"
 
-Write-Host "`nSummary: $passedCount/$totalTests Passed ($failedCount Failed) in $totalDuration" -ForegroundColor $(if ($script:allPassed) { "Green" } else { "Red" })
+Write-Host "`nSummary: $passedCount/$totalTests Passed ($failedCount Failed, $blockedCount Blocked, $skippedCount Skipped) in $totalDuration" -ForegroundColor $(if ($script:allPassed) { "Green" } else { "Red" })
 
 if ($script:allPassed) {
     Write-Host "`n[SUCCESS] All subsystems, hardware tests, samples, and GUI endpoints verified 100%!" -ForegroundColor Green

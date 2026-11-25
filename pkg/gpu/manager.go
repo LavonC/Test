@@ -177,6 +177,7 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 	}
 
 	// Validate req.CheckpointBlob to prevent path traversal
+	resolvedBlob := ""
 	if req.CheckpointBlob != "" {
 		absStorage, err1 := filepath.Abs(m.cfg.StorageDir)
 		target := req.CheckpointBlob
@@ -191,6 +192,7 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 			resp.ExecutionMs = time.Since(start).Milliseconds()
 			return resp
 		}
+		resolvedBlob = absBlob
 	}
 
 	// AssignProcess only applies when an external child worker PID is supplied via req.ProcessID.
@@ -218,9 +220,9 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 	ckptPath := filepath.Join(m.cfg.StorageDir, "checkpoints", req.JobID, "checkpoint.ckpt")
 	var initialCkpt onnx.Checkpoint
 
-	if req.CheckpointBlob != "" {
+	if resolvedBlob != "" {
 		// Load from blob or local checkpoint if present
-		loaded, err := onnx.LoadCheckpoint(req.CheckpointBlob)
+		loaded, err := onnx.LoadCheckpoint(resolvedBlob)
 		if err == nil {
 			initialCkpt = loaded
 		}

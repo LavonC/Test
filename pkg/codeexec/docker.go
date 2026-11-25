@@ -46,7 +46,7 @@ func NewDockerExecutor(cfg Config) *DockerExecutor {
 		cfg.MaxConcurrent = 2
 	}
 	if cfg.MemoryLimit == "" {
-		cfg.MemoryLimit = "128m"
+		cfg.MemoryLimit = "256m"
 	}
 	if cfg.CPULimit == "" {
 		cfg.CPULimit = "1.0"
@@ -137,27 +137,7 @@ func (e *DockerExecutor) Execute(parent context.Context, req Request) Response {
 		resp.DurationMs = time.Since(started).Milliseconds()
 		return resp
 	}
-	args := []string{
-		"run", "--rm", "-i",
-		"--name", containerName,
-		"--network", "none",
-		"--memory", e.cfg.MemoryLimit,
-		"--memory-swap", e.cfg.MemoryLimit,
-		"--cpus", e.cfg.CPULimit,
-		"--pids-limit", "64",
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges:true",
-		"--read-only",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
-		"--ulimit", "fsize=16777216:16777216",
-		"--mount", "type=bind,source=" + absDir + ",target=/src,readonly",
-		"--workdir", "/tmp",
-		"--env", "HOME=/tmp",
-		"--env", "TMPDIR=/tmp",
-		"--user", "65534:65534",
-		image,
-		"sh", "-lc", command,
-	}
+	args := e.buildDockerArgs(containerName, absDir, image, command)
 	cmd := exec.CommandContext(jobCtx, "docker", args...)
 	cmd.Stdin = strings.NewReader(req.Stdin)
 	stdout := newCappedBuffer(MaxOutputBytes)
@@ -197,6 +177,30 @@ func (e *DockerExecutor) Execute(parent context.Context, req Request) Response {
 	return resp
 }
 
+func (e *DockerExecutor) buildDockerArgs(containerName, absDir, image, command string) []string {
+	return []string{
+		"run", "--rm", "-i",
+		"--name", containerName,
+		"--network", "none",
+		"--memory", e.cfg.MemoryLimit,
+		"--memory-swap", e.cfg.MemoryLimit,
+		"--cpus", e.cfg.CPULimit,
+		"--pids-limit", "64",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges:true",
+		"--read-only",
+		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=64m",
+		"--ulimit", "fsize=16777216:16777216",
+		"--mount", "type=bind,source=" + absDir + ",target=/src,readonly",
+		"--workdir", "/tmp",
+		"--env", "HOME=/tmp",
+		"--env", "TMPDIR=/tmp",
+		"--user", "65534:65534",
+		image,
+		"sh", "-lc", command,
+	}
+}
+
 func randomContainerName() (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -208,9 +212,9 @@ func randomContainerName() (string, error) {
 func languageRuntime(language string) (sourceName, image, command string) {
 	switch strings.ToLower(strings.TrimSpace(language)) {
 	case "c":
-		return "main.c", "gcc:14", "gcc -std=c17 -O2 -pipe /src/main.c -o /tmp/program && /tmp/program"
+		return "main.c", "gcc:14", "gcc -std=c17 -O1 -pipe /src/main.c -o /tmp/program && /tmp/program"
 	case "cpp":
-		return "main.cpp", "gcc:14", "g++ -std=c++17 -O2 -pipe /src/main.cpp -o /tmp/program && /tmp/program"
+		return "main.cpp", "gcc:14", "g++ -std=c++17 -O1 -pipe /src/main.cpp -o /tmp/program && /tmp/program"
 	case "python":
 		return "main.py", "python:3.13-slim", "python -I -B /src/main.py"
 	default:
