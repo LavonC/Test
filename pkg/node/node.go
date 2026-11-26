@@ -158,10 +158,12 @@ func (n *Node) ensureTransportLocked() (*transport.Manager, error) {
 	}
 
 	tm, err := transport.NewManager(transport.Config{
-		NodeID:          n.cfg.NodeID,
-		STUNServers:     stunList,
-		TURNServers:     n.cfg.TURNServers,
-		FallbackTimeout: n.cfg.FallbackTimeout,
+		NodeID:        n.cfg.NodeID,
+		STUNServers:   stunList,
+		TURNServers:   n.cfg.TURNServers,
+		PrivateKey:    n.privKey,
+		IsBehindCGNAT: n.natReport != nil && n.natReport.IsBehindCGNAT,
+		ChunkTempDir:  filepath.Join(n.cfg.StorageDir, "tmp"),
 	}, n.signaling, n.tracker)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport manager: %w", err)
@@ -216,6 +218,27 @@ func (n *Node) Start(ctx context.Context) error {
 }
 
 func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
+	if env.Type == protocol.MsgRegisterAck {
+		var ack protocol.RegisterAckPayload
+		if json.Unmarshal(env.Payload, &ack) == nil && ack.Error == "" && len(ack.TURNServers) > 0 {
+			turns := make([]transport.TURNServerConfig, 0, len(ack.TURNServers))
+			for _, ts := range ack.TURNServers {
+				turns = append(turns, transport.TURNServerConfig{
+					URL:        ts.URL,
+					Username:   ts.Username,
+					Credential: ts.Credential,
+				})
+			}
+			n.mu.RLock()
+			tm := n.transport
+			n.mu.RUnlock()
+			if tm != nil {
+				tm.SetDynamicTURNServers(turns)
+			}
+		}
+		return
+	}
+
 	if env.Type == protocol.MsgPeerJoined {
 		var p protocol.PeerEventPayload
 		_ = json.Unmarshal(env.Payload, &p)
@@ -320,7 +343,9 @@ func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 		_ = pc.SendChunk(ctx, chunkID, rc, stat.Size)
 	})
 
-	pc.SetOnChunkReceived(func(chunkID string, data []byte) {
+	pc.SetOnChunkFileReceived(func(chunkID string, filePath string, size int64) {
+		defer os.Remove(filePath)
+
 		n.mu.Lock()
 		disabled := n.cfg.DisableUnsolicitedChunks && !n.cfg.AllowUnsolicitedChunks
 		capBytes := n.cfg.MaxUnsolicitedChunkBytesPerPeer
@@ -328,20 +353,46 @@ func (n *Node) bindIncomingPeerConnection(pc *transport.PeerConnection) {
 			capBytes = DefaultMaxUnsolicitedChunkBytesPerPeer
 		}
 		used := n.unsolicitedBytes[peerID]
-		if disabled || used+int64(len(data)) > capBytes {
+		if disabled || used+size > capBytes {
 			n.mu.Unlock()
+			_ = pc.SendChunkError(chunkID, "unsolicited chunk rejected")
 			return
 		}
-		n.unsolicitedBytes[peerID] = used + int64(len(data))
+		n.unsolicitedBytes[peerID] = used + size
 		n.mu.Unlock()
 
-		// Save received chunk into local blob store
-		_, err := n.store.Put(chunkID, bytes.NewReader(data))
+		f, err := os.Open(filePath)
+		if err != nil {
+			n.mu.Lock()
+			if n.unsolicitedBytes[peerID] >= size {
+				n.unsolicitedBytes[peerID] -= size
+			}
+			n.mu.Unlock()
+			_ = pc.SendChunkError(chunkID, err.Error())
+			return
+		}
+
+		// Stream directly from temp file into local blob store and commit
+		_, putErr := n.store.Put(chunkID, f)
+		_ = f.Close()
+		if putErr != nil {
+			n.mu.Lock()
+			if n.unsolicitedBytes[peerID] >= size {
+				n.unsolicitedBytes[peerID] -= size
+			}
+			n.mu.Unlock()
+			_ = pc.SendChunkError(chunkID, putErr.Error())
+			return
+		}
+
+		// Send DataMsgChunkAck (0x13) strictly after blobstore.Put commits
+		_ = pc.SendChunkAck(chunkID)
+
 		n.mu.RLock()
 		cb := n.onChunkRecv
 		n.mu.RUnlock()
-		if err == nil && cb != nil {
-			cb(peerID, chunkID, int64(len(data)))
+		if cb != nil {
+			cb(peerID, chunkID, size)
 		}
 	})
 
@@ -421,18 +472,28 @@ func (n *Node) FetchChunk(ctx context.Context, peerID string, chunkID string, ex
 		return fmt.Errorf("no active connection to peer %s", peerID)
 	}
 
-	// Register in-flight waiter and transmit chunk request (0x10) end-to-end
-	data, err := conn.FetchChunk(ctx, chunkID, expectedSize)
+	// Register in-flight waiter, transmit chunk request (0x10), and stream response to temp file
+	tmpPath, err := conn.FetchChunkToFile(ctx, chunkID, expectedSize)
 	if err != nil {
 		return fmt.Errorf("failed to fetch chunk %s: %w", chunkID, err)
 	}
+	defer os.Remove(tmpPath)
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		_ = conn.SendChunkError(chunkID, err.Error())
+		return fmt.Errorf("failed to open fetched chunk %s: %w", chunkID, err)
+	}
 
 	// Commit to local store with SHA256 integrity check and quota accounting
-	_, err = n.store.Put(chunkID, bytes.NewReader(data))
+	_, err = n.store.Put(chunkID, f)
+	_ = f.Close()
 	if err != nil {
+		_ = conn.SendChunkError(chunkID, err.Error())
 		return fmt.Errorf("failed to store fetched chunk %s: %w", chunkID, err)
 	}
 
+	_ = conn.SendChunkAck(chunkID)
 	return nil
 }
 
@@ -850,15 +911,11 @@ func (n *Node) Close() error {
 	return nil
 }
 
-// SetFallbackTimeout dynamically updates the blind relay fallback timeout threshold.
+// SetFallbackTimeout updates the configured GUI relay threshold setting.
 func (n *Node) SetFallbackTimeout(d time.Duration) {
 	n.mu.Lock()
 	n.cfg.FallbackTimeout = d
-	tm := n.transport
 	n.mu.Unlock()
-	if tm != nil {
-		tm.SetFallbackTimeout(d)
-	}
 }
 
 // SetRemoteShellConfig dynamically updates remote shell enablement and allowlist.

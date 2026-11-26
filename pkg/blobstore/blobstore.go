@@ -74,12 +74,16 @@ type DiskBlobStore struct {
 
 var validBlobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
-// validateID ensures an ID conforms to the strict allowlist ^[a-zA-Z0-9_-]{1,128}$.
-func validateID(id string) error {
+// ValidateID ensures an ID conforms to the strict allowlist ^[a-zA-Z0-9_-]{1,128}$.
+func ValidateID(id string) error {
 	if !validBlobIDRegex.MatchString(id) {
 		return ErrInvalidID
 	}
 	return nil
+}
+
+func validateID(id string) error {
+	return ValidateID(id)
 }
 
 // NewDiskBlobStore initializes a new local blob store.
@@ -119,29 +123,34 @@ func NewDiskBlobStore(cfg Config) (*DiskBlobStore, error) {
 }
 
 func (s *DiskBlobStore) scanExisting() error {
-	entries, err := os.ReadDir(s.dataDir)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	return filepath.WalkDir(s.dataDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
+		if d.IsDir() {
+			return nil
 		}
-		id := entry.Name()
+		id := d.Name()
 		if err := validateID(id); err != nil {
-			continue
+			return nil
+		}
+		// Accept sharded path data/<id[:2]>/<id[2:4]>/<id> or legacy flat path data/<id>
+		if path != s.shardedBlobPath(id) && path != s.flatBlobPath(id) {
+			return nil
+		}
+		if _, exists := s.blobs[id]; exists {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
 		}
 
 		sha := ""
 		if len(id) == 64 && isHex(id) {
 			sha = strings.ToLower(id)
 		} else {
-			f, err := os.Open(filepath.Join(s.dataDir, id))
+			f, err := os.Open(path)
 			if err == nil {
 				hasher := sha256.New()
 				if _, err := io.Copy(hasher, f); err == nil {
@@ -158,12 +167,31 @@ func (s *DiskBlobStore) scanExisting() error {
 			SHA256:  sha,
 		}
 		s.usedBytes += info.Size()
-	}
-	return nil
+		return nil
+	})
 }
 
-func (s *DiskBlobStore) blobPath(id string) string {
+func (s *DiskBlobStore) shardedBlobPath(id string) string {
+	if len(id) >= 4 {
+		return filepath.Join(s.dataDir, id[:2], id[2:4], id)
+	}
 	return filepath.Join(s.dataDir, id)
+}
+
+func (s *DiskBlobStore) flatBlobPath(id string) string {
+	return filepath.Join(s.dataDir, id)
+}
+
+func (s *DiskBlobStore) resolveBlobPath(id string) string {
+	sharded := s.shardedBlobPath(id)
+	if _, err := os.Stat(sharded); err == nil {
+		return sharded
+	}
+	flat := s.flatBlobPath(id)
+	if _, err := os.Stat(flat); err == nil {
+		return flat
+	}
+	return sharded
 }
 
 // Put writes data atomically from reader to store. If id matches a SHA256 hex string,
@@ -248,7 +276,10 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 		}
 	}
 
-	targetPath := s.blobPath(id)
+	targetPath := s.shardedBlobPath(id)
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return 0, fmt.Errorf("failed to create shard directory: %w", err)
+	}
 	if err := os.Rename(tmpPath, targetPath); err != nil {
 		return 0, fmt.Errorf("failed to commit blob: %w", err)
 	}
@@ -282,7 +313,7 @@ func (s *DiskBlobStore) Get(id string) (io.ReadCloser, error) {
 		return nil, ErrBlobNotFound
 	}
 
-	file, err := os.Open(s.blobPath(id))
+	file, err := os.Open(s.resolveBlobPath(id))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrBlobNotFound
@@ -326,9 +357,15 @@ func (s *DiskBlobStore) Delete(id string) error {
 		return ErrBlobNotFound
 	}
 
-	targetPath := s.blobPath(id)
-	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+	shardedPath := s.shardedBlobPath(id)
+	if err := os.Remove(shardedPath); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	flatPath := s.flatBlobPath(id)
+	if flatPath != shardedPath {
+		if err := os.Remove(flatPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 
 	s.usedBytes -= info.Size
@@ -393,7 +430,7 @@ func (s *DiskBlobStore) Verify(id string) (bool, error) {
 		return false, ErrBlobNotFound
 	}
 
-	f, err := os.Open(s.blobPath(id))
+	f, err := os.Open(s.resolveBlobPath(id))
 	if err != nil {
 		return false, err
 	}
@@ -476,11 +513,16 @@ func (s *DiskBlobStore) Close() error {
 	return nil
 }
 
-func isHex(s string) bool {
+// IsHex reports whether s consists exclusively of ASCII hexadecimal characters.
+func IsHex(s string) bool {
 	for _, c := range s {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 			return false
 		}
 	}
 	return true
+}
+
+func isHex(s string) bool {
+	return IsHex(s)
 }

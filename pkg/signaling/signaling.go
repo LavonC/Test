@@ -13,12 +13,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/unicompute/obj1/pkg/protocol"
+	"github.com/unicompute/obj1/pkg/relay"
 )
 
 var ErrUnauthorized = errors.New("signaling unauthorized (HTTP 401)")
@@ -43,47 +46,100 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// HubConfig configures a signaling Hub.
+type HubConfig struct {
+	ListenAddr     string
+	AuthToken      string
+	PinnedKeysPath string // Optional JSON file path for persistent TOFU pinned keys (empty = in-memory)
+	TURNURL        string // Optional TURN server URL (e.g. "turn:1.2.3.4:3478")
+	TURNSecret     string // Shared secret for time-limited TURN REST credentials
+	TURNTTLSeconds int64  // TURN credential TTL in seconds (default 3600)
+}
+
 // Hub manages WebSocket signaling connections and routes messages between peers.
 type Hub struct {
-	mu         sync.RWMutex
-	clients    map[string]*clientConn
-	pinnedKeys map[string]string // nodeID -> hex-encoded ed25519 public key (TOFU/pre-seeded)
-	httpServer *http.Server
-	listener   net.Listener
-	addr       string
-	authToken  string
-	closed     bool
+	mu             sync.RWMutex
+	persistMu      sync.Mutex
+	clients        map[string]*clientConn
+	pinnedKeys     map[string]string // nodeID -> hex-encoded ed25519 public key (TOFU/pre-seeded)
+	pinnedKeysPath string
+	turnURL        string
+	turnSecret     string
+	turnTTLSeconds int64
+	httpServer     *http.Server
+	listener       net.Listener
+	addr           string
+	authToken      string
+	closed         bool
 }
 
 type clientConn struct {
-	nodeID   string
-	conn     *websocket.Conn
-	sendChan chan []byte
-	writeMu  sync.Mutex
-	hub      *Hub
-	done     chan struct{}
-	doneOnce sync.Once
+	nodeID         string
+	conn           *websocket.Conn
+	sendChan       chan []byte
+	writeMu        sync.Mutex
+	hub            *Hub
+	done           chan struct{}
+	doneOnce       sync.Once
+	challengeNonce string
+	challengeUsed  bool
 }
 
 // NewHub starts a signaling hub HTTP server on the given address, optionally requiring an auth token.
 func NewHub(listenAddr string, authTokens ...string) (*Hub, error) {
-	if listenAddr == "" {
-		listenAddr = "127.0.0.1:0"
+	cfg := HubConfig{
+		ListenAddr: listenAddr,
+	}
+	if len(authTokens) > 0 {
+		cfg.AuthToken = authTokens[0]
+	}
+	return NewHubWithConfig(cfg)
+}
+
+// NewHubWithConfig starts a signaling hub HTTP server using the supplied HubConfig.
+func NewHubWithConfig(cfg HubConfig) (*Hub, error) {
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:0"
+	}
+	if cfg.TURNTTLSeconds <= 0 {
+		cfg.TURNTTLSeconds = 3600
 	}
 
-	ln, err := net.Listen("tcp", listenAddr)
+	pinned := make(map[string]string)
+	if cfg.PinnedKeysPath != "" {
+		data, err := os.ReadFile(cfg.PinnedKeysPath)
+		if err == nil {
+			if len(strings.TrimSpace(string(data))) > 0 {
+				var loaded map[string]string
+				if err := json.Unmarshal(data, &loaded); err != nil {
+					return nil, fmt.Errorf("failed to parse pinned keys file %s: %w", cfg.PinnedKeysPath, err)
+				}
+				for k, v := range loaded {
+					if k != "" && v != "" {
+						pinned[k] = strings.ToLower(v)
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read pinned keys file %s: %w", cfg.PinnedKeysPath, err)
+		}
+	}
+
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("failed to listen on %s: %w", cfg.ListenAddr, err)
 	}
 
 	h := &Hub{
-		clients:    make(map[string]*clientConn),
-		pinnedKeys: make(map[string]string),
-		listener:   ln,
-		addr:       ln.Addr().String(),
-	}
-	if len(authTokens) > 0 {
-		h.authToken = authTokens[0]
+		clients:        make(map[string]*clientConn),
+		pinnedKeys:     pinned,
+		pinnedKeysPath: cfg.PinnedKeysPath,
+		turnURL:        strings.TrimSpace(cfg.TURNURL),
+		turnSecret:     cfg.TURNSecret,
+		turnTTLSeconds: cfg.TURNTTLSeconds,
+		listener:       ln,
+		addr:           ln.Addr().String(),
+		authToken:      cfg.AuthToken,
 	}
 
 	mux := http.NewServeMux()
@@ -112,14 +168,19 @@ func NewHub(listenAddr string, authTokens ...string) (*Hub, error) {
 
 		h.mu.RLock()
 		nodes := make([]string, 0, len(h.clients))
+		pubKeys := make(map[string]string, len(h.clients))
 		for id := range h.clients {
 			nodes = append(nodes, id)
+			if pk, ok := h.pinnedKeys[id]; ok {
+				pubKeys[id] = pk
+			}
 		}
 		h.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"count": len(nodes),
-			"nodes": nodes,
+			"count":       len(nodes),
+			"nodes":       nodes,
+			"public_keys": pubKeys,
 		})
 	})
 
@@ -174,8 +235,66 @@ func (h *Hub) PinPublicKey(nodeID string, pubKey ed25519.PublicKey) error {
 		return errors.New("invalid nodeID or ed25519 public key")
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.pinnedKeys[nodeID] = strings.ToLower(hex.EncodeToString(pubKey))
+	shouldPersist := h.pinnedKeysPath != ""
+	h.mu.Unlock()
+
+	if shouldPersist {
+		return h.persistPinnedKeys()
+	}
+	return nil
+}
+
+func (h *Hub) persistPinnedKeys() error {
+	if h.pinnedKeysPath == "" {
+		return nil
+	}
+	h.persistMu.Lock()
+	defer h.persistMu.Unlock()
+
+	h.mu.RLock()
+	snapshot := make(map[string]string, len(h.pinnedKeys))
+	for k, v := range h.pinnedKeys {
+		snapshot[k] = v
+	}
+	h.mu.RUnlock()
+
+	dir := filepath.Dir(h.pinnedKeysPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".pinned-keys-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, h.pinnedKeysPath); err != nil {
+		return err
+	}
+	cleanup = false
 	return nil
 }
 
@@ -200,13 +319,30 @@ func (h *Hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(256 * 1024)
+
+	nonceBytes := make([]byte, 32)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		_ = conn.Close()
+		return
+	}
+	nonce := hex.EncodeToString(nonceBytes)
 
 	c := &clientConn{
-		conn:     conn,
-		sendChan: make(chan []byte, 100),
-		hub:      h,
-		done:     make(chan struct{}),
+		conn:           conn,
+		sendChan:       make(chan []byte, 100),
+		hub:            h,
+		done:           make(chan struct{}),
+		challengeNonce: nonce,
 	}
+
+	chalPayload, _ := json.Marshal(protocol.ChallengePayload{Nonce: nonce})
+	chalEnv, _ := json.Marshal(protocol.Envelope{
+		Type:     protocol.MsgChallenge,
+		SenderID: "coordinator",
+		Payload:  chalPayload,
+	})
+	c.sendChan <- chalEnv
 
 	go c.writePump()
 	c.readPump()
@@ -261,6 +397,12 @@ func (c *clientConn) readPump() {
 				c.rejectRegister(c.nodeID, "connection already registered")
 				return
 			}
+			if c.challengeUsed || c.challengeNonce == "" {
+				c.rejectRegister("", "registration challenge already used")
+				return
+			}
+			c.challengeUsed = true
+
 			var reg protocol.RegisterPayload
 			if err := json.Unmarshal(env.Payload, &reg); err != nil {
 				c.rejectRegister("", "invalid registration payload")
@@ -278,6 +420,10 @@ func (c *clientConn) readPump() {
 				c.rejectRegister(targetNodeID, "sender_id mismatch on registration")
 				return
 			}
+			if reg.Nonce == "" || subtle.ConstantTimeCompare([]byte(reg.Nonce), []byte(c.challengeNonce)) != 1 {
+				c.rejectRegister(targetNodeID, "invalid or replayed registration nonce")
+				return
+			}
 
 			pubBytes, err := hex.DecodeString(reg.PublicKey)
 			if err != nil || len(pubBytes) != ed25519.PublicKeySize {
@@ -289,7 +435,8 @@ func (c *clientConn) readPump() {
 				c.rejectRegister(targetNodeID, "missing or invalid registration signature")
 				return
 			}
-			if !ed25519.Verify(ed25519.PublicKey(pubBytes), []byte(targetNodeID), sigBytes) {
+			signedMsg := []byte(targetNodeID + ":" + c.challengeNonce)
+			if !ed25519.Verify(ed25519.PublicKey(pubBytes), signedMsg, sigBytes) {
 				c.rejectRegister(targetNodeID, "invalid node registration signature")
 				return
 			}
@@ -301,17 +448,23 @@ func (c *clientConn) readPump() {
 				c.rejectRegister(targetNodeID, "duplicate nodeID registration rejected")
 				return
 			}
-			if pinnedPub, pinned := c.hub.pinnedKeys[targetNodeID]; pinned && pinnedPub != normPubKey {
+			pinnedPub, pinned := c.hub.pinnedKeys[targetNodeID]
+			if pinned && pinnedPub != normPubKey {
 				c.hub.mu.Unlock()
 				c.rejectRegister(targetNodeID, "nodeID public key mismatch")
 				return
 			}
+			newlyPinned := !pinned
 			c.hub.pinnedKeys[targetNodeID] = normPubKey
+			shouldPersist := newlyPinned && c.hub.pinnedKeysPath != ""
 			c.nodeID = targetNodeID
 			c.hub.clients[c.nodeID] = c
 
 			// Broadcast peer joined notification to all OTHER nodes
-			joinPayload, _ := json.Marshal(protocol.PeerEventPayload{NodeID: c.nodeID})
+			joinPayload, _ := json.Marshal(protocol.PeerEventPayload{
+				NodeID:    c.nodeID,
+				PublicKey: normPubKey,
+			})
 			joinEnv, _ := json.Marshal(protocol.Envelope{
 				Type:     protocol.MsgPeerJoined,
 				SenderID: "coordinator",
@@ -325,12 +478,34 @@ func (c *clientConn) readPump() {
 					}
 				}
 			}
+			turnURL := c.hub.turnURL
+			turnSecret := c.hub.turnSecret
+			turnTTL := c.hub.turnTTLSeconds
 			c.hub.mu.Unlock()
 
+			if shouldPersist {
+				_ = c.hub.persistPinnedKeys()
+			}
+
+			ackPayloadObj := protocol.RegisterAckPayload{
+				NodeID: c.nodeID,
+			}
+			if turnURL != "" && turnSecret != "" {
+				u, p := relay.GenerateRESTCredentials(c.nodeID, turnSecret, turnTTL)
+				ackPayloadObj.TURNServers = []protocol.TURNServerInfo{
+					{
+						URL:        turnURL,
+						Username:   u,
+						Credential: p,
+					},
+				}
+			}
+			ackPayload, _ := json.Marshal(ackPayloadObj)
 			ackEnv := protocol.Envelope{
 				Type:     protocol.MsgRegisterAck,
 				SenderID: "coordinator",
 				TargetID: c.nodeID,
+				Payload:  ackPayload,
 			}
 			data, _ := json.Marshal(ackEnv)
 			select {
@@ -341,14 +516,24 @@ func (c *clientConn) readPump() {
 		}
 
 		if env.Type == protocol.MsgPeerListRequest {
+			if c.nodeID == "" {
+				continue
+			}
 			c.hub.mu.RLock()
 			nodes := make([]string, 0, len(c.hub.clients))
+			pubKeys := make(map[string]string, len(c.hub.clients))
 			for id := range c.hub.clients {
 				nodes = append(nodes, id)
+				if pk, ok := c.hub.pinnedKeys[id]; ok {
+					pubKeys[id] = pk
+				}
 			}
 			c.hub.mu.RUnlock()
 
-			respPayload, _ := json.Marshal(protocol.PeerListPayload{Nodes: nodes})
+			respPayload, _ := json.Marshal(protocol.PeerListPayload{
+				Nodes:      nodes,
+				PublicKeys: pubKeys,
+			})
 			respEnv := protocol.Envelope{
 				Type:     protocol.MsgPeerListResponse,
 				SenderID: "coordinator",
@@ -457,6 +642,8 @@ type Client struct {
 	authToken    string
 	privKey      ed25519.PrivateKey
 	pubKey       ed25519.PublicKey
+	peerKeys     map[string]string // nodeID -> hex-encoded ed25519 public key
+	turnServers  []protocol.TURNServerInfo
 	conn         *websocket.Conn
 	handler      func(protocol.Envelope)
 	reconnectCtx context.Context
@@ -508,6 +695,7 @@ func newClientWithKey(wsURL string, nodeID string, privKey ed25519.PrivateKey, h
 		nodeID:       nodeID,
 		privKey:      privKey,
 		pubKey:       pubKey,
+		peerKeys:     make(map[string]string),
 		handler:      handler,
 		reconnectCtx: ctx,
 		cancel:       cancel,
@@ -550,19 +738,30 @@ func (c *Client) connect() error {
 		return err
 	}
 
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
+	// Read server-issued challenge nonce before registering
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, chalMsg, err := conn.ReadMessage()
+	if err != nil {
 		_ = conn.Close()
-		return errors.New("signaling client closed")
+		return fmt.Errorf("failed to read signaling challenge: %w", err)
 	}
-	c.conn = conn
-	c.mu.Unlock()
+	var chalEnv protocol.Envelope
+	if err := json.Unmarshal(chalMsg, &chalEnv); err != nil || chalEnv.Type != protocol.MsgChallenge {
+		_ = conn.Close()
+		return errors.New("expected signaling challenge message")
+	}
+	var chal protocol.ChallengePayload
+	if err := json.Unmarshal(chalEnv.Payload, &chal); err != nil || chal.Nonce == "" {
+		_ = conn.Close()
+		return errors.New("invalid signaling challenge nonce")
+	}
+	_ = conn.SetReadDeadline(time.Time{})
 
-	// Register immediately under write lock with ed25519 signature
-	sig := ed25519.Sign(c.privKey, []byte(c.nodeID))
+	// Sign nodeID + ":" + nonce with Ed25519 identity key
+	sig := ed25519.Sign(c.privKey, []byte(c.nodeID+":"+chal.Nonce))
 	regPayload, _ := json.Marshal(protocol.RegisterPayload{
 		NodeID:    c.nodeID,
+		Nonce:     chal.Nonce,
 		PublicKey: hex.EncodeToString(c.pubKey),
 		Signature: hex.EncodeToString(sig),
 	})
@@ -573,10 +772,28 @@ func (c *Client) connect() error {
 	}
 	data, _ := json.Marshal(regEnv)
 
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return errors.New("signaling client closed")
+	}
+	c.conn = conn
+	c.mu.Unlock()
+
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	return conn.WriteMessage(websocket.TextMessage, data)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		c.mu.Lock()
+		if c.conn == conn {
+			_ = c.conn.Close()
+			c.conn = nil
+		}
+		c.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (c *Client) readLoop() {
@@ -615,10 +832,92 @@ func (c *Client) readLoop() {
 		}
 
 		var env protocol.Envelope
-		if err := json.Unmarshal(msg, &env); err == nil && c.handler != nil {
-			c.handler(env)
+		if err := json.Unmarshal(msg, &env); err == nil {
+			c.processIncomingMetadata(env)
+			if c.handler != nil {
+				c.handler(env)
+			}
 		}
 	}
+}
+
+func (c *Client) processIncomingMetadata(env protocol.Envelope) {
+	switch env.Type {
+	case protocol.MsgRegisterAck:
+		var ack protocol.RegisterAckPayload
+		if json.Unmarshal(env.Payload, &ack) == nil && ack.Error == "" {
+			c.mu.Lock()
+			c.turnServers = append([]protocol.TURNServerInfo(nil), ack.TURNServers...)
+			c.mu.Unlock()
+		}
+	case protocol.MsgPeerJoined:
+		var ev protocol.PeerEventPayload
+		if json.Unmarshal(env.Payload, &ev) == nil && ev.NodeID != "" && ev.PublicKey != "" {
+			norm := strings.ToLower(ev.PublicKey)
+			c.mu.Lock()
+			if existing, ok := c.peerKeys[ev.NodeID]; !ok || existing == norm {
+				c.peerKeys[ev.NodeID] = norm
+			}
+			c.mu.Unlock()
+		}
+	case protocol.MsgPeerListResponse:
+		var list protocol.PeerListPayload
+		if json.Unmarshal(env.Payload, &list) == nil && len(list.PublicKeys) > 0 {
+			c.mu.Lock()
+			for id, pk := range list.PublicKeys {
+				if id != "" && pk != "" {
+					norm := strings.ToLower(pk)
+					if existing, ok := c.peerKeys[id]; !ok || existing == norm {
+						c.peerKeys[id] = norm
+					}
+				}
+			}
+			c.mu.Unlock()
+		}
+	}
+}
+
+// PublicKey returns a copy of this client's Ed25519 public key.
+func (c *Client) PublicKey() ed25519.PublicKey {
+	cp := make(ed25519.PublicKey, len(c.pubKey))
+	copy(cp, c.pubKey)
+	return cp
+}
+
+// Sign signs data with the client's Ed25519 private key.
+func (c *Client) Sign(data []byte) []byte {
+	return ed25519.Sign(c.privKey, data)
+}
+
+// GetPeerPublicKey returns the known/pinned Ed25519 public key for a peer, if available.
+func (c *Client) GetPeerPublicKey(nodeID string) (ed25519.PublicKey, bool) {
+	c.mu.Lock()
+	hexKey, ok := c.peerKeys[nodeID]
+	c.mu.Unlock()
+	if !ok || hexKey == "" {
+		return nil, false
+	}
+	b, err := hex.DecodeString(hexKey)
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return ed25519.PublicKey(b), true
+}
+
+// TURNServers returns the TURN server credentials issued by the coordinator in MsgRegisterAck.
+func (c *Client) TURNServers() []protocol.TURNServerInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	res := make([]protocol.TURNServerInfo, len(c.turnServers))
+	copy(res, c.turnServers)
+	return res
+}
+
+// IsConnected reports whether the client currently holds an active WebSocket connection.
+func (c *Client) IsConnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && c.conn != nil
 }
 
 func (c *Client) reconnect() {
@@ -775,12 +1074,25 @@ func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				var result struct {
-					Count int      `json:"count"`
-					Nodes []string `json:"nodes"`
+					Count      int               `json:"count"`
+					Nodes      []string          `json:"nodes"`
+					PublicKeys map[string]string `json:"public_keys,omitempty"`
 				}
 				if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
 					if result.Nodes == nil {
 						result.Nodes = []string{}
+					}
+					if len(result.PublicKeys) > 0 {
+						c.mu.Lock()
+						for id, pk := range result.PublicKeys {
+							if id != "" && pk != "" {
+								norm := strings.ToLower(pk)
+								if existing, ok := c.peerKeys[id]; !ok || existing == norm {
+									c.peerKeys[id] = norm
+								}
+							}
+						}
+						c.mu.Unlock()
 					}
 					return result.Nodes, nil
 				}

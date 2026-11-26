@@ -7,12 +7,12 @@ type MessageType string
 
 const (
 	// Signaling messages
+	MsgChallenge        MessageType = "challenge"
 	MsgRegister         MessageType = "register"
 	MsgRegisterAck      MessageType = "register_ack"
 	MsgSDPOffer         MessageType = "sdp_offer"
 	MsgSDPAnswer        MessageType = "sdp_answer"
 	MsgICECandidate     MessageType = "ice_candidate"
-	MsgRelayInvite      MessageType = "relay_invite"
 	MsgPing             MessageType = "ping"
 	MsgPong             MessageType = "pong"
 	MsgPeerListRequest  MessageType = "peer_list_req"
@@ -44,11 +44,19 @@ type Envelope struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
-// SDPPayload contains session description protocol data.
+// ChallengePayload carries a single-use random hex nonce issued by the coordinator upon WS upgrade.
+type ChallengePayload struct {
+	Nonce string `json:"nonce"`
+}
+
+// SDPPayload contains session description protocol data and DTLS fingerprint binding.
 type SDPPayload struct {
-	SessionID string `json:"session_id"`
-	Type      string `json:"type"` // "offer" or "answer"
-	SDP       string `json:"sdp"`
+	SessionID     string `json:"session_id"`
+	Type          string `json:"type"` // "offer" or "answer"
+	SDP           string `json:"sdp"`
+	PublicKey     string `json:"public_key,omitempty"`
+	Signature     string `json:"signature,omitempty"`
+	IsBehindCGNAT bool   `json:"is_behind_cgnat,omitempty"`
 }
 
 // ICECandidatePayload contains ICE candidate parameters.
@@ -59,16 +67,17 @@ type ICECandidatePayload struct {
 	SDPMLineIndex uint16 `json:"sdp_mline_index"`
 }
 
-// RelayInvitePayload contains details for falling back to an elected contributor relay.
-type RelayInvitePayload struct {
-	SessionID    string `json:"session_id"`
-	RelayAddress string `json:"relay_address"`
-	SessionToken string `json:"session_token"`
+// TURNServerInfo carries coordinator-issued TURN server configuration and REST credentials.
+type TURNServerInfo struct {
+	URL        string `json:"url"`
+	Username   string `json:"username"`
+	Credential string `json:"credential"`
 }
 
 // RegisterPayload contains registration metadata advertised by a node.
 type RegisterPayload struct {
 	NodeID        string `json:"node_id"`
+	Nonce         string `json:"nonce,omitempty"`
 	PoolID        string `json:"pool_id"`
 	StorageQuota  int64  `json:"storage_quota"`
 	IsBehindCGNAT bool   `json:"is_behind_cgnat"`
@@ -79,14 +88,23 @@ type RegisterPayload struct {
 	Signature     string `json:"signature,omitempty"`
 }
 
+// RegisterAckPayload is returned by the coordinator upon registration acceptance or rejection.
+type RegisterAckPayload struct {
+	NodeID      string           `json:"node_id,omitempty"`
+	TURNServers []TURNServerInfo `json:"turn_servers,omitempty"`
+	Error       string           `json:"error,omitempty"`
+}
+
 // PeerListPayload contains a list of online nodes on the network.
 type PeerListPayload struct {
-	Nodes []string `json:"nodes"`
+	Nodes      []string          `json:"nodes"`
+	PublicKeys map[string]string `json:"public_keys,omitempty"`
 }
 
 // PeerEventPayload contains a node ID for join/leave events.
 type PeerEventPayload struct {
-	NodeID string `json:"node_id"`
+	NodeID    string `json:"node_id"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 // ChunkRequestFrame models a request for a specific chunk or byte range.
@@ -97,17 +115,19 @@ type ChunkRequestFrame struct {
 }
 
 // ChunkHeader is the binary wire prefix on the DataChannel chunk stream:
-// [0]: DataMsgType (0x10 = Request, 0x11 = Response, 0x13 = Ack, 0x30 = Keepalive)
+// [0]: DataMsgType (0x10 = Request, 0x11 = Response, 0x13 = Ack, 0x14 = Error, 0x30 = Keepalive)
 // [1]: Flags (0x01 = Start, 0x02 = Data, 0x04 = End, 0x08 = Error)
 // [2..9]: Offset (uint64)
 // [10..17]: TotalSize (uint64)
-// [18..81]: ChunkID / SHA256 hex string (64 bytes)
-// [82..]: Payload bytes
+// [18]: ChunkIDLen (uint8, 1..128)
+// [19..19+ChunkIDLen]: ChunkID bytes (up to 128 bytes)
+// [19+ChunkIDLen..]: Payload bytes
 const (
 	FlagStart byte = 0x01
 	FlagData  byte = 0x02
 	FlagEnd   byte = 0x04
 	FlagError byte = 0x08
 
-	ChunkHeaderSize = 82
+	ChunkHeaderFixedSize = 19
+	MaxChunkIDLen        = 128
 )

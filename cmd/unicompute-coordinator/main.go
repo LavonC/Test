@@ -31,6 +31,8 @@ func main() {
 	defaultPublicIP := getEnv("UNICOMPUTE_PUBLIC_IP", "127.0.0.1")
 	defaultRealm := getEnv("UNICOMPUTE_REALM", "unicompute.edu")
 	turnSecret := getEnv("UNICOMPUTE_TURN_SECRET", "")
+	defaultTURNURL := getEnv("UNICOMPUTE_TURN_URL", "")
+	defaultPinnedKeys := getEnv("UNICOMPUTE_PINNED_KEYS", "")
 	defaultEnableTURN := true
 	if os.Getenv("UNICOMPUTE_TURN") == "false" || os.Getenv("ENABLE_TURN") == "false" {
 		defaultEnableTURN = false
@@ -40,9 +42,11 @@ func main() {
 	enableTURN := flag.Bool("turn", defaultEnableTURN, "Enable embedded TURN server")
 	turnPort := flag.Int("turn-port", 3478, "Embedded TURN UDP port")
 	turnRealm := flag.String("realm", defaultRealm, "TURN authentication realm")
+	turnURLFlag := flag.String("turn-url", defaultTURNURL, "External or override TURN URL advertised to nodes when UNICOMPUTE_TURN_SECRET is set")
 	publicIP := flag.String("public-ip", defaultPublicIP, "Public IP for TURN relay")
 	authToken := flag.String("auth-token", os.Getenv("UNICOMPUTE_AUTH_TOKEN"), "Cluster auth secret token")
 	insecureNoAuth := flag.Bool("insecure-no-auth", false, "Disable authentication for local dev")
+	pinnedKeysPath := flag.String("pinned-keys", defaultPinnedKeys, "Optional JSON file path for persistent TOFU node public keys")
 
 	flag.Parse()
 
@@ -68,16 +72,7 @@ func main() {
 	fmt.Println(" Invariant CP-1: Control Plane is decoupled from Data Plane")
 	fmt.Println("===================================================================")
 
-	hub, err := signaling.NewHub(*listenAddr, *authToken)
-	if err != nil {
-		log.Fatalf("[FATAL] Failed to start signaling hub: %v\n", err)
-	}
-	defer hub.Close()
-
-	log.Printf("[INFO] Signaling WebSocket ready at %s\n", hub.URL())
-	log.Printf("[INFO] Health check available at http://%s/health\n", *listenAddr)
-	log.Printf("[INFO] Online nodes API at http://%s/api/nodes\n", *listenAddr)
-
+	turnURL := strings.TrimSpace(*turnURLFlag)
 	if *enableTURN {
 		turnUser := os.Getenv("UNICOMPUTE_TURN_USER")
 		turnPass := os.Getenv("UNICOMPUTE_TURN_PASS")
@@ -101,9 +96,34 @@ func main() {
 			} else {
 				defer turnSrv.Close()
 				log.Printf("[INFO] Embedded TURN server listening on UDP %s\n", turnSrv.Addr())
+				if turnSecret != "" && turnURL == "" {
+					actualPort := *turnPort
+					if idx := strings.LastIndex(turnSrv.Addr(), ":"); idx != -1 {
+						actualPortStr := turnSrv.Addr()[idx+1:]
+						turnURL = fmt.Sprintf("turn:%s:%s", *publicIP, actualPortStr)
+					} else {
+						turnURL = fmt.Sprintf("turn:%s:%d", *publicIP, actualPort)
+					}
+				}
 			}
 		}
 	}
+
+	hub, err := signaling.NewHubWithConfig(signaling.HubConfig{
+		ListenAddr:     *listenAddr,
+		AuthToken:      *authToken,
+		PinnedKeysPath: *pinnedKeysPath,
+		TURNURL:        turnURL,
+		TURNSecret:     turnSecret,
+	})
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to start signaling hub: %v\n", err)
+	}
+	defer hub.Close()
+
+	log.Printf("[INFO] Signaling WebSocket ready at %s\n", hub.URL())
+	log.Printf("[INFO] Health check available at http://%s/health\n", *listenAddr)
+	log.Printf("[INFO] Online nodes API at http://%s/api/nodes\n", *listenAddr)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

@@ -2,12 +2,18 @@ package signaling
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -463,10 +469,30 @@ func TestHub_RejectsDuplicateRegisterOnSameConnection(t *testing.T) {
 	}
 	defer conn.Close()
 
-	sendReg := func(nodeID string, pub ed25519.PublicKey, priv ed25519.PrivateKey) {
-		sig := ed25519.Sign(priv, []byte(nodeID))
+	readChallenge := func(c *websocket.Conn) string {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("failed to read MsgChallenge: %v", err)
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(raw, &env); err != nil || env.Type != protocol.MsgChallenge {
+			t.Fatalf("expected MsgChallenge, got %s (err=%v)", string(raw), err)
+		}
+		var ch protocol.ChallengePayload
+		if err := json.Unmarshal(env.Payload, &ch); err != nil || ch.Nonce == "" {
+			t.Fatalf("invalid challenge payload: %s", string(env.Payload))
+		}
+		return ch.Nonce
+	}
+
+	nonce := readChallenge(conn)
+
+	sendReg := func(nodeID, regNonce string, pub ed25519.PublicKey, priv ed25519.PrivateKey) {
+		sig := ed25519.Sign(priv, []byte(nodeID+":"+regNonce))
 		pl, _ := json.Marshal(protocol.RegisterPayload{
 			NodeID:    nodeID,
+			Nonce:     regNonce,
 			PublicKey: hex.EncodeToString(pub),
 			Signature: hex.EncodeToString(sig),
 		})
@@ -480,7 +506,7 @@ func TestHub_RejectsDuplicateRegisterOnSameConnection(t *testing.T) {
 		}
 	}
 
-	sendReg("dup-conn-node-1", pubA, privA)
+	sendReg("dup-conn-node-1", nonce, pubA, privA)
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, ackBytes, err := conn.ReadMessage()
 	if err != nil {
@@ -491,7 +517,7 @@ func TestHub_RejectsDuplicateRegisterOnSameConnection(t *testing.T) {
 	}
 
 	// Second MsgRegister on the same WebSocket connection must be rejected and clean up node-1
-	sendReg("dup-conn-node-2", pubB, privB)
+	sendReg("dup-conn-node-2", nonce, pubB, privB)
 	gotReject := false
 	for {
 		_, msg, readErr := conn.ReadMessage()
@@ -517,5 +543,292 @@ func TestHub_RejectsDuplicateRegisterOnSameConnection(t *testing.T) {
 	hub.mu.RUnlock()
 	if has1 || has2 {
 		t.Fatalf("expected neither node to remain in hub.clients after rejection, got has1=%v has2=%v", has1, has2)
+	}
+}
+
+func TestHub_NonceReplayRejection(t *testing.T) {
+	hub, err := NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	// Connection 1 obtains nonce1
+	conn1, _, err := websocket.DefaultDialer.Dial(hub.URL(), nil)
+	if err != nil {
+		t.Fatalf("Dial 1 failed: %v", err)
+	}
+	defer conn1.Close()
+
+	_ = conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, raw1, err := conn1.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage 1 failed: %v", err)
+	}
+	var env1 protocol.Envelope
+	_ = json.Unmarshal(raw1, &env1)
+	var ch1 protocol.ChallengePayload
+	_ = json.Unmarshal(env1.Payload, &ch1)
+	if len(ch1.Nonce) != 64 {
+		t.Fatalf("expected 64-char hex 32-byte nonce, got %q", ch1.Nonce)
+	}
+
+	// Sign nodeID + ":" + nonce1
+	sig1 := ed25519.Sign(priv, []byte("replay-node:"+ch1.Nonce))
+	regPayload, _ := json.Marshal(protocol.RegisterPayload{
+		NodeID:    "replay-node",
+		Nonce:     ch1.Nonce,
+		PublicKey: hex.EncodeToString(pub),
+		Signature: hex.EncodeToString(sig1),
+	})
+	regEnv, _ := json.Marshal(protocol.Envelope{
+		Type:     protocol.MsgRegister,
+		SenderID: "replay-node",
+		Payload:  regPayload,
+	})
+
+	// Connection 2 gets nonce2, but attacker replays signed registration from nonce1!
+	conn2, _, err := websocket.DefaultDialer.Dial(hub.URL(), nil)
+	if err != nil {
+		t.Fatalf("Dial 2 failed: %v", err)
+	}
+	defer conn2.Close()
+	_ = conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = conn2.ReadMessage() // drain conn2's own MsgChallenge
+	if err != nil {
+		t.Fatalf("ReadMessage 2 failed: %v", err)
+	}
+
+	if err := conn2.WriteMessage(websocket.TextMessage, regEnv); err != nil {
+		t.Fatalf("WriteMessage replay failed: %v", err)
+	}
+
+	rejected := false
+	for {
+		_, msg, readErr := conn2.ReadMessage()
+		if readErr != nil {
+			if closeErr, ok := readErr.(*websocket.CloseError); ok && closeErr.Code == websocket.ClosePolicyViolation {
+				rejected = true
+			}
+			break
+		}
+		if strings.Contains(string(msg), "invalid or replayed registration nonce") {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Fatalf("expected replayed nonce on conn2 to be rejected")
+	}
+
+	hub.mu.RLock()
+	_, registered := hub.clients["replay-node"]
+	hub.mu.RUnlock()
+	if registered {
+		t.Fatalf("expected replay-node NOT to be registered after nonce replay")
+	}
+}
+
+func TestHub_PersistentTOFUAndTURNCredentials(t *testing.T) {
+	pinnedPath := filepath.Join(t.TempDir(), "pinned_keys.json")
+	const turnSecret = "hub-turn-secret-999"
+	const turnURL = "turn:198.51.100.10:3478"
+
+	hub1, err := NewHubWithConfig(HubConfig{
+		ListenAddr:     "127.0.0.1:0",
+		PinnedKeysPath: pinnedPath,
+		TURNURL:        turnURL,
+		TURNSecret:     turnSecret,
+		TURNTTLSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig 1 failed: %v", err)
+	}
+
+	_, legitPriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, attackerPriv, _ := ed25519.GenerateKey(rand.Reader)
+
+	ackCh := make(chan protocol.Envelope, 2)
+	c1, err := NewClientWithKey(hub1.URL(), "persist-node", legitPriv, func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			ackCh <- env
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewClientWithKey failed: %v", err)
+	}
+
+	select {
+	case ack := <-ackCh:
+		var ackPayload protocol.RegisterAckPayload
+		if err := json.Unmarshal(ack.Payload, &ackPayload); err != nil {
+			t.Fatalf("failed to unmarshal RegisterAckPayload: %v", err)
+		}
+		if len(ackPayload.TURNServers) != 1 {
+			t.Fatalf("expected 1 TURN server in RegisterAck, got %d", len(ackPayload.TURNServers))
+		}
+		ts := ackPayload.TURNServers[0]
+		if ts.URL != turnURL {
+			t.Errorf("expected TURN URL %q, got %q", turnURL, ts.URL)
+		}
+		mac := hmac.New(sha1.New, []byte(turnSecret))
+		mac.Write([]byte(ts.Username))
+		expectedCred := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+		if ts.Credential != expectedCred {
+			t.Errorf("TURN credential mismatch: got %q, want %q", ts.Credential, expectedCred)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for RegisterAck with TURN credentials")
+	}
+
+	if len(c1.TURNServers()) != 1 {
+		t.Fatalf("expected Client.TURNServers() to store 1 TURN server")
+	}
+	_ = c1.Close()
+	_ = hub1.Close()
+
+	// Restart a new Hub loading from the same pinnedPath
+	hub2, err := NewHubWithConfig(HubConfig{
+		ListenAddr:     "127.0.0.1:0",
+		PinnedKeysPath: pinnedPath,
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig 2 failed: %v", err)
+	}
+	defer hub2.Close()
+
+	// Attacker with different key must be rejected by persisted TOFU key
+	attAck := make(chan protocol.Envelope, 2)
+	attClient, err := NewClientWithKey(hub2.URL(), "persist-node", attackerPriv, func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			attAck <- env
+		}
+	})
+	if err != nil {
+		t.Fatalf("attacker dial failed: %v", err)
+	}
+	defer attClient.Close()
+
+	select {
+	case ack := <-attAck:
+		if !strings.Contains(string(ack.Payload), "nodeID public key mismatch") {
+			t.Fatalf("expected persisted TOFU rejection, got: %s", string(ack.Payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for persisted TOFU rejection")
+	}
+
+	// Legitimate node reconnects with original key
+	legitAck := make(chan protocol.Envelope, 2)
+	c2, err := NewClientWithKey(hub2.URL(), "persist-node", legitPriv, func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			legitAck <- env
+		}
+	})
+	if err != nil {
+		t.Fatalf("legitimate reconnect failed: %v", err)
+	}
+	defer c2.Close()
+
+	select {
+	case ack := <-legitAck:
+		if strings.Contains(string(ack.Payload), "error") {
+			t.Fatalf("legitimate reconnect rejected: %s", string(ack.Payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for legitimate reconnect ack")
+	}
+}
+
+func TestHub_ReadLimitEnforced(t *testing.T) {
+	hub, err := NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(hub.URL(), nil)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Drain MsgChallenge
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("failed reading challenge: %v", err)
+	}
+
+	// Send > 256 KiB payload; Hub SetReadLimit(256*1024) must close the connection
+	oversized := make([]byte, 300*1024)
+	for i := range oversized {
+		oversized[i] = 'A'
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, oversized)
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, readErr := conn.ReadMessage()
+	if readErr == nil {
+		t.Fatalf("expected connection to be closed after exceeding 256 KiB read limit")
+	}
+}
+
+func TestHub_ConcurrentPersistentTOFU_NoLostKeys(t *testing.T) {
+	pinnedPath := filepath.Join(t.TempDir(), "concurrent_pinned.json")
+	hub, err := NewHubWithConfig(HubConfig{
+		ListenAddr:     "127.0.0.1:0",
+		PinnedKeysPath: pinnedPath,
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig failed: %v", err)
+	}
+	defer hub.Close()
+
+	const totalNodes = 12
+	var wg sync.WaitGroup
+	clients := make([]*Client, totalNodes)
+	for i := 0; i < totalNodes; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ackCh := make(chan struct{}, 1)
+			c, err := NewClient(hub.URL(), "conc-node-"+string(rune('A'+idx)), func(env protocol.Envelope) {
+				if env.Type == protocol.MsgRegisterAck {
+					select {
+					case ackCh <- struct{}{}:
+					default:
+					}
+				}
+			})
+			if err != nil {
+				t.Errorf("NewClient %d failed: %v", idx, err)
+				return
+			}
+			clients[idx] = c
+			select {
+			case <-ackCh:
+			case <-time.After(3 * time.Second):
+				t.Errorf("timed out waiting for RegisterAck %d", idx)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, c := range clients {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
+
+	raw, err := os.ReadFile(pinnedPath)
+	if err != nil {
+		t.Fatalf("ReadFile pinned keys failed: %v", err)
+	}
+	var saved map[string]string
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("Unmarshal pinned keys failed: %v", err)
+	}
+	if len(saved) != totalNodes {
+		t.Fatalf("expected %d persisted pinned keys without overwrite loss, got %d (%v)", totalNodes, len(saved), saved)
 	}
 }

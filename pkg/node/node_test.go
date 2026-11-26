@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unicompute/obj1/pkg/blobstore"
 	"github.com/unicompute/obj1/pkg/codeexec"
 	"github.com/unicompute/obj1/pkg/remoteshell"
 	"github.com/unicompute/obj1/pkg/signaling"
@@ -1077,7 +1079,7 @@ func TestNode_UnsolicitedChunkGuards(t *testing.T) {
 	}
 	time.Sleep(150 * time.Millisecond)
 
-	// Test DisableUnsolicitedChunks: unsolicited push must NOT persist
+	// Test DisableUnsolicitedChunks: unsolicited push must NOT persist and returns ACK rejection error
 	if _, err := nSender.ConnectPeer(ctx, "unsol-blocked"); err != nil {
 		t.Fatalf("ConnectPeer to blocked failed: %v", err)
 	}
@@ -1086,10 +1088,10 @@ func TestNode_UnsolicitedChunkGuards(t *testing.T) {
 	h1 := sha256.Sum256(p1)
 	cid1 := hex.EncodeToString(h1[:])
 	_, _ = nSender.PutBlob(cid1, bytes.NewReader(p1))
-	if err := nSender.TransferChunk(ctx, "unsol-blocked", cid1); err != nil {
-		t.Fatalf("TransferChunk to blocked failed: %v", err)
+	if err := nSender.TransferChunk(ctx, "unsol-blocked", cid1); err == nil {
+		t.Fatalf("expected TransferChunk to blocked node to return rejection error")
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if nBlocked.HasBlob(cid1) {
 		t.Fatalf("expected DisableUnsolicitedChunks=true to reject unsolicited chunk write")
 	}
@@ -1106,7 +1108,6 @@ func TestNode_UnsolicitedChunkGuards(t *testing.T) {
 	if err := nSender.TransferChunk(ctx, "unsol-capped", cidSmall); err != nil {
 		t.Fatalf("TransferChunk small failed: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
 	if !nCapped.HasBlob(cidSmall) {
 		t.Fatalf("expected first 60-byte chunk under 100-byte cap to be stored")
 	}
@@ -1115,10 +1116,10 @@ func TestNode_UnsolicitedChunkGuards(t *testing.T) {
 	hOver := sha256.Sum256(pOver)
 	cidOver := hex.EncodeToString(hOver[:])
 	_, _ = nSender.PutBlob(cidOver, bytes.NewReader(pOver))
-	if err := nSender.TransferChunk(ctx, "unsol-capped", cidOver); err != nil {
-		t.Fatalf("TransferChunk over cap failed: %v", err)
+	if err := nSender.TransferChunk(ctx, "unsol-capped", cidOver); err == nil {
+		t.Fatalf("expected TransferChunk exceeding cap to return rejection error")
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if nCapped.HasBlob(cidOver) {
 		t.Fatalf("expected second 60-byte chunk exceeding 100-byte cap to be rejected")
 	}
@@ -1182,6 +1183,189 @@ func TestNode_GetFleetNodesReconcilesOfflinePeers(t *testing.T) {
 	}
 	if len(nodesAfter) != 0 {
 		t.Fatalf("expected empty fleet after n2 closed, got %v", nodesAfter)
+	}
+}
+
+func TestNode_ChunkAckFailurePropagation(t *testing.T) {
+	tmpDir := t.TempDir()
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	nSender, err := NewNode(NodeConfig{
+		NodeID:       "ack-fail-sender",
+		PoolID:       "pool-ack",
+		StorageDir:   filepath.Join(tmpDir, "sender"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode sender failed: %v", err)
+	}
+	defer nSender.Close()
+
+	// Receiver has tiny 10-byte quota so Put fails with ErrQuotaExceeded
+	nRecv, err := NewNode(NodeConfig{
+		NodeID:       "ack-fail-recv",
+		PoolID:       "pool-ack",
+		StorageDir:   filepath.Join(tmpDir, "recv"),
+		StorageQuota: 10,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode recv failed: %v", err)
+	}
+	defer nRecv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := nSender.Start(ctx); err != nil {
+		t.Fatalf("sender Start failed: %v", err)
+	}
+	if err := nRecv.Start(ctx); err != nil {
+		t.Fatalf("recv Start failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	if _, err := nSender.ConnectPeer(ctx, "ack-fail-recv"); err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	payload := bytes.Repeat([]byte("X"), 64)
+	h := sha256.Sum256(payload)
+	cid := hex.EncodeToString(h[:])
+	if _, err := nSender.PutBlob(cid, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("PutBlob failed: %v", err)
+	}
+
+	err = nSender.TransferChunk(ctx, "ack-fail-recv", cid)
+	if err == nil {
+		t.Fatalf("expected TransferChunk to fail when receiver blobstore.Put fails with quota exceeded")
+	}
+	if !strings.Contains(err.Error(), "quota") {
+		t.Fatalf("expected quota error propagated via DataMsgChunkError, got: %v", err)
+	}
+}
+
+func TestNode_CGNATTelemetryAndAutoRTT(t *testing.T) {
+	tmpDir := t.TempDir()
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	n1, err := NewNode(NodeConfig{
+		NodeID:       "cgnat-n1",
+		PoolID:       "pool-cgnat",
+		StorageDir:   filepath.Join(tmpDir, "n1"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode n1 failed: %v", err)
+	}
+	defer n1.Close()
+
+	n2, err := NewNode(NodeConfig{
+		NodeID:       "cgnat-n2",
+		PoolID:       "pool-cgnat",
+		StorageDir:   filepath.Join(tmpDir, "n2"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode n2 failed: %v", err)
+	}
+	defer n2.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := n1.Start(ctx); err != nil {
+		t.Fatalf("n1 Start failed: %v", err)
+	}
+	if err := n2.Start(ctx); err != nil {
+		t.Fatalf("n2 Start failed: %v", err)
+	}
+
+	// Simulate n1 behind CGNAT before establishing P2P connection
+	n1.mu.Lock()
+	n1.natReport.IsBehindCGNAT = true
+	n1.transport.SetLocalCGNAT(true)
+	n1.mu.Unlock()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if _, err := n1.ConnectPeer(ctx, "cgnat-n2"); err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+
+	// Verify both n1 and n2 record IsBehindCGNAT = true and FleetStats().CGNATPrevalencePct > 0
+	m1, ok1 := n1.GetPathMetrics("cgnat-n2")
+	if !ok1 || !m1.IsBehindCGNAT {
+		t.Fatalf("expected n1 PathMetrics.IsBehindCGNAT=true, got ok=%v metrics=%+v", ok1, m1)
+	}
+	stats1 := n1.FleetStats()
+	if stats1.CGNATPrevalencePct <= 0 {
+		t.Fatalf("expected n1 FleetStats.CGNATPrevalencePct > 0, got %.2f%%", stats1.CGNATPrevalencePct)
+	}
+
+	m2, ok2 := n2.GetPathMetrics("cgnat-n1")
+	if !ok2 || !m2.IsBehindCGNAT {
+		t.Fatalf("expected n2 PathMetrics.IsBehindCGNAT=true from peer SDP propagation, got ok=%v metrics=%+v", ok2, m2)
+	}
+	stats2 := n2.FleetStats()
+	if stats2.CGNATPrevalencePct <= 0 {
+		t.Fatalf("expected n2 FleetStats.CGNATPrevalencePct > 0, got %.2f%%", stats2.CGNATPrevalencePct)
+	}
+
+	// Verify PathMetrics.RTT is automatically populated from Pion PC.GetStats() without manual __PING__
+	deadline := time.Now().Add(4 * time.Second)
+	var rtt time.Duration
+	for time.Now().Before(deadline) {
+		if m, ok := n1.GetPathMetrics("cgnat-n2"); ok && m.RTT > 0 {
+			rtt = m.RTT
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if rtt <= 0 {
+		t.Fatalf("expected PathMetrics.RTT > 0 automatically populated from PC.GetStats(), got %v", rtt)
+	}
+}
+
+func TestStubNode_PutBlobAlignment(t *testing.T) {
+	stub := NewStubNode("stub-align", 1024)
+
+	// Invalid IDs rejected
+	for _, bad := range []string{"../escape", "bad id", "", strings.Repeat("x", 129)} {
+		if _, err := stub.PutBlob(bad, bytes.NewReader([]byte("abc"))); !errors.Is(err, blobstore.ErrInvalidID) {
+			t.Errorf("PutBlob(%q) expected ErrInvalidID, got %v", bad, err)
+		}
+	}
+
+	// Non-hex 64-char ID accepted without checksum mismatch
+	nonHex64 := strings.Repeat("z", 64)
+	if _, err := stub.PutBlob(nonHex64, bytes.NewReader([]byte("hello"))); err != nil {
+		t.Fatalf("PutBlob non-hex 64-char ID failed: %v", err)
+	}
+
+	// Uppercase 64-char SHA-256 hex ID accepted and deduplicated without double-counting quota
+	payload := []byte("uppercase stub payload")
+	h := sha256.Sum256(payload)
+	upperCID := strings.ToUpper(hex.EncodeToString(h[:]))
+	if _, err := stub.PutBlob(upperCID, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("PutBlob uppercase SHA-256 failed: %v", err)
+	}
+	usedBefore := stub.StorageUsage().UsedBytes
+	if _, err := stub.PutBlob(upperCID, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("duplicate PutBlob failed: %v", err)
+	}
+	if stub.StorageUsage().UsedBytes != usedBefore {
+		t.Fatalf("duplicate PutBlob double-counted UsedBytes: before=%d after=%d", usedBefore, stub.StorageUsage().UsedBytes)
 	}
 }
 

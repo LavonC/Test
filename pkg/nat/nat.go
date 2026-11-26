@@ -16,12 +16,13 @@ import (
 type NATType string
 
 const (
-	NATTypeOpenDirect     NATType = "Open/Direct"
-	NATTypeFullCone       NATType = "Full Cone NAT"
-	NATTypeRestrictedCone NATType = "Restricted Cone NAT"
-	NATTypePortRestricted NATType = "Port Restricted Cone NAT"
-	NATTypeSymmetric      NATType = "Symmetric NAT"
-	NATTypeUnknown        NATType = "Unknown"
+	NATTypeOpenDirect          NATType = "Open/Direct"
+	NATTypeFullCone            NATType = "Full Cone NAT"
+	NATTypeEndpointIndependent NATType = "Endpoint-Independent Cone NAT (filtering unverified)"
+	NATTypeRestrictedCone      NATType = "Restricted Cone NAT"
+	NATTypePortRestricted      NATType = "Port Restricted Cone NAT"
+	NATTypeSymmetric           NATType = "Symmetric NAT"
+	NATTypeUnknown             NATType = "Unknown"
 )
 
 // RFC 6598: Carrier-Grade NAT prefix 100.64.0.0/10 (100.64.0.0 to 100.127.255.255)
@@ -420,8 +421,9 @@ func (c *Classifier) Classify(ctx context.Context) (*NATReport, error) {
 	}
 
 	// 4. Determine NAT classification
-	if mappedV4_1 == nil && !report.IPv6Supported {
-		// No STUN response and no IPv6 -> NAT type cannot be determined
+	ipv6STUNSucceeded := report.PublicIPv6 != ""
+	if mappedV4_1 == nil && !ipv6STUNSucceeded {
+		// No STUN response succeeded on IPv4 or IPv6 -> NAT type cannot be determined
 		report.NATType = NATTypeUnknown
 		report.HolePunchFeasible = false
 		report.RequiresRelay = true
@@ -437,40 +439,45 @@ func (c *Classifier) Classify(ctx context.Context) (*NATReport, error) {
 				break
 			}
 		}
+	} else if ipv6STUNSucceeded {
+		for _, localIP6 := range report.LocalIPv6s {
+			if localIP6 == report.PublicIPv6 {
+				isDirect = true
+				break
+			}
+		}
 	}
 
-	if isDirect {
+	// Check dual-STUN port/IP variance BEFORE isDirect
+	if mappedV4_1 != nil && mappedV4_2 != nil && (!mappedV4_1.IP.Equal(mappedV4_2.IP) || mappedV4_1.Port != mappedV4_2.Port) {
+		// Mapping varies by destination IP/Port -> Symmetric NAT
+		report.NATType = NATTypeSymmetric
+		report.HolePunchFeasible = false
+		report.RequiresRelay = true
+	} else if isDirect {
 		report.NATType = NATTypeOpenDirect
 		report.HolePunchFeasible = true
 		report.RequiresRelay = false
 	} else if mappedV4_1 != nil && mappedV4_2 != nil {
-		// Compare mapped ports across different STUN server destinations from SAME local socket
-		if mappedV4_1.IP.Equal(mappedV4_2.IP) && mappedV4_1.Port == mappedV4_2.Port {
-			// Mapping is independent of destination -> Cone NAT (Hole punching succeeds)
-			report.NATType = NATTypeFullCone
-			report.HolePunchFeasible = true
-			report.RequiresRelay = false
-		} else {
-			// Mapping varies by destination IP/Port -> Symmetric NAT
-			report.NATType = NATTypeSymmetric
-			report.HolePunchFeasible = false
-			report.RequiresRelay = true
-		}
+		// Mapping is identical across different STUN destinations -> Endpoint-Independent Mapping (filtering unverified)
+		report.NATType = NATTypeEndpointIndependent
+		report.HolePunchFeasible = true
+		report.RequiresRelay = false
 	} else if report.IsBehindCGNAT {
 		// Carrier Grade NAT typically assigns dynamic port bindings per destination
 		report.NATType = NATTypePortRestricted
-		report.HolePunchFeasible = report.IPv6Supported // If IPv6 is available, direct peer links bypass CGNAT entirely
-		report.RequiresRelay = !report.IPv6Supported
+		report.HolePunchFeasible = ipv6STUNSucceeded // Only feasible via IPv6 if IPv6 STUN succeeded
+		report.RequiresRelay = !ipv6STUNSucceeded
 	} else {
-		// Default to Cone with hole punching feasible
-		report.NATType = NATTypeFullCone
+		// Single STUN response without second-endpoint mapping or filtering probes
+		report.NATType = NATTypePortRestricted
 		report.HolePunchFeasible = true
 		report.RequiresRelay = false
 	}
 
 	// Note on IPv6 bypass:
-	// "Because 78.6% of residential broadband in India supports native IPv6, direct IPv6 peer links bypass IPv4 CGNAT entirely"
-	if report.IPv6Supported {
+	// Direct IPv6 peer links bypass IPv4 CGNAT only when IPv6 STUN actually succeeded
+	if ipv6STUNSucceeded {
 		report.HolePunchFeasible = true
 	}
 

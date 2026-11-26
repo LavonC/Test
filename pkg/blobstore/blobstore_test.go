@@ -197,8 +197,8 @@ func TestBlobStore_CorruptionDetection(t *testing.T) {
 		t.Fatalf("Put failed: %v", err)
 	}
 
-	// Corrupt file on disk directly
-	rawPath := filepath.Join(tmpDir, "data", cid)
+	// Corrupt file on disk directly at sharded path
+	rawPath := filepath.Join(tmpDir, "data", cid[:2], cid[2:4], cid)
 	err = os.WriteFile(rawPath, []byte("tampered corrupted data"), 0644)
 	if err != nil {
 		t.Fatalf("failed to corrupt file: %v", err)
@@ -416,8 +416,8 @@ func TestBlobStore_Scrub(t *testing.T) {
 	cid3 := "named-blob-3"
 	_, _ = store.Put(cid3, bytes.NewReader(data3))
 
-	// Corrupt blob 2 on disk
-	corruptPath := filepath.Join(tmpDir, "data", cid2)
+	// Corrupt blob 2 on disk at sharded path
+	corruptPath := filepath.Join(tmpDir, "data", cid2[:2], cid2[2:4], cid2)
 	_ = os.WriteFile(corruptPath, []byte("garbage tampered bytes"), 0644)
 
 	corrupted, err := store.Scrub()
@@ -496,5 +496,84 @@ func TestBlobStore_StrictIDAllowlistAndUppercaseSHA256(t *testing.T) {
 	valid, err := store.Verify(upperCID)
 	if err != nil || !valid {
 		t.Fatalf("Verify with uppercase SHA-256 failed: valid=%v, err=%v", valid, err)
+	}
+}
+
+func TestBlobStore_ShardedLayoutAndLegacyFlatReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewDiskBlobStore(Config{
+		RootDir:    tmpDir,
+		QuotaBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	payload := []byte("sharded blob content verification")
+	h := sha256.Sum256(payload)
+	cid := hex.EncodeToString(h[:])
+	if _, err := store.Put(cid, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("Put sharded failed: %v", err)
+	}
+
+	shardedPath := filepath.Join(tmpDir, "data", cid[:2], cid[2:4], cid)
+	if _, err := os.Stat(shardedPath); err != nil {
+		t.Fatalf("expected sharded file at %s, got err: %v", shardedPath, err)
+	}
+
+	// Short ID (< 4 chars) fallback
+	shortID := "ab1"
+	shortData := []byte("short id data")
+	if _, err := store.Put(shortID, bytes.NewReader(shortData)); err != nil {
+		t.Fatalf("Put short ID failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "data", shortID)); err != nil {
+		t.Fatalf("expected short ID fallback at data/%s: %v", shortID, err)
+	}
+	_ = store.Close()
+
+	// Seed a legacy flat file in data/
+	legacyPayload := []byte("legacy flat blob content")
+	legacyH := sha256.Sum256(legacyPayload)
+	legacyCID := hex.EncodeToString(legacyH[:])
+	if err := os.WriteFile(filepath.Join(tmpDir, "data", legacyCID), legacyPayload, 0644); err != nil {
+		t.Fatalf("failed to write legacy flat file: %v", err)
+	}
+
+	// Reopen and verify both sharded, short, and legacy flat blobs are indexed and usable
+	reopened, err := NewDiskBlobStore(Config{
+		RootDir:    tmpDir,
+		QuotaBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	for _, id := range []string{cid, shortID, legacyCID} {
+		if !reopened.Has(id) {
+			t.Fatalf("expected reopened store to have %s", id)
+		}
+		valid, err := reopened.Verify(id)
+		if err != nil || !valid {
+			t.Fatalf("Verify(%s) failed after reload: valid=%v err=%v", id, valid, err)
+		}
+	}
+
+	rc, err := reopened.Get(legacyCID)
+	if err != nil {
+		t.Fatalf("Get legacy flat blob failed: %v", err)
+	}
+	gotLegacy, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if !bytes.Equal(gotLegacy, legacyPayload) {
+		t.Fatalf("legacy flat blob content mismatch")
+	}
+
+	if err := reopened.Delete(legacyCID); err != nil {
+		t.Fatalf("Delete legacy flat blob failed: %v", err)
+	}
+	if reopened.Has(legacyCID) {
+		t.Fatalf("expected legacy flat blob to be deleted")
 	}
 }

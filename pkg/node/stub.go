@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,10 +32,6 @@ type Substrate interface {
 	TransferChunk(ctx context.Context, peerID string, chunkID string) error
 	FetchChunk(ctx context.Context, peerID string, chunkID string, expectedSize int64) error
 	SendStream(peerID string, data []byte) error
-
-	// Remote Shell Command Execution
-	ExecuteRemoteCommand(ctx context.Context, peerID string, req remoteshell.ShellRequest) (remoteshell.ShellResponse, error)
-	ExecuteRemoteCommandAll(ctx context.Context, req remoteshell.ShellRequest) map[string]remoteshell.ShellResponse
 
 	GetPathMetrics(peerID string) (instrumentation.PathMetrics, bool)
 	FleetStats() instrumentation.FleetNATStats
@@ -111,8 +108,16 @@ func (s *StubNode) ConnectStub(peer *StubNode) {
 }
 
 func (s *StubNode) PutBlob(id string, r io.Reader) (int64, error) {
+	if err := blobstore.ValidateID(id); err != nil {
+		return 0, err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if existing, ok := s.Storage[id]; ok {
+		return int64(len(existing)), nil
+	}
 
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -124,11 +129,11 @@ func (s *StubNode) PutBlob(id string, r io.Reader) (int64, error) {
 		return 0, blobstore.ErrQuotaExceeded
 	}
 
-	// Verify SHA256 if ID is a hash
-	if len(id) == 64 {
+	// Verify SHA256 if ID is a 64-char hex hash (case-insensitive)
+	if len(id) == 64 && blobstore.IsHex(id) {
 		h := sha256.Sum256(data)
 		calc := hex.EncodeToString(h[:])
-		if calc != id {
+		if calc != strings.ToLower(id) {
 			return 0, blobstore.ErrChecksumMismatch
 		}
 	}
@@ -139,6 +144,9 @@ func (s *StubNode) PutBlob(id string, r io.Reader) (int64, error) {
 }
 
 func (s *StubNode) GetBlob(id string) (io.ReadCloser, error) {
+	if err := blobstore.ValidateID(id); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -150,6 +158,9 @@ func (s *StubNode) GetBlob(id string) (io.ReadCloser, error) {
 }
 
 func (s *StubNode) HasBlob(id string) bool {
+	if err := blobstore.ValidateID(id); err != nil {
+		return false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.Storage[id]
@@ -157,6 +168,9 @@ func (s *StubNode) HasBlob(id string) bool {
 }
 
 func (s *StubNode) DeleteBlob(id string) error {
+	if err := blobstore.ValidateID(id); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -171,6 +185,9 @@ func (s *StubNode) DeleteBlob(id string) error {
 }
 
 func (s *StubNode) StatBlob(id string) (blobstore.BlobInfo, error) {
+	if err := blobstore.ValidateID(id); err != nil {
+		return blobstore.BlobInfo{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -205,6 +222,9 @@ func (s *StubNode) ListBlobs() ([]blobstore.BlobInfo, error) {
 }
 
 func (s *StubNode) VerifyBlob(id string) (bool, error) {
+	if err := blobstore.ValidateID(id); err != nil {
+		return false, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -212,10 +232,10 @@ func (s *StubNode) VerifyBlob(id string) (bool, error) {
 	if !ok {
 		return false, blobstore.ErrBlobNotFound
 	}
-	if len(id) == 64 {
+	if len(id) == 64 && blobstore.IsHex(id) {
 		h := sha256.Sum256(data)
 		calc := hex.EncodeToString(h[:])
-		return calc == id, nil
+		return calc == strings.ToLower(id), nil
 	}
 	return true, nil
 }
@@ -226,9 +246,9 @@ func (s *StubNode) Scrub() ([]string, error) {
 
 	var corruptIDs []string
 	for id, data := range s.Storage {
-		if len(id) == 64 {
+		if len(id) == 64 && blobstore.IsHex(id) {
 			h := sha256.Sum256(data)
-			if hex.EncodeToString(h[:]) != id {
+			if hex.EncodeToString(h[:]) != strings.ToLower(id) {
 				corruptIDs = append(corruptIDs, id)
 			}
 		}

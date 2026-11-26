@@ -1,10 +1,16 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,27 +27,27 @@ import (
 // Manager manages WebRTC API lifecycle, peer connection establishment,
 // and signaling coordination.
 type Manager struct {
-	mu                sync.Mutex
-	cfg               Config
-	api               *webrtc.API
-	sigClient         *signaling.Client
-	tracker           *instrumentation.Tracker
-	connections       map[string]*PeerConnection       // sessionID -> PeerConnection
-	peerSessions      map[string]string                // remotePeerID -> sessionID
-	pendingCandidates map[string][]webrtc.ICECandidateInit // sessionID -> early ICE candidates
-	remoteDescSet     map[string]bool                  // sessionID -> whether SetRemoteDescription succeeded
-	onNewConn         func(*PeerConnection)
-	closed            bool
+	mu                 sync.Mutex
+	cfg                Config
+	api                *webrtc.API
+	sigClient          *signaling.Client
+	tracker            *instrumentation.Tracker
+	privKey            ed25519.PrivateKey
+	pubKey             ed25519.PublicKey
+	pinnedPeerKeys     map[string]string // remotePeerID -> lowercase hex ed25519 pubkey
+	dynamicTURNServers []TURNServerConfig
+	connections        map[string]*PeerConnection       // sessionID -> PeerConnection
+	peerSessions       map[string]string                // remotePeerID -> sessionID
+	pendingCandidates  map[string][]webrtc.ICECandidateInit // sessionID -> early ICE candidates
+	remoteDescSet      map[string]bool                  // sessionID -> whether SetRemoteDescription succeeded
+	onNewConn          func(*PeerConnection)
+	closed             bool
 }
 
 const maxPendingCandidatesPerSession = 64
 
 // NewManager creates a new WebRTC transport manager with PDF-specified engine tuning.
 func NewManager(cfg Config, sigClient *signaling.Client, tracker *instrumentation.Tracker) (*Manager, error) {
-	if cfg.FallbackTimeout == 0 {
-		cfg.FallbackTimeout = 2000 * time.Millisecond // 2.0s Fast Fallback ceiling (PDF Section 5)
-	}
-
 	settingEngine := webrtc.SettingEngine{}
 
 	// Fix 1: SCTP receive buffer at 16 MiB (PDF Section 6.3)
@@ -63,11 +69,30 @@ func NewManager(cfg Config, sigClient *signaling.Client, tracker *instrumentatio
 		tracker = instrumentation.NewTracker()
 	}
 
+	var privKey ed25519.PrivateKey
+	var pubKey ed25519.PublicKey
+	if len(cfg.PrivateKey) == ed25519.PrivateKeySize {
+		privKey = cfg.PrivateKey
+		pubKey = privKey.Public().(ed25519.PublicKey)
+	} else if sigClient != nil {
+		pubKey = sigClient.PublicKey()
+	} else {
+		genPub, genPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate transport identity key: %w", err)
+		}
+		privKey = genPriv
+		pubKey = genPub
+	}
+
 	m := &Manager{
 		cfg:               cfg,
 		api:               api,
 		sigClient:         sigClient,
 		tracker:           tracker,
+		privKey:           privKey,
+		pubKey:            pubKey,
+		pinnedPeerKeys:    make(map[string]string),
 		connections:       make(map[string]*PeerConnection),
 		peerSessions:      make(map[string]string),
 		pendingCandidates: make(map[string][]webrtc.ICECandidateInit),
@@ -191,7 +216,7 @@ func formatICEURL(rawURL string, defaultScheme string) string {
 	return scheme + ":" + rest + query
 }
 
-// buildICEServers converts config STUN and TURN entries to Pion ICEServers.
+// buildICEServers converts config STUN and TURN entries (plus coordinator-issued TURN credentials) to Pion ICEServers.
 func (m *Manager) buildICEServers() []webrtc.ICEServer {
 	var servers []webrtc.ICEServer
 
@@ -212,7 +237,25 @@ func (m *Manager) buildICEServers() []webrtc.ICEServer {
 		}
 	}
 
-	for _, turn := range m.cfg.TURNServers {
+	m.mu.Lock()
+	allTURN := make([]TURNServerConfig, 0, len(m.cfg.TURNServers)+len(m.dynamicTURNServers))
+	allTURN = append(allTURN, m.cfg.TURNServers...)
+	allTURN = append(allTURN, m.dynamicTURNServers...)
+	sig := m.sigClient
+	m.mu.Unlock()
+
+	if sig != nil {
+		for _, ts := range sig.TURNServers() {
+			allTURN = append(allTURN, TURNServerConfig{
+				URL:        ts.URL,
+				Username:   ts.Username,
+				Credential: ts.Credential,
+			})
+		}
+	}
+
+	seenTURN := make(map[string]struct{}, len(allTURN))
+	for _, turn := range allTURN {
 		var turnURLs []string
 		for _, part := range strings.Split(turn.URL, ",") {
 			formatted := formatICEURL(part, "turn")
@@ -221,6 +264,11 @@ func (m *Manager) buildICEServers() []webrtc.ICEServer {
 			}
 		}
 		if len(turnURLs) > 0 {
+			key := strings.Join(turnURLs, ",") + "|" + turn.Username + "|" + turn.Credential
+			if _, exists := seenTURN[key]; exists {
+				continue
+			}
+			seenTURN[key] = struct{}{}
 			servers = append(servers, webrtc.ICEServer{
 				URLs:       turnURLs,
 				Username:   turn.Username,
@@ -232,8 +280,208 @@ func (m *Manager) buildICEServers() []webrtc.ICEServer {
 	return servers
 }
 
+// PublicKey returns the Ed25519 public key used by this transport Manager for DTLS identity binding.
+func (m *Manager) PublicKey() ed25519.PublicKey {
+	m.mu.Lock()
+	pub := m.pubKey
+	sig := m.sigClient
+	m.mu.Unlock()
+	if len(pub) == ed25519.PublicKeySize {
+		cp := make(ed25519.PublicKey, ed25519.PublicKeySize)
+		copy(cp, pub)
+		return cp
+	}
+	if sig != nil {
+		return sig.PublicKey()
+	}
+	return nil
+}
+
+// PinPeerKey pre-seeds or pins a remote peer's Ed25519 public key for DTLS fingerprint verification.
+func (m *Manager) PinPeerKey(peerID string, pubKey ed25519.PublicKey) error {
+	if peerID == "" || len(pubKey) != ed25519.PublicKeySize {
+		return errors.New("invalid peerID or ed25519 public key")
+	}
+	m.mu.Lock()
+	m.pinnedPeerKeys[peerID] = strings.ToLower(hex.EncodeToString(pubKey))
+	m.mu.Unlock()
+	return nil
+}
+
+// extractDTLSFingerprints extracts deterministic sorted unique `a=fingerprint:` attribute values from an SDP.
+func extractDTLSFingerprints(sdp string) string {
+	lines := strings.Split(sdp, "\n")
+	seen := make(map[string]struct{})
+	var fps []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if strings.HasPrefix(strings.ToLower(trimmed), "a=fingerprint:") {
+			val := strings.TrimSpace(trimmed[len("a=fingerprint:"):])
+			if val != "" {
+				if _, ok := seen[val]; !ok {
+					seen[val] = struct{}{}
+					fps = append(fps, val)
+				}
+			}
+		}
+	}
+	sort.Strings(fps)
+	return strings.Join(fps, "\n")
+}
+
+func (m *Manager) signSDPPayload(sessionID, sdpType, sdpStr string) (protocol.SDPPayload, error) {
+	fp := extractDTLSFingerprints(sdpStr)
+	if fp == "" {
+		return protocol.SDPPayload{}, errors.New("local SDP missing DTLS fingerprint")
+	}
+
+	m.mu.Lock()
+	priv := m.privKey
+	pub := m.pubKey
+	sigClient := m.sigClient
+	localCGNAT := m.cfg.IsBehindCGNAT
+	m.mu.Unlock()
+
+	var sigBytes []byte
+	if len(priv) == ed25519.PrivateKeySize {
+		sigBytes = ed25519.Sign(priv, []byte(fp))
+	} else if sigClient != nil {
+		pub = sigClient.PublicKey()
+		sigBytes = sigClient.Sign([]byte(fp))
+	} else {
+		return protocol.SDPPayload{}, errors.New("no ed25519 identity key available to sign DTLS fingerprint")
+	}
+
+	return protocol.SDPPayload{
+		SessionID:     sessionID,
+		Type:          sdpType,
+		SDP:           sdpStr,
+		PublicKey:     hex.EncodeToString(pub),
+		Signature:     hex.EncodeToString(sigBytes),
+		IsBehindCGNAT: localCGNAT,
+	}, nil
+}
+
+func (m *Manager) verifyAndPinDTLS(remotePeerID string, sdp protocol.SDPPayload) error {
+	if remotePeerID == "" {
+		return errors.New("remote peer ID is required for DTLS identity verification")
+	}
+	fp := extractDTLSFingerprints(sdp.SDP)
+	if fp == "" {
+		return errors.New("remote SDP missing DTLS fingerprint")
+	}
+
+	pubBytes, err := hex.DecodeString(sdp.PublicKey)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return errors.New("missing or invalid remote ed25519 public key in SDP")
+	}
+	sigBytes, err := hex.DecodeString(sdp.Signature)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return errors.New("missing or invalid DTLS fingerprint signature in SDP")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), []byte(fp), sigBytes) {
+		return errors.New("DTLS fingerprint signature verification failed")
+	}
+
+	normPub := strings.ToLower(hex.EncodeToString(pubBytes))
+
+	m.mu.Lock()
+	sigClient := m.sigClient
+	m.mu.Unlock()
+
+	if sigClient != nil {
+		if knownPub, ok := sigClient.GetPeerPublicKey(remotePeerID); ok {
+			if !bytes.Equal(knownPub, pubBytes) {
+				return fmt.Errorf("DTLS public key mismatch for peer %s against signaling identity", remotePeerID)
+			}
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if pinnedPub, ok := m.pinnedPeerKeys[remotePeerID]; ok && pinnedPub != normPub {
+		return fmt.Errorf("DTLS public key mismatch for peer %s against pinned key", remotePeerID)
+	}
+	m.pinnedPeerKeys[remotePeerID] = normPub
+	return nil
+}
+
+func (m *Manager) bindPeerConnectionLifecycle(conn *PeerConnection, remotePeerID, sessionID string) {
+	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
+		switch state {
+		case webrtc.PeerConnectionStateDisconnected:
+			sig := m.getSignalingClient()
+			if sig != nil && sig.IsConnected() {
+				go m.triggerICERestart(remotePeerID, sessionID, conn)
+			}
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			m.removeSession(remotePeerID, sessionID)
+		}
+	})
+}
+
+func (m *Manager) triggerICERestart(remotePeerID, sessionID string, conn *PeerConnection) {
+	if conn == nil || conn.PC == nil {
+		return
+	}
+	conn.restartMu.Lock()
+	if conn.restarting {
+		conn.restartMu.Unlock()
+		return
+	}
+	conn.restarting = true
+	conn.restartMu.Unlock()
+
+	defer func() {
+		conn.restartMu.Lock()
+		conn.restarting = false
+		conn.restartMu.Unlock()
+	}()
+
+	m.mu.Lock()
+	curSession, ok := m.peerSessions[remotePeerID]
+	curConn := m.connections[sessionID]
+	closed := m.closed
+	m.mu.Unlock()
+	if closed || !ok || curSession != sessionID || curConn != conn {
+		return
+	}
+
+	sig := m.getSignalingClient()
+	if sig == nil || !sig.IsConnected() {
+		return
+	}
+
+	if conn.PC.SignalingState() != webrtc.SignalingStateStable {
+		return
+	}
+
+	offer, err := conn.PC.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		return
+	}
+	if err := conn.PC.SetLocalDescription(offer); err != nil {
+		return
+	}
+	sdpPayloadObj, err := m.signSDPPayload(sessionID, offer.Type.String(), offer.SDP)
+	if err != nil {
+		return
+	}
+	raw, _ := json.Marshal(sdpPayloadObj)
+	_ = sig.Send(protocol.Envelope{
+		Type:     protocol.MsgSDPOffer,
+		SenderID: m.cfg.NodeID,
+		TargetID: remotePeerID,
+		Payload:  raw,
+	})
+}
+
 // ConnectPeer initiates an outbound connection to a target peer using Trickle ICE.
 func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerConnection, error) {
+	if targetPeerID == "" || targetPeerID == m.cfg.NodeID {
+		return nil, fmt.Errorf("invalid target peer ID: %q", targetPeerID)
+	}
+
 	sessionID := uuid.New().String()
 
 	webrtcCfg := webrtc.Configuration{
@@ -246,6 +494,9 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	}
 
 	conn := newPeerConnection(sessionID, m.cfg.NodeID, targetPeerID, pc, m.tracker)
+	conn.chunkTempDir = m.cfg.ChunkTempDir
+	conn.setLocalOffer(true)
+	conn.setCGNATFlags(m.cfg.IsBehindCGNAT, false)
 	conn.setupHandlers()
 
 	m.mu.Lock()
@@ -262,11 +513,7 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	onConnHandler := m.onNewConn
 	m.mu.Unlock()
 
-	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			m.removeSession(targetPeerID, sessionID)
-		}
-	})
+	m.bindPeerConnectionLifecycle(conn, targetPeerID, sessionID)
 
 	// Register event callbacks (storage, streams) before creating DataChannels and Offer
 	if onConnHandler != nil {
@@ -323,27 +570,48 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	}
 	conn.bindDataChannel(chunkDC)
 
+	waitSupersededWinner := func(winner *PeerConnection) (*PeerConnection, error) {
+		if wErr := winner.WaitConnected(ctx); wErr != nil {
+			return nil, fmt.Errorf("webrtc ICE connection to %s failed after glare resolution: %w", targetPeerID, wErr)
+		}
+		if wErr := winner.WaitChannelsReady(ctx); wErr != nil {
+			return nil, wErr
+		}
+		return winner, nil
+	}
+
 	// Create SDP Offer
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
+		if winner := conn.getSupersededBy(); winner != nil {
+			return waitSupersededWinner(winner)
+		}
 		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to create offer: %w", err)
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
+		if winner := conn.getSupersededBy(); winner != nil {
+			return waitSupersededWinner(winner)
+		}
 		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to set local description: %w", err)
 	}
 
-	// Transmit Offer via signaling
+	// Transmit Offer via signaling with DTLS fingerprint Ed25519 signature (unless already superseded by glare)
+	if winner := conn.getSupersededBy(); winner != nil {
+		return waitSupersededWinner(winner)
+	}
 	if sig := m.getSignalingClient(); sig != nil {
-		sdpPayload, _ := json.Marshal(protocol.SDPPayload{
-			SessionID: sessionID,
-			Type:      offer.Type.String(),
-			SDP:       offer.SDP,
-		})
+		sdpPayloadObj, err := m.signSDPPayload(sessionID, offer.Type.String(), offer.SDP)
+		if err != nil {
+			m.removeSession(targetPeerID, sessionID)
+			_ = conn.Close()
+			return nil, fmt.Errorf("failed to sign SDP offer: %w", err)
+		}
+		sdpPayload, _ := json.Marshal(sdpPayloadObj)
 		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgSDPOffer,
 			SenderID: m.cfg.NodeID,
@@ -353,8 +621,12 @@ func (m *Manager) ConnectPeer(ctx context.Context, targetPeerID string) (*PeerCo
 	}
 
 	// Wait directly on ctx for WebRTC ICE/DTLS convergence.
-	// Note: pkg/relay (ContributorRelay / EmbeddedTURN) is standalone and not auto-invoked here.
 	if err := conn.WaitConnected(ctx); err != nil {
+		if errors.Is(err, ErrSessionSuperseded) {
+			if winner := conn.getSupersededBy(); winner != nil {
+				return waitSupersededWinner(winner)
+			}
+		}
 		m.removeSession(targetPeerID, sessionID)
 		_ = conn.Close()
 		return nil, fmt.Errorf("webrtc ICE connection to %s failed: %w", targetPeerID, err)
@@ -384,20 +656,92 @@ func (m *Manager) HandleSignalingEnvelope(env protocol.Envelope) error {
 		if err := json.Unmarshal(env.Payload, &sdp); err != nil {
 			return err
 		}
-		return m.handleAnswer(sdp)
+		return m.handleAnswer(env.SenderID, sdp)
 
 	case protocol.MsgICECandidate:
 		var cand protocol.ICECandidatePayload
 		if err := json.Unmarshal(env.Payload, &cand); err != nil {
 			return err
 		}
-		return m.handleCandidate(cand)
+		return m.handleCandidate(env.SenderID, cand)
 	}
 
 	return nil
 }
 
 func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) error {
+	if err := m.verifyAndPinDTLS(remotePeerID, sdp); err != nil {
+		return err
+	}
+
+	// Check for existing session renegotiation (ICE restart) or simultaneous offer glare.
+	m.mu.Lock()
+	if existingConn, sameSession := m.connections[sdp.SessionID]; sameSession && existingConn != nil && existingConn.PC != nil {
+		if existingConn.RemotePeerID != remotePeerID {
+			m.mu.Unlock()
+			return fmt.Errorf("session %s belongs to peer %s, not %s", sdp.SessionID, existingConn.RemotePeerID, remotePeerID)
+		}
+		if existingConn.PC.SignalingState() == webrtc.SignalingStateHaveLocalOffer {
+			polite := m.cfg.NodeID < remotePeerID
+			if !polite {
+				m.mu.Unlock()
+				return nil
+			}
+			m.mu.Unlock()
+			if err := existingConn.PC.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeRollback}); err != nil {
+				return err
+			}
+		} else {
+			m.mu.Unlock()
+		}
+
+		existingConn.setCGNATFlags(m.cfg.IsBehindCGNAT, sdp.IsBehindCGNAT)
+		offer := webrtc.SessionDescription{
+			Type: webrtc.SDPTypeOffer,
+			SDP:  sdp.SDP,
+		}
+		if err := existingConn.PC.SetRemoteDescription(offer); err != nil {
+			return err
+		}
+		answer, err := existingConn.PC.CreateAnswer(nil)
+		if err != nil {
+			return err
+		}
+		if err := existingConn.PC.SetLocalDescription(answer); err != nil {
+			return err
+		}
+		if sig := m.getSignalingClient(); sig != nil {
+			ansObj, err := m.signSDPPayload(sdp.SessionID, answer.Type.String(), answer.SDP)
+			if err != nil {
+				return err
+			}
+			answerPayload, _ := json.Marshal(ansObj)
+			_ = sig.Send(protocol.Envelope{
+				Type:     protocol.MsgSDPAnswer,
+				SenderID: m.cfg.NodeID,
+				TargetID: remotePeerID,
+				Payload:  answerPayload,
+			})
+		}
+		return nil
+	}
+
+	var supersededConn *PeerConnection
+	if oldSessionID, exists := m.peerSessions[remotePeerID]; exists && oldSessionID != sdp.SessionID {
+		if oldConn, ok := m.connections[oldSessionID]; ok && oldConn != nil {
+			if oldConn.isOutboundOfferPending() {
+				// Simultaneous offer glare: lexicographical LocalPeerID < RemotePeerID is polite (yields).
+				polite := m.cfg.NodeID < remotePeerID
+				if !polite {
+					m.mu.Unlock()
+					return nil
+				}
+			}
+			supersededConn = oldConn
+		}
+	}
+	m.mu.Unlock()
+
 	webrtcCfg := webrtc.Configuration{
 		ICEServers: m.buildICEServers(),
 	}
@@ -408,15 +752,20 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	}
 
 	conn := newPeerConnection(sdp.SessionID, m.cfg.NodeID, remotePeerID, pc, m.tracker)
+	conn.chunkTempDir = m.cfg.ChunkTempDir
+	conn.setCGNATFlags(m.cfg.IsBehindCGNAT, sdp.IsBehindCGNAT)
 	conn.setupHandlers()
 
 	m.mu.Lock()
 	if oldSessionID, exists := m.peerSessions[remotePeerID]; exists && oldSessionID != sdp.SessionID {
-		if oldConn, ok := m.connections[oldSessionID]; ok {
+		if oldConn, ok := m.connections[oldSessionID]; ok && oldConn != nil {
+			if oldConn.isOutboundOfferPending() && !(m.cfg.NodeID < remotePeerID) {
+				m.mu.Unlock()
+				_ = conn.Close()
+				return nil
+			}
 			delete(m.connections, oldSessionID)
-			go func(c *PeerConnection) {
-				_ = c.Close()
-			}(oldConn)
+			supersededConn = oldConn
 		}
 	}
 	m.connections[sdp.SessionID] = conn
@@ -424,11 +773,14 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	onConnHandler := m.onNewConn
 	m.mu.Unlock()
 
-	conn.setOnInternalStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			m.removeSession(remotePeerID, sdp.SessionID)
-		}
-	})
+	if supersededConn != nil {
+		supersededConn.markSuperseded(conn)
+		go func(c *PeerConnection) {
+			_ = c.Close()
+		}(supersededConn)
+	}
+
+	m.bindPeerConnectionLifecycle(conn, remotePeerID, sdp.SessionID)
 
 	// Register event callbacks (storage, streams) synchronously before receiving early DataChannel messages
 	if onConnHandler != nil {
@@ -506,11 +858,13 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	}
 
 	if sig := m.getSignalingClient(); sig != nil {
-		answerPayload, _ := json.Marshal(protocol.SDPPayload{
-			SessionID: sdp.SessionID,
-			Type:      answer.Type.String(),
-			SDP:       answer.SDP,
-		})
+		ansObj, err := m.signSDPPayload(sdp.SessionID, answer.Type.String(), answer.SDP)
+		if err != nil {
+			m.removeSession(remotePeerID, sdp.SessionID)
+			_ = conn.Close()
+			return err
+		}
+		answerPayload, _ := json.Marshal(ansObj)
 		_ = sig.Send(protocol.Envelope{
 			Type:     protocol.MsgSDPAnswer,
 			SenderID: m.cfg.NodeID,
@@ -522,7 +876,7 @@ func (m *Manager) handleOffer(remotePeerID string, sdp protocol.SDPPayload) erro
 	return nil
 }
 
-func (m *Manager) handleAnswer(sdp protocol.SDPPayload) error {
+func (m *Manager) handleAnswer(remotePeerID string, sdp protocol.SDPPayload) error {
 	m.mu.Lock()
 	conn, ok := m.connections[sdp.SessionID]
 	m.mu.Unlock()
@@ -530,6 +884,19 @@ func (m *Manager) handleAnswer(sdp protocol.SDPPayload) error {
 	if !ok {
 		return fmt.Errorf("unknown session: %s", sdp.SessionID)
 	}
+
+	if remotePeerID != "" && conn.RemotePeerID != remotePeerID {
+		return fmt.Errorf("session %s belongs to peer %s, not %s", sdp.SessionID, conn.RemotePeerID, remotePeerID)
+	}
+	expectedPeer := conn.RemotePeerID
+	if expectedPeer == "" {
+		expectedPeer = remotePeerID
+	}
+	if err := m.verifyAndPinDTLS(expectedPeer, sdp); err != nil {
+		return err
+	}
+
+	conn.setCGNATFlags(m.cfg.IsBehindCGNAT, sdp.IsBehindCGNAT)
 
 	answer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
@@ -554,7 +921,7 @@ func (m *Manager) handleAnswer(sdp protocol.SDPPayload) error {
 	return nil
 }
 
-func (m *Manager) handleCandidate(cand protocol.ICECandidatePayload) error {
+func (m *Manager) handleCandidate(remotePeerID string, cand protocol.ICECandidatePayload) error {
 	init := webrtc.ICECandidateInit{
 		Candidate:     cand.Candidate,
 		SDPMid:        &cand.SDPMid,
@@ -566,6 +933,10 @@ func (m *Manager) handleCandidate(cand protocol.ICECandidatePayload) error {
 	if !ok {
 		m.mu.Unlock()
 		return fmt.Errorf("unknown session: %s", cand.SessionID)
+	}
+	if remotePeerID != "" && conn.RemotePeerID != remotePeerID {
+		m.mu.Unlock()
+		return fmt.Errorf("candidate for session %s belongs to peer %s, not %s", cand.SessionID, conn.RemotePeerID, remotePeerID)
 	}
 	if !m.remoteDescSet[cand.SessionID] {
 		if len(m.pendingCandidates[cand.SessionID]) < maxPendingCandidatesPerSession {
@@ -665,18 +1036,29 @@ func (m *Manager) SetSignalingClient(sig *signaling.Client) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sigClient = sig
+	if len(m.privKey) == 0 && sig != nil {
+		m.pubKey = sig.PublicKey()
+	}
 }
 
-// SetFallbackTimeout dynamically updates the blind relay fallback timeout threshold.
-func (m *Manager) SetFallbackTimeout(d time.Duration) {
+// SetDynamicTURNServers replaces coordinator-issued TURN server configurations.
+func (m *Manager) SetDynamicTURNServers(servers []TURNServerConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cfg.FallbackTimeout = d
+	m.dynamicTURNServers = append([]TURNServerConfig(nil), servers...)
 }
 
-// FallbackTimeout returns the active blind relay fallback timeout threshold.
-func (m *Manager) FallbackTimeout() time.Duration {
+// SetLocalCGNAT updates whether the local node is behind RFC 6598 CGNAT.
+func (m *Manager) SetLocalCGNAT(isCGNAT bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.cfg.FallbackTimeout
+	m.cfg.IsBehindCGNAT = isCGNAT
+	conns := make([]*PeerConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+
+	for _, c := range conns {
+		c.setCGNATFlags(isCGNAT, false)
+	}
 }

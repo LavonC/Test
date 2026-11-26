@@ -221,20 +221,34 @@ func TestSTUNClassifier_ConeVsSymmetric(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Symmetric classify failed: %v", err)
 	}
-	if reportSym.NATType != NATTypeSymmetric && !reportSym.RequiresRelay {
-		// If local IP matches 127.0.0.1 it might say OpenDirect unless we check ports differ
-		// In Classify, isDirect checked mappedV4_1 against local IPs
-		// If mappedV4_1.Port != mappedV4_2.Port, it should evaluate to Symmetric NAT!
-		t.Logf("Symmetric classifier report: NATType=%s, RequiresRelay=%v", reportSym.NATType, reportSym.RequiresRelay)
+	if reportSym.NATType != NATTypeSymmetric {
+		t.Errorf("expected NATTypeSymmetric when STUN ports vary across destinations, got %s", reportSym.NATType)
+	}
+	if reportSym.HolePunchFeasible {
+		t.Errorf("expected HolePunchFeasible=false for Symmetric NAT without IPv6 STUN, got true")
+	}
+	if !reportSym.RequiresRelay {
+		t.Errorf("expected RequiresRelay=true for Symmetric NAT, got false")
 	}
 
-	// 2. Test Cone NAT detection
+	// 2. Test Endpoint-Independent Cone NAT detection (without falsely claiming Full Cone without filtering probes)
 	coneClassifier := NewClassifier([]string{srv1, srv2Cone}, nil)
 	reportCone, err := coneClassifier.Classify(ctx)
 	if err != nil {
 		t.Fatalf("Cone classify failed: %v", err)
 	}
-	t.Logf("Cone classifier report: NATType=%s, HolePunchFeasible=%v", reportCone.NATType, reportCone.HolePunchFeasible)
+	if reportCone.NATType != NATTypeEndpointIndependent {
+		t.Errorf("expected NATTypeEndpointIndependent for identical dual-STUN mappings, got %s", reportCone.NATType)
+	}
+	if reportCone.NATType == NATTypeFullCone {
+		t.Errorf("classifier must not mislabel unverified filtering as Full Cone NAT")
+	}
+	if !reportCone.HolePunchFeasible {
+		t.Errorf("expected HolePunchFeasible=true for Cone NAT, got false")
+	}
+	if reportCone.RequiresRelay {
+		t.Errorf("expected RequiresRelay=false for Cone NAT, got true")
+	}
 }
 
 func TestCleanSTUNAddr(t *testing.T) {
@@ -368,5 +382,101 @@ func TestClassifier_UnknownWhenSTUNUnreachableAndNoIPv6(t *testing.T) {
 	}
 	if !rep.IPv6Supported && rep.NATType != NATTypeUnknown {
 		t.Fatalf("expected NATTypeUnknown when STUN fails without IPv6, got %s", rep.NATType)
+	}
+	if rep.PublicIPv6 == "" && rep.NATType != NATTypeUnknown {
+		t.Fatalf("expected NATTypeUnknown when both IPv4 and IPv6 STUN fail, got %s", rep.NATType)
+	}
+	if rep.PublicIPv6 == "" && rep.HolePunchFeasible {
+		t.Fatalf("expected HolePunchFeasible=false when STUN fails and PublicIPv6 is empty")
+	}
+}
+
+func startMockSTUNServerWithLocalIP(t *testing.T, mappedIP net.IP, portOffset int) (string, func()) {
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start mock STUN UDP listener: %v", err)
+	}
+	stopCh := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				continue
+			}
+			msg := new(stun.Message)
+			msg.Raw = append([]byte(nil), buf[:n]...)
+			if err := msg.Decode(); err != nil {
+				continue
+			}
+			if msg.Type == stun.BindingRequest {
+				udpAddr := addr.(*net.UDPAddr)
+				res := new(stun.Message)
+				res.Type = stun.BindingSuccess
+				res.TransactionID = msg.TransactionID
+				xor := &stun.XORMappedAddress{
+					IP:   mappedIP,
+					Port: udpAddr.Port + portOffset,
+				}
+				_ = xor.AddTo(res)
+				res.Encode()
+				_, _ = conn.WriteTo(res.Raw, addr)
+			}
+		}
+	}()
+	return conn.LocalAddr().String(), func() {
+		close(stopCh)
+		_ = conn.Close()
+	}
+}
+
+func TestClassifier_PortVarianceCheckedBeforeDirect(t *testing.T) {
+	// Find a non-loopback local IPv4 if available; otherwise skip
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot enumerate interfaces")
+	}
+	var localIP net.IP
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || IsVirtualInterface(iface.Name) {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok {
+				if ip4 := ipNet.IP.To4(); ip4 != nil && !ip4.IsLoopback() {
+					localIP = ip4
+					break
+				}
+			}
+		}
+		if localIP != nil {
+			break
+		}
+	}
+	if localIP == nil {
+		t.Skip("no non-loopback physical IPv4 interface available")
+	}
+
+	srv1, c1 := startMockSTUNServerWithLocalIP(t, localIP, 0)
+	defer c1()
+	srv2, c2 := startMockSTUNServerWithLocalIP(t, localIP, 200)
+	defer c2()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c := NewClassifier([]string{srv1, srv2}, nil)
+	rep, err := c.Classify(ctx)
+	if err != nil {
+		t.Fatalf("Classify failed: %v", err)
+	}
+	if rep.NATType != NATTypeSymmetric {
+		t.Fatalf("expected port variance across dual STUN to classify as Symmetric NAT even when mapped IP matches local IP, got %s", rep.NATType)
 	}
 }
