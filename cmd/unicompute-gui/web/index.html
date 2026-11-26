@@ -924,10 +924,19 @@
                 <span class="font-headline font-semibold text-sm text-on-surface">CUDA &rarr; AMD HIPIFY Analyzer</span>
               </div>
               <div class="flex items-center gap-2">
+                <input type="file" id="cudaFileInput" accept=".cu,.cuh,.cpp,.h,.c" class="hidden">
+                <button id="btnSelectCudaFile" class="btn-surface font-mono text-[11px] flex items-center gap-1" title="Select CUDA C++ file from computer">
+                  <span class="material-symbols-outlined text-xs">upload_file</span>
+                  <span>Select File</span>
+                </button>
                 <select id="hipifySampleSelect" class="styled-select-compact font-mono text-[11px]">
                   <option value="">Load Kernel...</option>
                 </select>
                 <button id="btnAnalyzeHIP" class="btn-primary-compact">Translate</button>
+                <button id="btnDownloadHIP" class="btn-surface font-mono text-[11px] flex items-center gap-1 hidden" title="Download translated HIP file">
+                  <span class="material-symbols-outlined text-xs">download</span>
+                  <span>.hip</span>
+                </button>
               </div>
             </div>
 

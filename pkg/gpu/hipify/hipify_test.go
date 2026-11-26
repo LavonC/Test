@@ -42,6 +42,9 @@ int main() {
 	if !strings.Contains(result.TranslatedSource, "hipFree") {
 		t.Errorf("Expected hipFree in translated source")
 	}
+	if exe := FindHipifyClang(); exe != "" && result.Engine != "hipify-clang.exe" && result.Engine != "hipify-clang" {
+		t.Errorf("Expected hipify-clang engine when binary is present (%s), got %q", exe, result.Engine)
+	}
 }
 
 func TestAnalyzeCUDASource_WarpSyncIncompatibility(t *testing.T) {

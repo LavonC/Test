@@ -577,10 +577,46 @@ function initGPUSubsystem() {
   document.getElementById('btnAnalyzeHIP').addEventListener('click', runHipifyAnalysis);
   document.getElementById('btnRunGPU').addEventListener('click', runGPUSandboxTask);
 
+  const fileInput = document.getElementById('cudaFileInput');
+  const btnSelectFile = document.getElementById('btnSelectCudaFile');
+  const btnDownloadHIP = document.getElementById('btnDownloadHIP');
+  let selectedCudaFilename = 'kernel.cu';
+
+  if (btnSelectFile && fileInput) {
+    btnSelectFile.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      selectedCudaFilename = file.name;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        document.getElementById('cudaInputEditor').value = ev.target.result;
+        runHipifyAnalysis();
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  if (btnDownloadHIP) {
+    btnDownloadHIP.addEventListener('click', () => {
+      const hipCode = document.getElementById('hipOutputEditor').value;
+      if (!hipCode.trim()) return;
+      const outName = selectedCudaFilename.replace(/\.(cu|cuh|cpp|c)$/i, '') + '.hip';
+      const blob = new Blob([hipCode], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outName;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
   const hipSelect = document.getElementById('hipifySampleSelect');
   hipSelect.addEventListener('change', () => {
     const opt = hipSelect.selectedOptions[0];
     if (opt && opt.dataset.content) {
+      selectedCudaFilename = opt.value || 'kernel.cu';
       document.getElementById('cudaInputEditor').value = opt.dataset.content;
     }
   });
@@ -601,6 +637,14 @@ function runHipifyAnalysis() {
   .then(r => r.json())
   .then(res => {
     document.getElementById('hipOutputEditor').value = res.translated_source || '// Translation blocked.';
+    const btnDownload = document.getElementById('btnDownloadHIP');
+    if (btnDownload) {
+      if (res.success && res.translated_source) {
+        btnDownload.classList.remove('hidden');
+      } else {
+        btnDownload.classList.add('hidden');
+      }
+    }
 
     const panel = document.getElementById('hipifyIssuesPanel');
     const badge = document.getElementById('hipifyVerdictBadge');
@@ -612,10 +656,11 @@ function runHipifyAnalysis() {
     if (res.report && res.report.target_amd_supported) {
       badge.textContent = 'PORTABLE TO AMD';
       badge.className = 'badge-emerald font-mono text-[10px]';
-      count.textContent = `${res.replacements_made || 0} replacements made`;
+      const engineLabel = res.engine ? ` via ${res.engine}` : '';
+      count.textContent = `${res.replacements_made || 0} replacements made${engineLabel}`;
       const okDiv = document.createElement('div');
       okDiv.className = 'text-secondary font-mono text-xs';
-      okDiv.textContent = 'Ready for execution on AMD RDNA / ROCm hardware.';
+      okDiv.textContent = `Ready for execution on AMD RDNA / ROCm hardware${res.engine ? ` (translated with ${res.engine})` : ''}.`;
       list.appendChild(okDiv);
     } else if (res.report) {
       badge.textContent = 'BLOCKED ON AMD';
