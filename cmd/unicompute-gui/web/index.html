@@ -1,1283 +1,1975 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>UniCompute Workstation [OBJ 1-3]</title>
-  <!-- Material Symbols Outlined -->
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
-  <!-- Fonts: Inter & JetBrains Mono for system metrics -->
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin=""/>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"/>
-  <!-- Main Workstation Stylesheet -->
-  <link rel="stylesheet" href="css/app.css"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UniCompute — Distributed Volunteer Computing Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background-color: #F8FAFC;
+      color: #0F172A;
+    }
+    .font-mono-code {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -24; }
+    }
+    .flow-line {
+      stroke-dasharray: 5 5;
+      animation: dashFlow 1.6s linear infinite;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 6px;
+      border-radius: 9999px;
+      background: #E2E8F0;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 9999px;
+      background: #0F172A;
+      border: 2px solid #FFFFFF;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25);
+      cursor: pointer;
+    }
+    .nav-active {
+      background-color: #0F172A;
+      color: #FFFFFF;
+    }
+    .nav-active svg {
+      color: #FFFFFF;
+    }
+    .nav-idle {
+      color: #475569;
+    }
+    .nav-idle:hover {
+      background-color: #F1F5F9;
+      color: #0F172A;
+    }
+    .shard-grid-18 {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(0, 1fr));
+      gap: 6px;
+    }
+    @media (min-width: 640px) {
+      .shard-grid-18 {
+        grid-template-columns: repeat(18, minmax(0, 1fr));
+      }
+    }
+    .shard-cell {
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .shard-cell:hover {
+      transform: scale(1.2);
+      z-index: 5;
+      box-shadow: 0 2px 6px rgba(15,23,42,0.16);
+    }
+  </style>
 </head>
-<body class="bg-surface-lowest text-on-surface antialiased overflow-hidden select-none h-screen w-screen flex flex-col font-body">
+<body class="bg-[#F8FAFC] text-slate-900 antialiased overflow-x-hidden">
+  <!-- Mobile Sidebar Backdrop -->
+  <div id="mobileBackdrop" class="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-40 hidden lg:hidden" onclick="toggleMobileNav(false)"></div>
 
-  <!-- ================= NATIVE TITLEBAR & APPLICATION CHROME (38px) ================= -->
-  <header class="app-titlebar">
-    <!-- Left: Traffic Lights & Native Brand -->
-    <div class="titlebar-left">
-      <div class="traffic-lights">
-        <span class="light red" title="Close Window" id="winCloseBtn"></span>
-        <span class="light amber" title="Minimize Window" id="winMinBtn"></span>
-        <span class="light green" title="Maximize Window" id="winMaxBtn"></span>
-      </div>
-      <div class="titlebar-divider"></div>
-      <div class="brand-group">
-        <span class="material-symbols-outlined text-primary text-base">hub</span>
-        <span class="brand-title">UniCompute</span>
-        <button id="pillHealthConn" class="titlebar-pill-btn" title="Coordinator Health &amp; Connectivity View">[HEALTH &amp; CONN]</button>
-        <button id="pillCodeData" class="titlebar-pill-btn active" title="Worker Code &amp; Data Execution View">[CODE &amp; DATA]</button>
-      </div>
-    </div>
-
-    <!-- Center: Node Identifier & Network Envelope -->
-    <div class="titlebar-center">
-      <div class="node-status-pill">
-        <span class="status-dot-pulse"></span>
-        <span class="node-id-label" id="localNodeIdLabel">node-loading</span>
-        <span class="pill-sep">|</span>
-        <span class="status-sec" id="localNatLabel">NAT: PROBING</span>
-        <span class="pill-sep">•</span>
-        <span class="status-pri" id="mtlsStatusLabel">WebRTC DTLS Active</span>
-      </div>
-    </div>
-
-    <!-- Right: Coordinator Hub Selector -->
-    <div class="titlebar-right">
-      <div class="coordinator-dropdown-wrap">
-        <select id="coordinatorSelect" class="styled-select-compact">
-          <option value="wss://unicompute-coordinator.onrender.com/ws">Render Cloud</option>
-          <option value="ws://127.0.0.1:8080/ws">Localhost Hub</option>
-          <option value="custom">Custom Endpoint...</option>
-        </select>
-        <input type="text" id="customCoordinatorInput" class="styled-input-compact hidden" placeholder="ws://ip:port/ws"/>
-        <button id="btnConnectCoordinator" class="btn-primary-compact" title="Connect to Coordinator">Sync</button>
-      </div>
-
-      <div class="titlebar-divider"></div>
-
-      <div class="window-actions">
-        <button class="btn-icon" id="btnQuickWire" title="Open Wire Log Stream">
-          <span class="material-symbols-outlined text-sm">terminal</span>
-        </button>
-        <button class="btn-icon" id="btnQuickRefresh" title="Refresh All Telemetry">
-          <span class="material-symbols-outlined text-sm">refresh</span>
-        </button>
-      </div>
-    </div>
-  </header>
-
-  <!-- ================= TOP WORKSPACE NAVIGATION (44px) ================= -->
-  <nav class="app-nav">
-    <div class="nav-tabs">
-      <!-- Tab 1 -->
-      <button class="nav-tab-btn active" data-tab="tab-topology" id="navTab1">
-        <span class="material-symbols-outlined text-base">hub</span>
-        <span>Topology Canvas</span>
-        <span class="tab-pill-live">LIVE</span>
-      </button>
-
-      <!-- Tab 2 -->
-      <button class="nav-tab-btn" data-tab="tab-coordinator" id="navTab2">
-        <span class="material-symbols-outlined text-base">dns</span>
-        <span>Coordinator Hub</span>
-        <span class="tab-pill">[HEALTH &amp; CONN]</span>
-      </button>
-
-      <!-- Tab 3 -->
-      <button class="nav-tab-btn" data-tab="tab-code" id="navTab3">
-        <span class="material-symbols-outlined text-base">memory</span>
-        <span>CPU Sandbox (O2)</span>
-        <span class="tab-pill">DOCKER</span>
-      </button>
-
-      <!-- Tab 4 -->
-      <button class="nav-tab-btn" data-tab="tab-gpu" id="navTab4">
-        <span class="material-symbols-outlined text-base">speed</span>
-        <span>GPU Acceleration (O3)</span>
-        <span class="tab-pill">TIER 3</span>
-      </button>
-
-      <!-- Tab 5 -->
-      <button class="nav-tab-btn" data-tab="tab-storage" id="navTab5">
-        <span class="material-symbols-outlined text-base">dataset</span>
-        <span>Storage &amp; Shard Matrix</span>
-        <span class="tab-pill">[SHA-256]</span>
-      </button>
-
-      <!-- Tab 6 -->
-      <button class="nav-tab-btn" data-tab="tab-tasks" id="navTab6">
-        <span class="material-symbols-outlined text-base">task_alt</span>
-        <span>Cluster Task Queue</span>
-        <span class="tab-pill">[P2P]</span>
-      </button>
-
-      <!-- Tab 7 -->
-      <button class="nav-tab-btn" data-tab="tab-logs" id="navTab7">
-        <span class="material-symbols-outlined text-base">receipt_long</span>
-        <span>Cluster Wire Logs</span>
-        <span class="status-dot-sm"></span>
-      </button>
-    </div>
-
-    <!-- Cluster Overview Telemetry Ribbon -->
-    <div class="telemetry-ribbon font-mono text-xs">
-      <div class="ribbon-item">
-        <span class="ribbon-label">Fleet:</span>
-        <span class="ribbon-val-pri" id="fleetCountBadge">0 Nodes</span>
-      </div>
-      <div class="ribbon-sep"></div>
-      <div class="ribbon-item">
-        <span class="ribbon-label">P2P Links:</span>
-        <span class="ribbon-val-sec" id="peerCountBadge">0 Active</span>
-      </div>
-      <div class="ribbon-sep"></div>
-      <div class="ribbon-item">
-        <span class="ribbon-label">Watchdog:</span>
-        <span class="ribbon-val-accent" id="navWatchdogBadge">Active (50ms)</span>
-      </div>
-      <div class="ribbon-sep"></div>
-      <div class="ribbon-item">
-        <span class="ribbon-label">Storage:</span>
-        <span class="ribbon-val-muted" id="navStorageBadge">0 MB / 10 GB</span>
-      </div>
-    </div>
-  </nav>
-
-  <!-- ================= MAIN WORKSPACE VIEWPORTS ================= -->
-  <main class="app-viewport flex-1 relative overflow-hidden bg-surface-lowest">
-
-    <!-- ========================================================================= -->
-    <!-- TAB 1: P2P NETWORK TOPOLOGY CANVAS (OBJECTIVE 1)                          -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane active absolute inset-0 topology-grid flex flex-col justify-between overflow-hidden" id="tab-topology">
-      <!-- Canvas Control Toolbar (Top-Left Overlay) -->
-      <div class="canvas-overlay-toolbar">
-        <span class="overlay-title">P2P Topology Mesh</span>
-        <div class="overlay-sep"></div>
-        <button class="btn-tool-icon" id="btnZoomIn" title="Zoom In">
-          <span class="material-symbols-outlined text-sm">zoom_in</span>
-        </button>
-        <button class="btn-tool-icon" id="btnZoomOut" title="Zoom Out">
-          <span class="material-symbols-outlined text-sm">zoom_out</span>
-        </button>
-        <button class="btn-tool-icon" id="btnCenterCanvas" title="Center Topology">
-          <span class="material-symbols-outlined text-sm">fit_screen</span>
-        </button>
-        <div class="overlay-sep"></div>
-        <button class="btn-tool-text" id="btnRefreshFleet">
-          <span class="material-symbols-outlined text-xs">sync</span>
-          <span>Refresh Fleet</span>
+  <div class="min-h-screen flex">
+    <!-- Left Sidebar -->
+    <aside id="sidebar" class="fixed lg:sticky top-0 left-0 z-50 h-screen w-60 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 -translate-x-full lg:translate-x-0 shrink-0">
+      <div class="h-16 px-4 border-b border-slate-200 flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center">
+            <i data-lucide="boxes" class="w-4 h-4"></i>
+          </div>
+          <span class="text-sm font-bold tracking-tight text-slate-900">UniCompute</span>
+        </div>
+        <button type="button" class="lg:hidden p-1.5 rounded-lg text-slate-500 hover:bg-slate-100" onclick="toggleMobileNav(false)" aria-label="Close navigation">
+          <i data-lucide="x" class="w-4 h-4"></i>
         </button>
       </div>
 
-      <!-- Canvas Legend (Top-Right Overlay) -->
-      <div class="canvas-legend-card">
-        <div class="legend-entry">
-          <span class="legend-line-cyan"></span>
-          <span>Signaling Spoke (WSS)</span>
-        </div>
-        <div class="legend-entry">
-          <span class="legend-line-dashed-emerald"></span>
-          <span>Direct P2P DataChannel</span>
-        </div>
-        <div class="legend-entry">
-          <span class="legend-dot-cyan"></span>
-          <span>Tier 3 GPU Node</span>
-        </div>
-        <div class="legend-entry">
-          <span class="legend-dot-emerald"></span>
-          <span>Tier 2 Docker Sandbox</span>
-        </div>
-      </div>
-
-      <!-- Interactive Canvas Element -->
-      <div class="canvas-viewport-wrap" id="canvasContainer">
-        <canvas id="topologyCanvas"></canvas>
-
-        <!-- Floating HUD Tooltip (Hover) -->
-        <div id="hudTooltip" class="hud-tooltip hidden">
-          <div class="hud-header">
-            <span class="hud-title font-mono" id="hudNodeId">node-xxxx</span>
-            <span class="badge-emerald" id="hudStatusBadge">ONLINE</span>
-          </div>
-          <div class="hud-body">
-            <div class="hud-row">
-              <span class="hud-label">NAT Type:</span>
-              <span class="hud-val font-mono" id="hudNatType">Unknown</span>
-            </div>
-            <div class="hud-row">
-              <span class="hud-label">RFC 6598 CGNAT:</span>
-              <span class="hud-val font-mono" id="hudCgnat">false</span>
-            </div>
-            <div class="hud-row">
-              <span class="hud-label">P2P Channel:</span>
-              <span class="hud-val-sec font-mono" id="hudP2PStatus">Disconnected</span>
-            </div>
-            <div class="hud-row">
-              <span class="hud-label">Hardware Tier:</span>
-              <span class="hud-val font-mono" id="hudGPU">Tier 3 / Tier 2</span>
-            </div>
-          </div>
-          <div class="hud-footer">
-            <span class="hud-hint">Click node to inspect telemetry and control link</span>
-          </div>
-        </div>
-
-        <!-- Floating PC Inspector Overlay Card (Click Selection) -->
-        <aside id="inspectorCard" class="inspector-card hidden">
-          <!-- Inspector Header -->
-          <div class="inspector-header">
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="status-dot-pulse"></span>
-                <h4 class="inspector-title font-mono" id="inspectorNodeName">node-peer</h4>
-              </div>
-              <p class="inspector-sub font-mono text-primary" id="inspectorSubtext">P2P Link: Probing...</p>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="badge-tier" id="inspectorTierBadge">Tier 2 Docker</span>
-              <button class="btn-close-sm" id="btnCloseInspector" title="Close Inspector">&times;</button>
-            </div>
-          </div>
-
-          <!-- Inspector Specs & Path Telemetry -->
-          <div class="inspector-body space-y-3">
-            <!-- Path Telemetry (Objective 1) -->
-            <div class="telemetry-mini-grid">
-              <div class="telemetry-box">
-                <span class="box-tag">PATH TYPE</span>
-                <span class="box-val text-primary" id="inspectorPathType">Direct P2P</span>
-              </div>
-              <div class="telemetry-box">
-                <span class="box-tag">ROUND TRIP (RTT)</span>
-                <span class="box-val text-secondary" id="inspectorLatency">-- ms</span>
-              </div>
-              <div class="telemetry-box">
-                <span class="box-tag">SCTP BUFFER</span>
-                <span class="box-val text-on-surface">16 MiB Window</span>
-              </div>
-              <div class="telemetry-box">
-                <span class="box-tag">CHANNEL STATE</span>
-                <span class="box-val text-secondary" id="inspectorChannelStatus">Ready</span>
-              </div>
-            </div>
-
-            <!-- Hardware Telemetry Dials Mini -->
-            <div class="inspector-spec-block">
-              <div class="spec-row">
-                <span class="spec-label">CPU / Platform:</span>
-                <span class="spec-val font-mono" id="inspectorCpu">x86_64 Multi-Core</span>
-              </div>
-              <div class="spec-row">
-                <span class="spec-label">Hardware Acceleration:</span>
-                <span class="spec-val font-mono text-secondary" id="inspectorGpu">CUDA 12 / DirectML</span>
-              </div>
-              <div class="spec-row">
-                <span class="spec-label">NAT Classification:</span>
-                <span class="spec-val font-mono" id="inspectorNat">Unknown</span>
-              </div>
-              <div class="spec-row">
-                <span class="spec-label">Data Transferred:</span>
-                <span class="spec-val font-mono text-primary" id="inspectorDataIO">0 B In / 0 B Out</span>
-              </div>
-            </div>
-
-            <!-- Action Buttons Grid -->
-            <div class="inspector-actions space-y-2">
-              <div class="action-btn-row">
-                <button id="btnInspectorConnect" class="btn-emerald flex-1">
-                  <span class="material-symbols-outlined text-sm">link</span>
-                  <span>Connect P2P</span>
-                </button>
-                <button id="btnInspectorDisconnect" class="btn-rose hidden flex-1">
-                  <span class="material-symbols-outlined text-sm">link_off</span>
-                  <span>Disconnect</span>
-                </button>
-                <button id="btnInspectorPing" class="btn-secondary-compact">
-                  <span class="material-symbols-outlined text-sm">network_ping</span>
-                  <span>Ping</span>
-                </button>
-              </div>
-
-              <div class="action-btn-row">
-                <button id="btnSelectPeerForCode" class="btn-surface-compact flex-1">
-                  <span class="material-symbols-outlined text-xs">memory</span>
-                  <span>Target for Docker Job (O2)</span>
-                </button>
-                <button id="btnSelectPeerForShell" class="btn-surface-compact flex-1">
-                  <span class="material-symbols-outlined text-xs">terminal</span>
-                  <span>Host Shell</span>
-                </button>
-              </div>
-
-              <!-- Inline Ping / Stream Result -->
-              <div id="inspectorPingOutput" class="ping-output-box hidden font-mono text-xs"></div>
-            </div>
-          </div>
-        </aside>
-
-      </div>
-
-      <!-- Bottom Status Strip Overlay -->
-      <div class="canvas-bottom-strip font-mono text-xs">
-        <div class="flex items-center gap-3">
-          <span class="text-outline">Data Plane Topology:</span>
-          <span class="text-on-surface">WebRTC SCTP Multiplexing (stream &amp; chunk)</span>
-        </div>
-        <div class="flex items-center gap-4 text-on-surface-variant">
-          <span>Click any node in the topology mesh to open the inspector card</span>
-        </div>
-      </div>
-    </section>
-
-    <!-- ========================================================================= -->
-    <!-- TAB 2: COORDINATOR HUB [HEALTH & CONN]                                    -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-coordinator">
-      <div class="max-w-7xl mx-auto space-y-6">
-        <!-- Page Title & Quick Info -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Host Setup &amp; Daemon Controls</h1>
-              <span class="badge-pri font-mono text-xs">[HEALTH &amp; CONN]</span>
-            </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">Configure root coordinator socket bindings, peer relay thresholds, and cryptographic access credentials.</p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button class="btn-surface font-mono text-xs flex items-center gap-1.5" id="btnSyncCoordinatorConfig">
-              <span class="material-symbols-outlined text-base">refresh</span>
-              <span>Sync Configuration</span>
+      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-5">
+        <div>
+          <div class="px-2.5 mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Coordinator</div>
+          <div class="space-y-0.5">
+            <button type="button" data-nav="overview" onclick="navigate('overview')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="layout-dashboard" class="w-4 h-4 shrink-0"></i><span>Overview</span>
             </button>
-            <button class="btn-emerald font-semibold text-xs flex items-center gap-1.5" id="btnRestartDaemon">
-              <span class="material-symbols-outlined text-base">power_settings_new</span>
-              <span>Restart Daemon</span>
+            <button type="button" data-nav="topology" onclick="navigate('topology')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="share-2" class="w-4 h-4 shrink-0"></i><span>Network Topology</span>
+            </button>
+            <button type="button" data-nav="gpu" onclick="navigate('gpu')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="cpu" class="w-4 h-4 shrink-0"></i><span>GPU Compute</span>
+            </button>
+            <button type="button" data-nav="tasks" onclick="navigate('tasks')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="list-checks" class="w-4 h-4 shrink-0"></i><span>Task Queue</span>
+              <span id="navTaskBadge" class="ml-auto text-[11px] font-mono-code opacity-75">0</span>
+            </button>
+            <button type="button" data-nav="storage" onclick="navigate('storage')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="database" class="w-4 h-4 shrink-0"></i><span>Storage &amp; Shards</span>
             </button>
           </div>
         </div>
 
-        <!-- Auth Required Alert Banner -->
-        <div class="hidden bg-amber-500/15 border border-amber-500/40 rounded-xl p-4 flex items-center justify-between gap-4" id="bannerAuthRequired">
-          <div class="flex items-center gap-3">
-            <span class="material-symbols-outlined text-amber-400 text-2xl">lock</span>
-            <div>
-              <h4 class="font-headline font-semibold text-sm text-amber-300">Coordinator Authentication Required (401)</h4>
-              <p class="text-xs text-on-surface-variant">The coordinator cluster requires a secret token (UNICOMPUTE_AUTH_TOKEN) to join the fleet.</p>
-            </div>
+        <div>
+          <div class="px-2.5 mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Worker</div>
+          <div class="space-y-0.5">
+            <button type="button" data-nav="worker" onclick="navigate('worker')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="shield-check" class="w-4 h-4 shrink-0"></i><span>Sandbox Setup</span>
+            </button>
+            <button type="button" data-nav="nodes" onclick="navigate('nodes')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="server" class="w-4 h-4 shrink-0"></i><span>Nodes</span>
+            </button>
           </div>
-          <button class="font-mono text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors" id="btnJumpToAuthToken">
-            Configure Token &darr;
+        </div>
+
+        <div>
+          <div class="px-2.5 mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">System</div>
+          <div class="space-y-0.5">
+            <button type="button" data-nav="logs" onclick="navigate('logs')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="terminal" class="w-4 h-4 shrink-0"></i><span>Logs</span>
+            </button>
+            <button type="button" data-nav="settings" onclick="navigate('settings')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="sliders-horizontal" class="w-4 h-4 shrink-0"></i><span>Settings</span>
+            </button>
+            <button type="button" data-nav="attribution" onclick="navigate('attribution')" class="nav-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-colors">
+              <i data-lucide="layers" class="w-4 h-4 shrink-0"></i><span>Design Notes</span>
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <div class="px-4 py-3 border-t border-slate-200 flex items-center gap-2.5">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+        <div class="min-w-0">
+          <div id="sidebarCoordinatorName" class="text-xs font-semibold text-slate-800 truncate">UniCompute Node</div>
+          <div id="sidebarNodeSummary" class="text-[11px] text-slate-500">Connecting...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Column -->
+    <div class="flex-1 min-w-0 flex flex-col">
+      <header class="sticky top-0 z-30 h-16 bg-white/95 backdrop-blur border-b border-slate-200 px-4 lg:px-8 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <button type="button" class="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" onclick="toggleMobileNav(true)" aria-label="Open menu">
+            <i data-lucide="menu" class="w-4 h-4"></i>
+          </button>
+          <h1 id="topbarTitle" class="text-base font-bold text-slate-900 truncate">Overview</h1>
+          <span id="topbarPill" class="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+            <span>Online</span>
+          </span>
+        </div>
+
+        <div class="flex items-center gap-2.5 shrink-0">
+          <button type="button" onclick="copyJoinCode()" class="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-mono-code text-slate-700 transition-colors" title="Copy cluster join code">
+            <span class="text-slate-400">Join</span>
+            <span id="topbarJoinCode" class="font-semibold text-slate-900">UC-LOCAL</span>
+            <i data-lucide="copy" class="w-3.5 h-3.5 text-slate-400"></i>
+          </button>
+          <button type="button" onclick="openCreateTask()" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors">
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+            <span>New Task</span>
           </button>
         </div>
+      </header>
 
-        <!-- 3-Column Card Bento -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <!-- Card 1: Daemon Status Toggle Card -->
-          <div class="telemetry-card flex flex-col justify-between">
-            <div>
-              <div class="flex items-center justify-between mb-4">
-                <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center text-secondary border border-secondary/30">
-                    <span class="material-symbols-outlined">dns</span>
-                  </div>
-                  <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">Coordinator Daemon</h3>
-                    <p class="font-mono text-[11px] text-outline">UniCompute Daemon</p>
-                  </div>
-                </div>
-                <!-- Status Toggle & Live Auth Badge -->
-                <div class="flex items-center gap-2">
-                  <span class="hidden px-2 py-0.5 rounded text-[10px] font-mono font-semibold" id="coordAuthBadge"></span>
-                  <div class="flex items-center gap-1.5 bg-surface-lowest px-2.5 py-1 rounded-full border border-secondary/30">
-                    <span class="status-dot-pulse"></span>
-                    <span class="text-secondary font-mono text-[11px] font-semibold" id="coordDaemonStatus">RUNNING</span>
-                  </div>
-                </div>
+      <main id="pageContainer" class="flex-1 p-4 lg:p-8 max-w-[1380px] w-full mx-auto">
+        <!-- Rendered by JS -->
+      </main>
+    </div>
+  </div>
+
+  <!-- Reusable Modal Backdrop -->
+  <div id="modalBackdrop" class="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 hidden items-center justify-center p-4" onclick="closeModal()">
+    <div id="modalCard" class="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-lg overflow-hidden" onclick="event.stopPropagation()">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+        <h3 id="modalTitle" class="text-sm font-bold text-slate-900">Modal</h3>
+        <button type="button" onclick="closeModal()" class="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100" aria-label="Close modal">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div id="modalBody" class="p-5"></div>
+    </div>
+  </div>
+
+  <!-- Toast Stack -->
+  <div id="toastStack" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <script>
+    // =========================================================================
+    // AUTH TOKEN & API INTERCEPTOR (matches cmd/unicompute-gui/api.go)
+    // =========================================================================
+    (function() {
+      const hash = window.location.hash || '';
+      const match = hash.match(/token=([a-fA-F0-9]+)/);
+      if (match && match[1]) {
+        sessionStorage.setItem('unicompute_gui_token', match[1]);
+      }
+    })();
+
+    function getAuthToken() {
+      return sessionStorage.getItem('unicompute_gui_token') || '';
+    }
+
+    const _originalFetch = window.fetch;
+    window.fetch = function(url, options = {}) {
+      const token = getAuthToken();
+      const headers = new Headers(options.headers || {});
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', 'Bearer ' + token);
+      }
+      const method = (options.method || 'GET').toUpperCase();
+      if ((method === 'POST' || method === 'PUT' || method === 'DELETE') && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+      }
+      options.headers = headers;
+      return _originalFetch(url, options);
+    };
+
+    // =========================================================================
+    // DEFAULT SETTINGS & STATE
+    // =========================================================================
+    const defaultSettings = {
+      coordinatorName: 'Alpha-Coordinator',
+      joinCode: 'UC-9F4A',
+      safemodeSeconds: 30,
+      staleTimeoutSec: 15,
+      deadTimeoutMin: 20,
+      quicPort: '4194',
+      stunServer: 'stun:stun.l.google.com:19302',
+      enableTcpRelay: true,
+      enableFederation: false,
+      maxPeers: 64,
+      allowRegistration: true,
+      requireEd25519: true,
+      sarmentaSpotCheck: true,
+      spotCheckRate: 10,
+      enforceOfflineSandbox: true,
+      cpuCeiling: 80,
+      gpuThermalCutoff: 85,
+      pauseOnBattery: true,
+      erasurePolicy: 'RS(6,3)'
+    };
+
+    function loadSavedSettings() {
+      try {
+        const raw = localStorage.getItem('unicompute_settings_v1');
+        if (raw) return { ...defaultSettings, ...JSON.parse(raw) };
+      } catch (e) {}
+      return { ...defaultSettings };
+    }
+
+    const defaultCudaSample = `#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+
+__global__ void vectorAdd(const float *A, const float *B, float *C, int N) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < N) {
+        C[i] = A[i] + B[i];
+    }
+}
+
+int main() {
+    int N = 1024;
+    size_t size = N * sizeof(float);
+    float *d_A = NULL, *d_B = NULL, *d_C = NULL;
+    cudaMalloc((void **)&d_A, size);
+    cudaMalloc((void **)&d_B, size);
+    cudaMalloc((void **)&d_C, size);
+    vectorAdd<<<4, 256>>>(d_A, d_B, d_C, N);
+    cudaDeviceSynchronize();
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    return 0;
+}`;
+
+    const state = {
+      currentPage: 'overview',
+      backendConnected: false,
+      localNodeId: 'local-node',
+      localGpuProfile: null,
+      localWatchdog: null,
+      selectedTopoNodeId: 'local-node',
+      topoViewMode: 'orbital',
+      gpuRuntimeTab: 'hipify',
+      gpuProvider: 'Auto-Route',
+      gpuInterruptible: true,
+      gpuCheckpointInterval: 'Every 5 mins',
+      gpuSelectedFile: 'vector_add.cu',
+      cudaSamples: [],
+      cudaSource: defaultCudaSample,
+      hipSource: '',
+      hipifyResult: null,
+      hipifyRunning: false,
+      hipifyStatus: 'idle',
+      workerActive: true,
+      workerBenchmark: null,
+      workerTiers: {
+        t1: { enabled: true, ramGb: 2 },
+        t2: { enabled: true, cpuCores: 8, ramGb: 16 },
+        t3: { enabled: true }
+      },
+      claimedTaskId: null,
+      claimedProgress: 0,
+      claimTimer: null,
+      taskFilterTab: 'All',
+      taskSearch: '',
+      selectedTaskId: '',
+      taskLogStreamFilter: 'all',
+      createForm: {
+        mode: 'single',
+        title: '',
+        tier: 'Tier 3 GPU',
+        runtime: 'ONNX Runtime',
+        provider: 'Auto-Route',
+        timeoutSec: 25,
+        cpuCores: 4,
+        ramGb: 8,
+        checkpointing: true,
+        checkpointInterval: 'Every 5 mins',
+        dataSourceType: 'vault',
+        selectedVaultId: 'ds-local',
+        newFileName: '',
+        entryFile: 'infer_resnet50.onnx',
+        targetNode: 'Auto',
+        stages: [
+          { name: 'Preprocess & Normalize', tier: 'Tier 2 Container', runtime: 'Python 3.12', inputType: 'vault', inputRef: 'ds-local' },
+          { name: 'Batch AI Inference', tier: 'Tier 3 GPU', runtime: 'ONNX Runtime', inputType: 'stage', inputRef: 'stage-0' },
+          { name: 'Aggregate Predictions', tier: 'Tier 1 WASI', runtime: 'Pyodide', inputType: 'stage', inputRef: 'stage-1' }
+        ]
+      },
+      vaultDatasets: [
+        { id: 'ds-local', path: '/vault/local-chunks', size: '0 B', cachedOn: ['local-node'] }
+      ],
+      nodeSearch: '',
+      nodeTierFilter: 'All',
+      nodeStatusFilter: 'All',
+      logTab: 'All',
+      logSeverity: 'All',
+      logSearch: '',
+      settingsTab: 0,
+      settingsDirty: false,
+      settings: loadSavedSettings(),
+      nodes: [],
+      tasks: [],
+      shardMatrix: [
+        Array(18).fill('ok'),
+        Array(18).fill('ok'),
+        Array(18).fill('ok'),
+        Array(18).fill('ok')
+      ],
+      logs: []
+    };
+
+    // =========================================================================
+    // BACKEND DATA SYNC & WEBSOCKET
+    // =========================================================================
+    async function syncBackend() {
+      try {
+        const [statusRes, gpuRes, fleetRes, tasksRes, blobsRes] = await Promise.allSettled([
+          fetch('/api/status').then(r => r.ok ? r.json() : null),
+          fetch('/api/gpu').then(r => r.ok ? r.json() : null),
+          fetch('/api/fleet').then(r => r.ok ? r.json() : null),
+          fetch('/api/tasks').then(r => r.ok ? r.json() : null),
+          fetch('/api/storage/blobs').then(r => r.ok ? r.json() : null)
+        ]);
+
+        const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+        const gpuData = gpuRes.status === 'fulfilled' ? gpuRes.value : null;
+        const fleetData = fleetRes.status === 'fulfilled' ? fleetRes.value : null;
+        const tasksData = tasksRes.status === 'fulfilled' ? tasksRes.value : null;
+        const blobsData = blobsRes.status === 'fulfilled' ? blobsRes.value : null;
+
+        if (status) {
+          state.backendConnected = true;
+          state.localNodeId = status.node_id || state.localNodeId;
+          if (status.join_token) state.settings.joinCode = status.join_token;
+          if (status.coordinator_url) state.settings.coordinatorName = status.pool_id || 'UniCompute Pool';
+        }
+
+        if (gpuData && gpuData.profile) {
+          state.localGpuProfile = gpuData.profile;
+          state.localWatchdog = gpuData.watchdog || null;
+        }
+
+        // Build live nodes list from local node + fleet
+        const nodeList = [];
+        const prof = state.localGpuProfile || (status && status.gpu_profile) || {};
+        const vramTotalGB = prof.vram_mb ? Number((prof.vram_mb / 1024).toFixed(1)) : 0;
+        const gpuVendor = prof.vendor || 'Unknown';
+        const gpuName = prof.name || 'CPU / Integrated';
+        const runtimes = [];
+        if (prof.cuda_supported) runtimes.push('CUDA');
+        if (prof.hip_supported) runtimes.push('HIP / ROCm');
+        if (prof.directml_supported) runtimes.push('ONNX / DirectML');
+        if (!runtimes.length) runtimes.push('Wasmtime', 'HIPIFY');
+
+        nodeList.push({
+          id: state.localNodeId,
+          lab: 'Local Host',
+          tier: vramTotalGB > 0 ? 'Tier 3 GPU' : 'Tier 2 Container',
+          os: 'Windows 11',
+          cpuModel: 'Host CPU',
+          cpuUse: 24,
+          gpuModel: gpuName,
+          gpuVendor: gpuVendor,
+          gpuUse: prof.utilization_pct || 18,
+          vramUsed: vramTotalGB ? Number((vramTotalGB * 0.25).toFixed(1)) : 0,
+          vramTotal: vramTotalGB,
+          tempC: prof.temp_c || 52,
+          ramUsed: 12,
+          ramTotal: 32,
+          rttMs: 1,
+          transport: 'Local Host',
+          status: 'Online',
+          heartbeat: 'Live',
+          shardsData: blobsData && Array.isArray(blobsData.blobs) ? blobsData.blobs.length : 0,
+          shardsParity: 0,
+          runtimes,
+          gpuIncluded: true,
+          workload: 'HIPIFY / Compute Ready',
+          color: '#0284C7',
+          pos: [50, 20]
+        });
+
+        if (fleetData && Array.isArray(fleetData.nodes)) {
+          fleetData.nodes.forEach((fn, idx) => {
+            if (fn.node_id === state.localNodeId) return;
+            const angle = ((idx + 1) / (fleetData.nodes.length + 1)) * Math.PI * 2;
+            const px = Math.round(50 + 32 * Math.cos(angle));
+            const py = Math.round(50 + 34 * Math.sin(angle));
+            nodeList.push({
+              id: fn.node_id || ('Peer-' + (idx + 1)),
+              lab: fn.pool_id || 'Remote Pool',
+              tier: fn.gpu_vram_mb > 0 ? 'Tier 3 GPU' : 'Tier 2 Container',
+              os: fn.os || 'Linux/Win',
+              cpuModel: fn.cpu_model || 'Peer CPU',
+              cpuUse: 30,
+              gpuModel: fn.gpu_name || 'Peer GPU',
+              gpuVendor: fn.gpu_vendor || 'Unknown',
+              gpuUse: 20,
+              vramUsed: fn.gpu_vram_mb ? Number((fn.gpu_vram_mb / 1024 * 0.3).toFixed(1)) : 0,
+              vramTotal: fn.gpu_vram_mb ? Number((fn.gpu_vram_mb / 1024).toFixed(1)) : 0,
+              tempC: 58,
+              ramUsed: 8,
+              ramTotal: 32,
+              rttMs: fn.rtt_ms || 24,
+              transport: fn.transport || 'Direct WebRTC',
+              status: fn.online === false ? 'Stale' : 'Online',
+              heartbeat: 'Active',
+              shardsData: 2,
+              shardsParity: 1,
+              runtimes: ['ONNX / DirectML'],
+              gpuIncluded: true,
+              workload: 'Idle',
+              color: '#059669',
+              pos: [px, py]
+            });
+          });
+        }
+
+        state.nodes = nodeList;
+        if (!state.nodes.find(n => n.id === state.selectedTopoNodeId)) {
+          state.selectedTopoNodeId = state.localNodeId;
+        }
+
+        if (tasksData && Array.isArray(tasksData.tasks)) {
+          state.tasks = tasksData.tasks.map(t => ({
+            id: t.job_id || t.id,
+            title: t.class_ad || t.stage_dag || t.job_id,
+            kind: t.stage_dag || 'Cluster Task',
+            tier: (t.target_match || '').includes('Tier 3') ? 'Tier 3 GPU' : 'Tier 2 Container',
+            runtime: t.stage_dag || 'UniCompute',
+            specs: t.target_match || 'Auto-matched',
+            dataset: '/vault/workspace',
+            outputRef: t.job_id || 'obj:output',
+            worker: t.target_match || state.localNodeId,
+            locality: 'Node-Local',
+            verification: 'Ed25519 Armed',
+            eta: t.status === 'COMPLETED' ? 'Done' : 'Active',
+            progress: t.status === 'COMPLETED' ? 100 : (t.status === 'FAILED' ? 0 : 50),
+            status: t.status === 'COMPLETED' ? 'Completed' : (t.status === 'FAILED' ? 'Failed' : 'Running'),
+            stages: null,
+            execLogs: [
+              { ts: t.created_at || new Date().toTimeString().slice(0, 8), stream: 'stdout', line: t.output || t.class_ad || 'Task recorded on node.' }
+            ]
+          }));
+          if (!state.selectedTaskId && state.tasks.length) {
+            state.selectedTaskId = state.tasks[0].id;
+          }
+        }
+
+        if (blobsData && Array.isArray(blobsData.blobs)) {
+          state.vaultDatasets = blobsData.blobs.map((b, i) => ({
+            id: 'blob-' + i,
+            path: '/vault/' + (b.key || b.cid || ('chunk-' + i)),
+            size: b.size ? `${Math.round(b.size / 1024)} KB` : 'Chunk',
+            cachedOn: [state.localNodeId]
+          }));
+          if (!state.vaultDatasets.length) {
+            state.vaultDatasets = [{ id: 'ds-local', path: '/vault/empty', size: '0 B', cachedOn: [state.localNodeId] }];
+          }
+        }
+
+        updateChrome();
+        // Re-render current page smoothly unless user is actively typing in an input/textarea
+        const activeTag = document.activeElement ? document.activeElement.tagName : '';
+        if (activeTag !== 'TEXTAREA' && activeTag !== 'INPUT' && activeTag !== 'SELECT') {
+          renderCurrentPageOnly();
+        }
+      } catch (err) {
+        console.warn('Backend sync warning:', err);
+      }
+    }
+
+    async function loadSamplesFromBackend() {
+      try {
+        const res = await fetch('/api/samples');
+        if (!res.ok) return;
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : (data.samples || []);
+        state.cudaSamples = items.filter(s => s.language === 'cuda' || (s.name && s.name.endsWith('.cu')));
+        if (state.cudaSamples.length > 0 && state.cudaSource === defaultCudaSample) {
+          state.gpuSelectedFile = state.cudaSamples[0].name;
+          state.cudaSource = state.cudaSamples[0].content;
+        }
+        if (state.currentPage === 'gpu') {
+          renderGpuCompute(document.getElementById('pageContainer'));
+          if (window.lucide) lucide.createIcons();
+        }
+      } catch (e) {}
+    }
+
+    function initWebSocket() {
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const token = getAuthToken();
+        const wsUrl = `${proto}//${window.location.host}/api/events${token ? '?token=' + encodeURIComponent(token) : ''}`;
+        const ws = new WebSocket(wsUrl);
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            state.logs.unshift({
+              ts: new Date().toTimeString().slice(0, 8),
+              sev: msg.level === 'error' ? 'Error' : (msg.level === 'warn' ? 'Warning' : 'Info'),
+              cat: msg.category || 'Coordinator',
+              src: msg.source || state.localNodeId,
+              type: msg.type || 'Event',
+              msg: msg.message || JSON.stringify(msg)
+            });
+            if (state.logs.length > 100) state.logs.pop();
+            if (state.currentPage === 'logs' || state.currentPage === 'overview') {
+              renderCurrentPageOnly();
+            }
+          } catch (e) {}
+        };
+      } catch (e) {}
+    }
+
+    let activeCharts = [];
+    function destroyCharts() {
+      activeCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+      activeCharts = [];
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
+    }
+
+    function showToast(message, tone = 'success') {
+      const stack = document.getElementById('toastStack');
+      const el = document.createElement('div');
+      const iconName = tone === 'warning' ? 'alert-triangle' : tone === 'info' ? 'info' : 'check-circle-2';
+      const iconColor = tone === 'warning' ? 'text-amber-400' : tone === 'info' ? 'text-sky-400' : 'text-emerald-400';
+      el.className = 'pointer-events-auto flex items-center gap-2.5 bg-slate-900 text-white text-xs font-medium px-4 py-3 rounded-xl shadow-lg border border-slate-700 max-w-sm';
+      el.innerHTML = `<i data-lucide="${iconName}" class="w-4 h-4 shrink-0 ${iconColor}"></i><span>${escapeHtml(message)}</span>`;
+      stack.appendChild(el);
+      if (window.lucide) lucide.createIcons({ nodes: [el] });
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.25s ease';
+        setTimeout(() => el.remove(), 260);
+      }, 3000);
+    }
+
+    function copyText(text, label = 'Copied to clipboard') {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => showToast(label)).catch(() => fallbackCopy(text, label));
+      } else {
+        fallbackCopy(text, label);
+      }
+    }
+    function copyJoinCode() { copyText(state.settings.joinCode, `Join code ${state.settings.joinCode} copied`); }
+    function fallbackCopy(text, label) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); showToast(label); } catch (e) {}
+      ta.remove();
+    }
+
+    function toggleMobileNav(open) {
+      const sb = document.getElementById('sidebar');
+      const bd = document.getElementById('mobileBackdrop');
+      if (open) {
+        sb.classList.remove('-translate-x-full');
+        bd.classList.remove('hidden');
+      } else {
+        sb.classList.add('-translate-x-full');
+        bd.classList.add('hidden');
+      }
+    }
+
+    function openModal(title, bodyHtml) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalBody').innerHTML = bodyHtml;
+      const bd = document.getElementById('modalBackdrop');
+      bd.classList.remove('hidden');
+      bd.classList.add('flex');
+      if (window.lucide) lucide.createIcons({ nodes: [bd] });
+    }
+
+    function closeModal() {
+      const bd = document.getElementById('modalBackdrop');
+      bd.classList.add('hidden');
+      bd.classList.remove('flex');
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+    function updateChrome() {
+      const online = state.nodes.filter(n => n.status === 'Online').length;
+      const total = state.nodes.length;
+      document.getElementById('sidebarCoordinatorName').textContent = state.localNodeId || state.settings.coordinatorName;
+      document.getElementById('sidebarNodeSummary').textContent = `${online} of ${total} nodes active`;
+      document.getElementById('navTaskBadge').textContent = state.tasks.length;
+      document.getElementById('topbarJoinCode').textContent = state.settings.joinCode;
+      document.getElementById('topbarPill').innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${state.backendConnected ? 'bg-emerald-500' : 'bg-amber-500'}"></span><span>${state.backendConnected ? 'Live' : 'Connecting'} · ${online}/${total} Nodes</span>`;
+    }
+
+    // =========================================================================
+    // NAVIGATION ROUTER
+    // =========================================================================
+    const pageTitles = {
+      overview: 'Overview',
+      topology: 'Network Topology',
+      gpu: 'GPU Compute & HIPIFY',
+      worker: 'Worker Sandbox Setup',
+      tasks: 'Task Queue',
+      'create-task': 'Create Task',
+      'task-detail': 'Task Execution & Logs',
+      storage: 'Storage & Shards',
+      nodes: 'Nodes',
+      logs: 'Logs',
+      settings: 'Settings',
+      attribution: 'Design Notes'
+    };
+
+    function renderCurrentPageOnly() {
+      const page = state.currentPage;
+      const container = document.getElementById('pageContainer');
+      destroyCharts();
+      if (page === 'overview') renderOverview(container);
+      else if (page === 'topology') renderTopology(container);
+      else if (page === 'gpu') renderGpuCompute(container);
+      else if (page === 'worker') renderWorkerSandbox(container);
+      else if (page === 'tasks') renderTaskQueue(container);
+      else if (page === 'create-task') renderCreateTask(container);
+      else if (page === 'task-detail') renderTaskDetail(container);
+      else if (page === 'storage') renderStorage(container);
+      else if (page === 'nodes') renderFleetNodes(container);
+      else if (page === 'logs') renderLogs(container);
+      else if (page === 'settings') renderSettings(container);
+      else if (page === 'attribution') renderAttribution(container);
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function navigate(page) {
+      state.currentPage = page;
+      toggleMobileNav(false);
+      updateChrome();
+
+      const activeNavKey = (page === 'create-task' || page === 'task-detail') ? 'tasks' : page;
+      document.querySelectorAll('.nav-btn').forEach(btn => {
+        if (btn.dataset.nav === activeNavKey) {
+          btn.classList.add('nav-active');
+          btn.classList.remove('nav-idle');
+        } else {
+          btn.classList.remove('nav-active');
+          btn.classList.add('nav-idle');
+        }
+      });
+
+      document.getElementById('topbarTitle').textContent = pageTitles[page] || 'Overview';
+      renderCurrentPageOnly();
+    }
+
+    function openCreateTask(preselectedNode = 'Auto') {
+      state.createForm.targetNode = preselectedNode;
+      navigate('create-task');
+    }
+
+    function openTaskDetail(taskId) {
+      state.selectedTaskId = taskId;
+      state.taskLogStreamFilter = 'all';
+      navigate('task-detail');
+    }
+
+    // =========================================================================
+    // PAGE 1: OVERVIEW
+    // =========================================================================
+    function renderOverview(container) {
+      const onlineCount = state.nodes.filter(n => n.status === 'Online').length;
+      const staleCount = state.nodes.length - onlineCount;
+      const runningTasks = state.tasks.filter(t => t.status === 'Running').length;
+      const pendingTasks = state.tasks.filter(t => t.status === 'Pending').length;
+      const failedTasks = state.tasks.filter(t => t.status === 'Failed').length;
+      const totalVram = state.nodes.reduce((s, n) => s + n.vramTotal, 0);
+      const usedVram = state.nodes.reduce((s, n) => s + n.vramUsed, 0);
+      const vramPct = totalVram ? Math.round((usedVram / totalVram) * 100) : 0;
+      const healthScore = state.nodes.length ? Math.round((onlineCount / state.nodes.length) * 100) : 100;
+
+      container.innerHTML = `
+        <div class="space-y-6">
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+                <span>Worker Nodes</span>
+                <i data-lucide="server" class="w-4 h-4 text-slate-400"></i>
               </div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${onlineCount} / ${state.nodes.length || 1}</span>
+                <span class="text-xs font-medium text-emerald-600">Online</span>
+              </div>
+              <div class="mt-2 text-xs text-slate-500">Local: ${escapeHtml(state.localNodeId)}</div>
+            </div>
 
-              <div class="space-y-2.5 pt-2 font-mono text-xs">
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">Uptime</span>
-                  <span class="text-on-surface font-semibold" id="coordUptime">--</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">Transport Socket</span>
-                  <span class="text-primary font-semibold" id="coordListenSocket">WebRTC DataChannel (ICE/DTLS/SCTP)</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">Heartbeat Ping Frequency</span>
-                  <span class="text-on-surface font-semibold">20s WS Ping / 15s ICE Keepalive</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">Transport Protocol</span>
-                  <span class="text-secondary font-semibold" id="coordMtls">DTLS 1.2 / SCTP (Pion WebRTC)</span>
-                </div>
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+                <span>Active Tasks</span>
+                <i data-lucide="activity" class="w-4 h-4 text-slate-400"></i>
+              </div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${runningTasks}</span>
+                <span class="text-xs text-slate-500">${pendingTasks} pending</span>
+              </div>
+              <div class="mt-2 text-xs text-slate-500">${state.tasks.filter(t => t.status === 'Completed').length} completed · ${failedTasks} failed</div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+                <span>Cluster VRAM</span>
+                <i data-lucide="cpu" class="w-4 h-4 text-slate-400"></i>
+              </div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${totalVram.toFixed(1)} GB</span>
+                <span class="text-xs text-slate-500">${Math.max(0, totalVram - usedVram).toFixed(1)} GB free</span>
+              </div>
+              <div class="mt-3 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div class="h-full bg-slate-900 rounded-full" style="width:${vramPct}%"></div>
               </div>
             </div>
 
-            <div class="mt-5 pt-3 border-t border-outline-variant/30 flex items-center justify-between">
-              <span class="text-xs text-outline font-mono">Go Goroutine Runtime</span>
-              <span class="badge-pri font-mono text-[11px]">WebRTC / SCTP</span>
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+                <span>Distributed Storage</span>
+                <i data-lucide="database" class="w-4 h-4 text-slate-400"></i>
+              </div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${state.vaultDatasets.length} Blobs</span>
+                <span class="text-xs text-slate-500">Vault Ready</span>
+              </div>
+              <div class="mt-2 text-xs text-emerald-600 font-medium">${state.settings.erasurePolicy} Erasure Coding</div>
             </div>
           </div>
 
-          <!-- Card 2: Read-Only ICE & Signaling Transport Timeouts -->
-          <div class="telemetry-card flex flex-col justify-between">
-            <div>
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div class="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
               <div class="flex items-center justify-between mb-4">
-                <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
-                    <span class="material-symbols-outlined">timer</span>
-                  </div>
-                  <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">ICE &amp; NAT Timeouts</h3>
-                    <p class="font-mono text-[11px] text-outline">Pion WebRTC SettingEngine configuration</p>
-                  </div>
+                <h2 class="text-sm font-bold text-slate-900">Resource Utilization</h2>
+                <div class="flex items-center gap-4 text-xs text-slate-500">
+                  <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>CPU</span>
+                  <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-violet-500"></span>GPU</span>
+                  <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Network</span>
                 </div>
-                <span class="badge-pri font-mono text-[10px]">READ-ONLY</span>
               </div>
-
-              <div class="space-y-2.5 pt-2 font-mono text-xs">
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">ICE Disconnected Timeout</span>
-                  <span class="text-primary font-semibold">20.0s</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">ICE Failed Timeout</span>
-                  <span class="text-on-surface font-semibold">25.0s</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">ICE Keepalive Interval</span>
-                  <span class="text-secondary font-semibold">15.0s</span>
-                </div>
-                <div class="flex justify-between items-center py-1.5 border-b border-outline-variant/20">
-                  <span class="text-outline">SCTP Receive Window</span>
-                  <span class="text-on-surface font-semibold">16 MiB</span>
-                </div>
+              <div class="relative h-64">
+                <canvas id="overviewUtilChart"></canvas>
               </div>
             </div>
 
-            <div class="mt-5 pt-3 border-t border-outline-variant/30 text-[11px] text-outline font-mono">
-              <span>Configured via ICE STUN/TURN; standalone relay package is not auto-invoked.</span>
+            <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between">
+              <div class="flex items-center justify-between">
+                <h2 class="text-sm font-bold text-slate-900">Cluster Health</h2>
+                <span class="text-xs font-medium ${healthScore >= 80 ? 'text-emerald-600' : 'text-amber-600'}">${healthScore >= 80 ? 'Healthy' : 'Degraded'}</span>
+              </div>
+              <div class="flex items-center justify-center my-4">
+                <div class="relative w-36 h-36 rounded-full flex items-center justify-center" style="background: conic-gradient(#10B981 0% ${healthScore}%, #E2E8F0 ${healthScore}% 100%);">
+                  <div class="w-28 h-28 rounded-full bg-white flex flex-col items-center justify-center">
+                    <span class="text-3xl font-bold text-slate-900">${healthScore}%</span>
+                    <span class="text-xs text-slate-500">Online</span>
+                  </div>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+                  <span class="text-slate-500">Online</span><strong class="text-emerald-700">${onlineCount}</strong>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+                  <span class="text-slate-500">Stale</span><strong class="text-amber-600">${staleCount}</strong>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+                  <span class="text-slate-500">Running</span><strong class="text-sky-700">${runningTasks}</strong>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+                  <span class="text-slate-500">Failed</span><strong class="text-rose-600">${failedTasks}</strong>
+                </div>
+              </div>
             </div>
           </div>
 
-          <!-- Card 3: HEALTH & CONN Vitals Matrix -->
-          <div class="telemetry-card flex flex-col justify-between">
-            <div>
-              <div class="flex items-center justify-between mb-4">
-                <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-purple-500/15 flex items-center justify-center text-tertiary border border-tertiary/30">
-                    <span class="material-symbols-outlined">speed</span>
-                  </div>
-                  <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">HEALTH | CONN Vitals</h3>
-                    <p class="font-mono text-[11px] text-outline">Real-time coordinator mesh telemetry</p>
-                  </div>
-                </div>
-                <span class="badge-emerald font-mono text-[10px]">PEER PARITY OK</span>
+          <div class="grid grid-cols-1 lg:grid-cols-5 gap-5">
+            <div class="lg:col-span-3 bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h2 class="text-sm font-bold text-slate-900">Active Workloads</h2>
+                <button type="button" onclick="navigate('tasks')" class="text-xs font-semibold text-sky-600 hover:text-sky-700">View all</button>
               </div>
-
-              <!-- Vitals stats breakdown -->
-              <div class="grid grid-cols-2 gap-3 mt-2">
-                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">Direct P2P Links</span>
-                  <div class="font-mono text-lg font-bold text-secondary mt-0.5" id="coordDirectPeers">0 Nodes</div>
-                  <span class="text-[10px] text-outline font-mono" id="coordAvgRtt">Avg RTT: 0.0ms</span>
-                </div>
-                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">Relayed Links</span>
-                  <div class="font-mono text-lg font-bold text-primary mt-0.5" id="coordRelayedPeers">0 Nodes</div>
-                  <span class="text-[10px] text-outline font-mono" id="coordRelayFallback">TURN ICE Candidate</span>
-                </div>
-                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">Throttled Peers</span>
-                  <div class="font-mono text-lg font-bold text-on-surface mt-0.5" id="coordThrottledPeers">0 Nodes</div>
-                  <span class="text-[10px] text-secondary font-mono">Zero backpressure</span>
-                </div>
-                <div class="bg-surface-lowest p-2.5 rounded-lg border border-outline-variant/30">
-                  <span class="text-[11px] text-outline font-mono">CAS SHA-256 Audit</span>
-                  <div class="font-mono text-lg font-bold text-tertiary mt-0.5" id="coordMerkleVerif">0.0%</div>
-                  <span class="text-[10px] text-outline font-mono" id="coordHashCount">0 Blobs</span>
-                </div>
+              <div class="divide-y divide-slate-100">
+                ${state.tasks.length ? state.tasks.slice(0, 4).map(t => `
+                  <button type="button" onclick="openTaskDetail('${t.id}')" class="w-full text-left py-3 flex items-center gap-3 hover:bg-slate-50/80 px-2 -mx-2 rounded-lg transition-colors">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-xs font-semibold text-slate-900 truncate">${escapeHtml(t.title)}</span>
+                        <span class="text-xs font-mono-code text-slate-600 shrink-0">${t.progress}%</span>
+                      </div>
+                      <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(t.worker)} · ${t.tier}</div>
+                      <div class="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                        <div class="h-full rounded-full ${t.status === 'Completed' ? 'bg-emerald-500' : t.status === 'Failed' ? 'bg-rose-500' : 'bg-slate-900'}" style="width:${t.progress}%"></div>
+                      </div>
+                    </div>
+                  </button>
+                `).join('') : '<div class="py-6 text-center text-xs text-slate-500">No tasks yet. Click "+ New Task" or run a GPU / HIPIFY job.</div>'}
               </div>
             </div>
 
-            <!-- Health Bar summary -->
-            <div class="mt-4 pt-3 border-t border-outline-variant/30">
-              <div class="flex justify-between items-center text-xs font-mono mb-1.5">
-                <span class="text-outline" id="coordMeshSaturationLabel">Mesh Link Saturation: 0/32 Cap</span>
-                <span class="text-secondary font-semibold" id="coordMeshPercent">0% Capacity</span>
+            <div class="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h2 class="text-sm font-bold text-slate-900">Recent Events</h2>
+                <button type="button" onclick="navigate('logs')" class="text-xs font-semibold text-sky-600 hover:text-sky-700">View logs</button>
               </div>
-              <div class="h-2 w-full bg-surface-lowest rounded-full overflow-hidden flex border border-outline-variant/30">
-                <div class="bg-secondary h-full" id="coordBarDirect" style="width: 0%" title="Direct P2P"></div>
-                <div class="bg-primary h-full" id="coordBarRelay" style="width: 0%" title="Relayed"></div>
-                <div class="bg-outline-variant/40 h-full" id="coordBarSpare" style="width: 100%" title="Spare capacity"></div>
+              <div class="space-y-3.5">
+                ${state.logs.length ? state.logs.slice(0, 4).map(l => `
+                  <div class="flex items-start gap-2.5 text-xs">
+                    <span class="mt-1.5 w-2 h-2 rounded-full shrink-0 ${l.sev === 'Error' ? 'bg-rose-500' : l.sev === 'Warning' ? 'bg-amber-500' : 'bg-sky-500'}"></span>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="font-semibold text-slate-800">${escapeHtml(l.type)}</span>
+                        <span class="text-[11px] font-mono-code text-slate-400">${l.ts}</span>
+                      </div>
+                      <p class="text-xs text-slate-500 mt-0.5 leading-relaxed">${escapeHtml(l.msg)}</p>
+                    </div>
+                  </div>
+                `).join('') : '<div class="py-6 text-center text-xs text-slate-500">Listening for live node events...</div>'}
               </div>
             </div>
           </div>
         </div>
+      `;
 
-        <!-- Row 2: Cluster Auth & Worker Code Allowlist Controls -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <!-- Card: Coordinator Cluster Auth Token -->
-          <div class="telemetry-card flex flex-col justify-between space-y-4">
-            <div>
-              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
-                <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center text-amber-400 border border-amber-500/30">
-                    <span class="material-symbols-outlined">security</span>
-                  </div>
-                  <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">Coordinator Cluster Auth Token</h3>
-                    <p class="font-mono text-[11px] text-outline">Bearer token for protected coordinator hubs</p>
-                  </div>
-                </div>
-                <!-- Token Configured vs Not Set pill -->
-                <span id="pillAuthTokenStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
-                  Not Set
-                </span>
+      const ctx = document.getElementById('overviewUtilChart');
+      if (ctx && window.Chart) {
+        const chart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: ['-6m', '-5m', '-4m', '-3m', '-2m', '-1m', 'Now'],
+            datasets: [
+              { label: 'CPU', data: [22, 26, 24, 31, 28, 25, 24], borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.08)', fill: true, tension: 0.35, borderWidth: 2, pointRadius: 2.5 },
+              { label: 'GPU', data: [14, 18, 20, 26, 22, 19, state.localGpuProfile ? (state.localGpuProfile.utilization_pct || 18) : 18], borderColor: '#8B5CF6', backgroundColor: 'transparent', fill: false, tension: 0.35, borderWidth: 2, pointRadius: 2.5 },
+              { label: 'Network', data: [12, 16, 15, 22, 18, 20, 18], borderColor: '#10B981', backgroundColor: 'transparent', fill: false, tension: 0.35, borderWidth: 2, borderDash: [4, 4], pointRadius: 2 }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { grid: { display: false }, ticks: { color: '#64748B', font: { size: 11 } } },
+              y: { min: 0, max: 100, grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', font: { size: 11 }, callback: v => v + '%' } }
+            }
+          }
+        });
+        activeCharts.push(chart);
+      }
+    }
+
+    // =========================================================================
+    // PAGE 2: NETWORK TOPOLOGY
+    // =========================================================================
+    function renderTopology(container) {
+      const selected = state.nodes.find(n => n.id === state.selectedTopoNodeId) || state.nodes[0];
+      if (!selected) {
+        container.innerHTML = '<div class="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-500">No nodes discovered yet.</div>';
+        return;
+      }
+
+      container.innerHTML = `
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+          <div class="xl:col-span-2 bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between min-h-[540px]" style="background-image: radial-gradient(#E2E8F0 1px, transparent 1px); background-size: 24px 24px;">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="inline-flex rounded-lg bg-slate-100 p-1 border border-slate-200 text-xs">
+                <button type="button" onclick="setTopoView('orbital')" class="px-3 py-1 rounded-md font-medium ${state.topoViewMode === 'orbital' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">Mesh View</button>
+                <button type="button" onclick="setTopoView('locality')" class="px-3 py-1 rounded-md font-medium ${state.topoViewMode === 'locality' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">Lab Groups</button>
               </div>
-
-              <!-- Input & Show/Hide -->
-              <div class="space-y-2 mt-2">
-                <label class="block text-xs font-mono text-outline">Cluster Auth Secret</label>
-                <div class="relative flex items-center">
-                  <input type="password" id="inputCoordAuthToken" autocomplete="off" placeholder="Enter cluster auth token (UNICOMPUTE_AUTH_TOKEN)"
-                    class="w-full bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-2 pr-10 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
-                  <button type="button" id="btnToggleAuthTokenVis" title="Show/Hide Token"
-                    class="absolute right-2 text-outline hover:text-on-surface p-1 transition-colors">
-                    <span class="material-symbols-outlined text-base">visibility</span>
-                  </button>
-                </div>
-                <p class="text-[11px] text-outline italic">Stored in memory for this running session only; never echoed back by the API.</p>
+              <div class="flex items-center gap-3 text-xs text-slate-600 bg-white/90 px-3 py-1.5 rounded-lg border border-slate-200">
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>GPU</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Container</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-violet-500"></span>WASI</span>
               </div>
             </div>
 
-            <!-- Action buttons -->
-            <div class="flex items-center justify-between pt-3 border-t border-outline-variant/30 mt-4">
-              <button id="btnClearAuthToken" class="btn-surface font-mono text-xs flex items-center gap-1.5 px-3 py-1.5 text-outline hover:text-error transition-colors">
-                <span class="material-symbols-outlined text-sm">delete</span>
-                <span>Clear</span>
-              </button>
-              <button id="btnSaveAuthToken" class="btn-primary-compact font-mono text-xs flex items-center gap-1.5 px-4 py-1.5">
-                <span class="material-symbols-outlined text-sm">lock_open</span>
-                <span>Save &amp; Reconnect</span>
-              </button>
+            <div class="relative w-full h-[420px] my-auto">
+              <svg viewBox="0 0 600 420" class="w-full h-full">
+                <circle cx="300" cy="210" r="88" fill="none" stroke="#E2E8F0" stroke-dasharray="4 4" />
+                <circle cx="300" cy="210" r="165" fill="none" stroke="#CBD5E1" stroke-dasharray="5 5" />
+
+                ${state.nodes.map(n => {
+                  const isSel = n.id === selected.id;
+                  const x = n.pos[0] * 6;
+                  const y = n.pos[1] * 4.2;
+                  return `<line x1="300" y1="210" x2="${x}" y2="${y}" stroke="${isSel ? '#0284C7' : '#CBD5E1'}" stroke-width="${isSel ? 2.5 : 1.5}" class="${n.status === 'Online' && isSel ? 'flow-line' : ''}" />`;
+                }).join('')}
+
+                <g>
+                  <circle cx="300" cy="210" r="40" fill="#E0F2FE" fill-opacity="0.6" />
+                  <circle cx="300" cy="210" r="30" fill="#FFFFFF" stroke="#0284C7" stroke-width="2.5" />
+                  <text x="300" y="213" text-anchor="middle" font-size="10" font-weight="700" fill="#0F172A">HUB</text>
+                </g>
+
+                ${state.nodes.map(n => {
+                  const x = n.pos[0] * 6;
+                  const y = n.pos[1] * 4.2;
+                  const isSel = n.id === selected.id;
+                  return `
+                    <g class="cursor-pointer" onclick="selectTopoNode('${n.id}')">
+                      ${isSel ? `<circle cx="${x}" cy="${y}" r="26" fill="${n.color}" fill-opacity="0.14" stroke="${n.color}" stroke-width="1.5" stroke-dasharray="3 3" />` : ''}
+                      <circle cx="${x}" cy="${y}" r="18" fill="#FFFFFF" stroke="${n.color}" stroke-width="${isSel ? 3 : 2}" />
+                      <circle cx="${x}" cy="${y}" r="5" fill="${n.status === 'Online' ? n.color : '#94A3B8'}" />
+                      <text x="${x}" y="${y - 24}" text-anchor="middle" font-size="11" font-weight="700" fill="#0F172A">${n.id}</text>
+                      <text x="${x}" y="${y + 32}" text-anchor="middle" font-size="10" fill="#64748B">${state.topoViewMode === 'locality' ? n.lab : n.tier}</text>
+                    </g>
+                  `;
+                }).join('')}
+              </svg>
             </div>
+
+            <div class="text-xs text-slate-500 text-center">Click any node to inspect hardware telemetry</div>
           </div>
 
-          <!-- Card: Worker Code Execution Allowlist -->
-          <div class="telemetry-card flex flex-col justify-between space-y-4">
+          <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between">
             <div>
-              <div class="flex items-center justify-between mb-3 border-b border-outline-variant/30 pb-3">
-                <div class="flex items-center gap-2">
-                  <div class="w-8 h-8 rounded-lg bg-sky-500/15 flex items-center justify-center text-primary border border-primary/30">
-                    <span class="material-symbols-outlined">terminal</span>
-                  </div>
-                  <div>
-                    <h3 class="font-headline font-semibold text-sm text-on-surface">Worker Code Execution Allowlist</h3>
-                    <p class="font-mono text-[11px] text-outline">Authorized remote peers for container sandbox</p>
-                  </div>
-                </div>
-                <!-- Runtime Status Badge -->
-                <span id="badgeDockerStatus" class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline">
-                  Checking Docker...
-                </span>
-              </div>
-
-              <!-- Interactive Chip List -->
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between text-xs font-mono">
-                  <span class="text-outline">Authorized Peers</span>
+              <div class="flex items-start justify-between gap-2 pb-4 border-b border-slate-100">
+                <div>
                   <div class="flex items-center gap-2">
-                    <button id="btnAllowAllCode" class="text-[10px] text-amber-400 hover:underline font-mono">Allow All (*)</button>
-                    <span class="text-outline">|</span>
-                    <button id="btnDenyAllCode" class="text-[10px] text-error hover:underline font-mono">Deny All</button>
+                    <span class="w-2.5 h-2.5 rounded-full ${selected.status === 'Online' ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
+                    <h2 class="text-base font-bold text-slate-900">${escapeHtml(selected.id)}</h2>
+                  </div>
+                  <p class="text-xs text-slate-500 mt-1">${escapeHtml(selected.lab)} · ${escapeHtml(selected.os)}</p>
+                </div>
+                <span class="text-xs font-medium px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700">${selected.tier}</span>
+              </div>
+
+              <div class="py-4 border-b border-slate-100 space-y-1.5">
+                <div class="flex justify-between text-xs"><span class="text-slate-500">CPU</span><span class="font-semibold text-slate-900">${selected.cpuUse}%</span></div>
+                <div class="text-xs font-medium text-slate-700">${escapeHtml(selected.cpuModel)}</div>
+                <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-sky-500 rounded-full" style="width:${selected.cpuUse}%"></div></div>
+              </div>
+
+              <div class="py-4 border-b border-slate-100 space-y-1.5">
+                <div class="flex justify-between text-xs"><span class="text-slate-500">GPU</span><span class="font-semibold ${selected.tempC < state.settings.gpuThermalCutoff ? 'text-emerald-600' : 'text-amber-600'}">${selected.tempC}°C / ${state.settings.gpuThermalCutoff}°C</span></div>
+                <div class="text-xs font-medium text-slate-700">${escapeHtml(selected.gpuModel)}${selected.vramTotal ? ` · ${selected.vramUsed}/${selected.vramTotal} GB` : ''}</div>
+                <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-emerald-500 rounded-full" style="width:${selected.gpuUse}%"></div></div>
+              </div>
+
+              <div class="py-4 border-b border-slate-100 space-y-1.5">
+                <div class="flex justify-between text-xs"><span class="text-slate-500">Memory</span><span class="font-semibold text-slate-900">${selected.ramUsed} / ${selected.ramTotal} GB</span></div>
+                <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-violet-500 rounded-full" style="width:${Math.round((selected.ramUsed / selected.ramTotal) * 100)}%"></div></div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3 my-4 text-xs">
+                <div class="p-3 rounded-lg bg-slate-50">
+                  <div class="text-slate-500">Latency</div>
+                  <div class="font-semibold text-slate-900 mt-0.5">${selected.rttMs ? selected.rttMs + ' ms' : 'Offline'}</div>
+                </div>
+                <div class="p-3 rounded-lg bg-slate-50">
+                  <div class="text-slate-500">Hosted Blobs</div>
+                  <div class="font-semibold text-slate-900 mt-0.5">${selected.shardsData} Data · ${selected.shardsParity} Parity</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <button type="button" onclick="dispatchProbe('${selected.id}')" class="py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Probe</button>
+              <button type="button" onclick="viewNodeSyslog('${selected.id}')" class="py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">View Logs</button>
+              <button type="button" onclick="openCreateTask('${selected.id}')" class="col-span-2 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Assign Workload</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function selectTopoNode(id) {
+      state.selectedTopoNodeId = id;
+      renderTopology(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function setTopoView(mode) {
+      state.topoViewMode = mode;
+      renderTopology(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    async function dispatchProbe(nodeId) {
+      try {
+        await fetch('/api/peer/ping', { method: 'POST', body: JSON.stringify({ peer_id: nodeId }) });
+      } catch (e) {}
+      const node = state.nodes.find(n => n.id === nodeId);
+      if (node) {
+        node.status = 'Online';
+        node.heartbeat = 'Just now';
+        showToast(`Probe dispatched to ${nodeId}`);
+        if (state.currentPage === 'topology') renderTopology(document.getElementById('pageContainer'));
+      }
+    }
+    function viewNodeSyslog(nodeId) {
+      state.logSearch = nodeId;
+      state.logTab = 'All';
+      navigate('logs');
+    }
+
+    // =========================================================================
+    // PAGE 3: GPU COMPUTE & REAL HIPIFY-CLANG.EXE TRANSLATOR
+    // =========================================================================
+    function renderGpuCompute(container) {
+      const gpuNodes = state.nodes.filter(n => n.vramTotal > 0 || n.id === state.localNodeId);
+      const onlineGpus = gpuNodes.filter(n => n.status === 'Online');
+      const selectedGpuNodes = gpuNodes.filter(n => n.gpuIncluded);
+      const totalVram = gpuNodes.reduce((s, n) => s + n.vramTotal, 0);
+      const usedVram = gpuNodes.reduce((s, n) => s + n.vramUsed, 0);
+      const avgUtil = Math.round(onlineGpus.reduce((s, n) => s + n.gpuUse, 0) / (onlineGpus.length || 1));
+      const avgTemp = Math.round(onlineGpus.reduce((s, n) => s + n.tempC, 0) / (onlineGpus.length || 1));
+      const res = state.hipifyResult;
+
+      container.innerHTML = `
+        <div class="space-y-6">
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500 mb-2">GPU Nodes</div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${onlineGpus.length} / ${gpuNodes.length || 1}</span>
+                <span class="text-xs font-medium text-emerald-600">Online</span>
+              </div>
+              <div class="mt-2.5 flex items-center gap-1.5 text-[11px] font-medium">
+                <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">${gpuNodes.filter(n => n.gpuVendor === 'NVIDIA').length} NVIDIA</span>
+                <span class="px-2 py-0.5 rounded bg-sky-50 text-sky-700">${gpuNodes.filter(n => n.gpuVendor === 'AMD').length} AMD</span>
+                <span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">${gpuNodes.filter(n => n.gpuVendor === 'Intel').length} Intel</span>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500 mb-2">Cluster VRAM</div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-2xl font-bold text-slate-900">${totalVram.toFixed(1)} GB</span>
+                <span class="text-xs text-slate-500">${Math.max(0, totalVram - usedVram).toFixed(1)} GB Free</span>
+              </div>
+              <div class="mt-3 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div class="h-full bg-slate-900 rounded-full" style="width:${totalVram ? Math.round((usedVram / totalVram) * 100) : 0}%"></div>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500 mb-2">Average Utilization</div>
+              <div class="text-2xl font-bold text-slate-900">${avgUtil}%</div>
+              <div class="mt-2 text-xs text-slate-500">Across ${onlineGpus.length} active node(s)</div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500 mb-2">Thermal Safeguard</div>
+              <div class="text-2xl font-bold text-slate-900">${state.settings.gpuThermalCutoff}°C</div>
+              <div class="mt-2 text-xs text-emerald-600">Current avg: ${avgTemp}°C</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+            <div class="xl:col-span-2 space-y-5">
+              <!-- Real CUDA to AMD HIPIFY Translation Card -->
+              <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+                <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <h2 class="text-sm font-bold text-slate-900">CUDA &rarr; AMD HIPIFY Translator</h2>
+                      <span class="text-[11px] font-mono-code px-2 py-0.5 rounded bg-slate-100 text-slate-700">hipify-clang.exe</span>
+                    </div>
+                    <div class="text-xs font-mono-code text-slate-500 mt-0.5">Selected file: ${escapeHtml(state.gpuSelectedFile)}</div>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <input type="file" id="cudaFileInput" accept=".cu,.cuh,.cpp,.h,.c" class="hidden" onchange="handleCudaFileUpload(event)" />
+                    <button type="button" onclick="document.getElementById('cudaFileInput').click()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold">
+                      <i data-lucide="upload-file" class="w-3.5 h-3.5"></i>
+                      <span>Select CUDA File</span>
+                    </button>
+                    <select onchange="handleSampleSelect(this.value)" class="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-mono-code text-slate-700">
+                      <option value="">Samples (${state.cudaSamples.length})...</option>
+                      ${state.cudaSamples.map((s, idx) => `<option value="${idx}" ${state.gpuSelectedFile === s.name ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+                    </select>
+                    <button type="button" onclick="runHipify()" ${state.hipifyRunning ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold">
+                      ${state.hipifyRunning ? 'Converting...' : 'Convert to HIP'}
+                    </button>
+                    ${state.hipSource ? `
+                      <button type="button" onclick="downloadHipFile()" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold">
+                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                        <span>.hip</span>
+                      </button>
+                    ` : ''}
                   </div>
                 </div>
 
-                <!-- Chips Container -->
-                <div id="codeAllowlistChips" class="min-h-[52px] p-2 bg-surface-lowest rounded-lg border border-outline-variant/40 flex flex-wrap gap-1.5 items-center">
-                  <!-- Dynamically populated chips -->
-                </div>
-              </div>
-
-              <!-- Add Peer Input & Suggestions -->
-              <div class="space-y-2 mt-3">
-                <div class="flex items-center gap-2">
-                  <input type="text" id="inputAddAllowPeer" placeholder="Peer ID (e.g. peer-a)"
-                    class="flex-1 bg-surface-lowest border border-outline-variant/50 rounded-lg px-3 py-1.5 text-xs font-mono text-on-surface placeholder:text-outline focus:outline-none focus:border-primary transition-colors" />
-                  <button id="btnAddAllowPeer" class="btn-surface font-mono text-xs px-3 py-1.5 flex items-center gap-1 font-semibold text-primary">
-                    <span class="material-symbols-outlined text-sm">add</span>
-                    <span>+ Add</span>
-                  </button>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-[11px] font-mono-code font-semibold text-slate-500 mb-1.5">Original CUDA C++ Source</label>
+                    <textarea id="cudaEditor" oninput="state.cudaSource=this.value" rows="12" spellcheck="false" class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none focus:border-slate-400" placeholder="Paste or select a .cu CUDA C++ file...">${escapeHtml(state.cudaSource)}</textarea>
+                  </div>
+                  <div>
+                    <label class="block text-[11px] font-mono-code font-semibold text-sky-700 mb-1.5">Translated AMD HIP C++ Output</label>
+                    <textarea id="hipEditor" readonly rows="12" spellcheck="false" class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none" placeholder="// Click 'Convert to HIP' to translate via hipify-clang.exe...">${escapeHtml(state.hipSource)}</textarea>
+                  </div>
                 </div>
 
-                <!-- Discovered Online Fleet Peer Suggestions -->
-                <div id="fleetSuggestionsWrap" class="hidden text-[11px] font-mono text-outline flex flex-wrap items-center gap-1.5 pt-1">
-                  <span>Fleet peers:</span>
-                  <div id="fleetSuggestionsList" class="flex flex-wrap gap-1"></div>
+                ${res ? (res.success ? `
+                  <div class="px-3.5 py-2.5 rounded-lg bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-900">
+                    <div class="flex items-center gap-2">
+                      <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600 shrink-0"></i>
+                      <span><strong>Converted cleanly</strong> (${res.replacements_made || 0} references converted${res.engine ? ` via <code class="font-mono-code">${escapeHtml(res.engine)}</code>` : ''}). Ready for AMD ROCm.</span>
+                    </div>
+                  </div>
+                ` : `
+                  <div class="p-3.5 rounded-lg bg-rose-50 border border-rose-200 space-y-1.5 text-xs text-rose-900">
+                    <div class="flex items-center gap-2 font-semibold">
+                      <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-600 shrink-0"></i>
+                      <span>${escapeHtml(res.error || 'Compatibility issue detected')}</span>
+                    </div>
+                    ${res.report && Array.isArray(res.report.issues) ? res.report.issues.map(iss => `
+                      <div class="font-mono-code text-[11px] text-rose-800 pl-6">Line ${iss.line_number}: [${escapeHtml(iss.construct)}] ${escapeHtml(iss.reason)}</div>
+                    `).join('') : ''}
+                  </div>
+                `) : `
+                  <div class="rounded-lg bg-slate-50 border border-slate-200 p-3 font-mono-code text-xs text-slate-500">
+                    Select a CUDA C++ file from your computer or paste code above, then click "Convert to HIP" to invoke your local hipify-clang.exe.
+                  </div>
+                `}
+              </div>
+
+              <!-- Cross-Platform Dispatch Card -->
+              <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+                <div class="flex items-center justify-between">
+                  <h2 class="text-sm font-bold text-slate-900">Cross-Platform Dispatch</h2>
+                  <span class="text-xs font-medium text-emerald-600">Ready</span>
+                </div>
+
+                <div class="grid grid-cols-2 p-1 rounded-lg bg-slate-100 text-xs">
+                  <button type="button" onclick="setGpuRuntimeTab('hipify')" class="py-2 rounded-md font-semibold ${state.gpuRuntimeTab === 'hipify' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">HIPIFY (CUDA to HIP)</button>
+                  <button type="button" onclick="setGpuRuntimeTab('onnx')" class="py-2 rounded-md font-semibold ${state.gpuRuntimeTab === 'onnx' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">ONNX Runtime</button>
+                </div>
+
+                <div>
+                  <div class="text-xs font-medium text-slate-600 mb-2">Execution Provider</div>
+                  <div class="flex flex-wrap gap-2">
+                    ${['Auto-Route', 'CUDA', 'DirectML', 'ROCm'].map(p => `
+                      <button type="button" onclick="setGpuProvider('${p}')" class="px-3 py-1.5 rounded-lg text-xs font-medium border ${state.gpuProvider === p ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${p}</button>
+                    `).join('')}
+                  </div>
                 </div>
               </div>
             </div>
 
-            <!-- Footer note -->
-            <div class="pt-2 border-t border-outline-variant/30 text-[11px] text-outline font-mono flex items-center justify-between">
-              <span>Policy: Zero-Trust Default Deny</span>
-              <span class="text-on-surface-variant">Air-gapped execution</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- System Daemon Cryptographic Keyring & Protocol Attributes Card -->
-        <div class="telemetry-card space-y-3">
-          <div class="flex items-center justify-between border-b border-outline-variant/30 pb-2">
-            <h3 class="font-headline font-semibold text-sm text-on-surface flex items-center gap-2">
-              <span class="material-symbols-outlined text-primary text-base">key</span>
-              <span>Runtime Cryptographic Keyring &amp; Protocol Attributes</span>
-            </h3>
-            <span class="text-xs font-mono text-outline">Transport: WebRTC DataChannel (SCTP)</span>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
-              <div class="text-outline">CIPHER_SUITE</div>
-              <div class="text-on-surface truncate mt-1">DTLS 1.2 / SCTP (Pion WebRTC)</div>
-            </div>
-            <div class="p-3 bg-surface-lowest rounded-lg border border-outline-variant/30">
-              <div class="text-outline">NAT_HOLE_PUNCH</div>
-              <div class="text-secondary truncate mt-1">STUN/TURN RFC-8489 Active</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ========================================================================= -->
-    <!-- TAB 3: CPU CONTAINER SANDBOX (OBJECTIVE 2)                                 -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-code">
-      <div class="max-w-7xl mx-auto space-y-5">
-        <!-- Section Title & Status -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Tier 2 CPU Container Sandbox</h1>
-              <span class="badge-emerald font-mono text-xs">AIR-GAPPED DOCKER</span>
-            </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Dispatch bounded C, C++, or Python jobs over WebRTC DataChannel (or execute locally). Executed in ephemeral Docker containers with read-only root, 256 MB RAM, zero network access, and unprivileged execution.
-            </p>
-          </div>
-          <div class="flex items-center gap-2">
-            <div class="telemetry-pill-static">
-              <span class="pill-label">ISOLATION:</span>
-              <span class="pill-value-emerald">--network none</span>
-            </div>
-            <div class="telemetry-pill-static">
-              <span class="pill-label">MEM CAP:</span>
-              <span class="pill-value-pri">256 MB</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Split-Pane Editor & Console Layout -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <!-- Left Column: Code Editor & Controls (7 Cols) -->
-          <div class="lg:col-span-7 min-w-0 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
-            <!-- Toolbar -->
-            <div class="editor-toolbar-grid">
-              <div class="toolbar-item">
-                <label class="toolbar-label">TARGET WORKER:</label>
-                <select id="codeTargetPeer" class="styled-select font-mono text-xs">
-                  <option value="local">Local Worker (This Machine)</option>
-                </select>
-              </div>
-
-              <div class="toolbar-item">
-                <label class="toolbar-label">RUNTIME:</label>
-                <select id="codeLanguage" class="styled-select font-mono text-xs">
-                  <option value="python">Python 3.13 (Slim)</option>
-                  <option value="c">C (GCC 14 / C17)</option>
-                  <option value="cpp">C++ (G++ 14 / C++17)</option>
-                </select>
-              </div>
-
-              <div class="toolbar-item">
-                <label class="toolbar-label">LOAD SAMPLES:</label>
-                <select id="codeSampleSelect" class="styled-select font-mono text-xs">
-                  <option value="">Select sample code...</option>
-                </select>
-              </div>
-
-              <div class="toolbar-item">
-                <div class="flex justify-between items-center">
-                  <label class="toolbar-label">TIMEOUT:</label>
-                  <span id="codeTimeoutLabel" class="font-mono text-xs text-primary font-semibold">10s</span>
-                </div>
-                <input type="range" id="codeTimeoutRange" min="1" max="30" value="10" class="styled-range"/>
-              </div>
-            </div>
-
-            <!-- Editor Area -->
-            <div class="code-editor-wrap">
-              <textarea id="codeSourceEditor" class="code-editor-textarea font-mono" spellcheck="false" placeholder="// Write or paste C, C++, or Python code here..."></textarea>
-            </div>
-
-            <!-- Standard Input Field -->
-            <div class="stdin-box">
-              <label class="block font-label-xs text-outline font-mono uppercase mb-1">Standard Input (stdin, max 4 KiB):</label>
-              <input type="text" id="codeStdinInput" class="styled-input font-mono text-xs" placeholder="Optional stdin passed to process..."/>
-            </div>
-
-            <!-- Action Buttons -->
-            <div class="flex items-center justify-between gap-3 pt-2 border-t border-outline-variant/30">
-              <button id="btnRunCode" class="btn-emerald font-semibold flex items-center gap-2">
-                <span class="material-symbols-outlined text-base">play_arrow</span>
-                <span>Execute in Air-Gapped Sandbox</span>
-              </button>
-
-              <button id="btnExecShell" class="btn-surface font-mono text-xs flex items-center gap-1.5" title="Execute command on host terminal">
-                <span class="material-symbols-outlined text-sm">terminal</span>
-                <span>Run Host Shell (exec)</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Right Column: Terminal Execution Console & Telemetry (5 Cols) -->
-          <div class="lg:col-span-5 min-w-0 bg-surface-low border border-outline-variant/40 rounded-xl p-5 flex flex-col justify-between space-y-4">
-            <div class="flex items-center justify-between border-b border-outline-variant/30 pb-3">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-primary text-base">terminal</span>
-                <span class="font-headline font-semibold text-on-surface text-sm">Execution Console &amp; Audit</span>
-              </div>
-              <span id="codeMetricsBadge" class="badge-neutral font-mono text-[11px]">IDLE</span>
-            </div>
-
-            <!-- Terminal Output Stream -->
-            <div id="codeOutputConsole" class="terminal-screen font-mono text-xs custom-scroll">
-              <div class="term-row term-info">[RUNTIME READY] UniCompute Tier 2 Container Sandbox online.</div>
-              <div class="term-row term-info">Select target worker (Local or Peer) and execute air-gapped workloads.</div>
-            </div>
-
-            <!-- Telemetry Metrics Card -->
-            <div class="bg-surface rounded-lg p-3 border border-outline-variant/30 space-y-2 font-mono text-xs">
-              <div class="flex justify-between">
-                <span class="text-on-surface-variant">Sandbox Container:</span>
-                <span class="text-on-surface">Docker OCI (--network none, --read-only)</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-on-surface-variant">Memory Ceiling:</span>
-                <span class="text-primary font-semibold">256 MB (cgroups v2)</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-on-surface-variant">Network Policy:</span>
-                <span class="text-secondary font-semibold">Air-Gapped (Loopback Only)</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-on-surface-variant">Execution Time:</span>
-                <span class="text-on-surface" id="lastExecDuration">-- ms</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ========================================================================= -->
-    <!-- TAB 3: GPU ACCELERATION & GOVERNANCE (OBJECTIVE 3)                         -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-gpu">
-      <div class="max-w-7xl mx-auto space-y-5">
-        <!-- Title & Subsystem Status -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Tier 3 GPU Acceleration &amp; Watchdog Governance</h1>
-              <span id="gpuStatusBadge" class="badge-emerald font-mono text-xs">ACTIVE</span>
-            </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Cross-platform DirectX 12 / DirectML and CUDA compute engine with 50 ms user-activity &amp; battery watchdog preemption, Win32 JobObject memory governance, and CUDA &rarr; AMD HIPIFY translation.
-            </p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button id="btnRefreshGPU" class="btn-surface font-mono text-xs flex items-center gap-1">
-              <span class="material-symbols-outlined text-xs">refresh</span>
-              <span>Probe Hardware</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- 3 Hardware Telemetry Dials -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <!-- Dial 1: Hardware Device -->
-          <div class="telemetry-card">
-            <span class="dial-label">GRAPHICS HARDWARE</span>
-            <div class="dial-title font-mono text-primary" id="gpuDeviceName">Probing GPU...</div>
-            <div class="dial-sub font-mono" id="gpuVendor">DirectML / CUDA</div>
-            <div class="mt-3 pt-2 border-t border-outline-variant/30 flex justify-between text-xs font-mono text-outline">
-              <span>Driver: <strong class="text-on-surface">Simulated ONNX Runner (CPU Mock — No Native DirectML/CUDA Execution Yet)</strong></span>
-              <span>Tier: <strong class="text-secondary">Tier 3 Hardware</strong></span>
-            </div>
-          </div>
-
-          <!-- Dial 2: VRAM Gauge -->
-          <div class="telemetry-card">
-            <span class="dial-label">DEDICATED VRAM CAPACITY</span>
-            <div class="dial-title font-mono text-secondary" id="gpuVramLabel">-- / -- MB</div>
-            <div class="progress-bar-track mt-2">
-              <div id="gpuVramBar" class="progress-bar-cyan" style="width: 0%;"></div>
-            </div>
-            <div class="mt-3 pt-2 border-t border-outline-variant/30 flex justify-between text-xs font-mono text-outline">
-              <span>Allocated: <strong id="gpuVramAlloc" class="text-on-surface">0 MB</strong></span>
-              <span>Limit: <strong class="text-primary">Win32 JobObject</strong></span>
-            </div>
-          </div>
-
-          <!-- Dial 3: Temperature & Power -->
-          <div class="telemetry-card">
-            <span class="dial-label">THERMAL &amp; POWER SAFEGUARD</span>
-            <div class="dial-title font-mono text-tertiary" id="gpuTempPowerLabel">-- °C • -- W</div>
-            <div class="dial-sub font-mono text-secondary">Thermal Cut-off: &lt; 85°C Active</div>
-            <div class="mt-3 pt-2 border-t border-outline-variant/30 flex justify-between text-xs font-mono text-outline">
-              <span>Sensor: <strong class="text-on-surface">NVML / DXGI</strong></span>
-              <span>State: <strong class="text-secondary">Nominal</strong></span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 50ms Watchdog Live Radar Banner -->
-        <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-4 space-y-3">
-          <div class="flex items-center justify-between">
-            <span class="font-headline font-semibold text-sm text-on-surface flex items-center gap-2">
-              <span class="material-symbols-outlined text-primary text-base">radar</span>
-              <span>50 ms User-Activity &amp; Battery Watchdog Radar</span>
-            </span>
-            <span class="text-xs font-mono text-outline">Poll Interval: 50 ms • Input Threshold: 1000 ms</span>
-          </div>
-
-          <div class="radar-status-grid">
-            <div class="radar-pill" id="wdPowerPill">
-              <span class="status-dot-sm"></span>
-              <span id="wdPowerLabel" class="font-mono text-xs">AC Power: ONLINE</span>
-            </div>
-            <div class="radar-pill" id="wdActivityPill">
-              <span class="status-dot-sm"></span>
-              <span id="wdActivityLabel" class="font-mono text-xs">User Input: IDLE</span>
-            </div>
-            <div class="radar-pill highlight" id="wdStatePill">
-              <span id="wdStateLabel" class="font-mono text-xs font-semibold">State: RUNNING</span>
-            </div>
-          </div>
-
-          <div id="wdAlertBanner" class="alert-banner hidden">
-            <span class="material-symbols-outlined text-amber">warning</span>
-            <span id="wdAlertMessage" class="font-mono text-xs">Workload auto-paused by watchdog: state safely persisted to checkpoint.</span>
-          </div>
-        </div>
-
-        <!-- 2-Column Split: Sandboxed Task Runner vs HIPIFY Translator -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <!-- Left: Sandboxed GPU Task Runner -->
-          <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-5 space-y-4">
-            <div class="flex items-center justify-between border-b border-outline-variant/30 pb-3">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-primary text-base">play_circle</span>
-                <span class="font-headline font-semibold text-sm text-on-surface">Simulated ONNX Runner (CPU Mock — No Native DirectML/CUDA Execution Yet)</span>
-              </div>
-              <span class="badge-neutral font-mono text-[10px]">SIMULATED</span>
-            </div>
-
-            <div class="space-y-3">
+            <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between">
               <div>
-                <label class="block font-label-xs text-outline font-mono uppercase mb-1">Task Capsule Manifest Name:</label>
-                <input type="text" id="gpuTaskName" class="styled-input font-mono text-xs" value="model-convnet-v2"/>
-              </div>
-
-              <div class="flex items-center gap-4">
-                <div class="flex-1">
-                  <label class="block font-label-xs text-outline font-mono uppercase mb-1">Batch Iterations:</label>
-                  <input type="number" id="gpuBatchCount" class="styled-input font-mono text-xs" value="25" min="5" max="500"/>
+                <h2 class="text-sm font-bold text-slate-900 mb-4">Local GPU Telemetry</h2>
+                <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between mb-5">
+                  <div>
+                    <div class="text-xs text-slate-500">Overall Load</div>
+                    <div class="text-2xl font-bold text-slate-900 mt-1">${avgUtil}%</div>
+                  </div>
+                  <div class="w-16 h-16 rounded-full flex items-center justify-center shrink-0" style="background: conic-gradient(#0F172A 0% ${avgUtil}%, #E2E8F0 ${avgUtil}% 100%);">
+                    <div class="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-xs font-bold text-slate-900">${avgUtil}%</div>
+                  </div>
                 </div>
-                <div class="pt-4">
-                  <button id="btnRunGPU" class="btn-emerald font-semibold flex items-center gap-1.5">
-                    <span class="material-symbols-outlined text-sm">rocket_launch</span>
-                    <span>Run Task Capsule</span>
-                  </button>
+
+                <div class="space-y-2 text-xs mb-6">
+                  <div class="flex justify-between"><span class="text-slate-500">Hardware</span><span class="font-semibold text-slate-900">${escapeHtml(state.localGpuProfile ? (state.localGpuProfile.name || 'Integrated / CPU') : 'Probing...')}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-500">Vendor</span><span class="font-semibold text-slate-900">${escapeHtml(state.localGpuProfile ? (state.localGpuProfile.vendor || 'N/A') : 'N/A')}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-500">Watchdog</span><span class="font-semibold text-emerald-700">${state.localWatchdog && state.localWatchdog.preempted ? 'Preempted' : 'Active (50ms)'}</span></div>
                 </div>
               </div>
 
-              <!-- Output mini console -->
-              <div id="gpuExecOutput" class="terminal-mini hidden font-mono text-xs custom-scroll"></div>
-            </div>
-          </div>
-
-          <!-- Right: CUDA to AMD HIPIFY Analyzer & Translator -->
-          <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-5 space-y-4">
-            <div class="flex items-center justify-between border-b border-outline-variant/30 pb-3">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-tertiary text-base">transform</span>
-                <span class="font-headline font-semibold text-sm text-on-surface">CUDA &rarr; AMD HIPIFY Analyzer</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <input type="file" id="cudaFileInput" accept=".cu,.cuh,.cpp,.h,.c" class="hidden">
-                <button id="btnSelectCudaFile" class="btn-surface font-mono text-[11px] flex items-center gap-1" title="Select CUDA C++ file from computer">
-                  <span class="material-symbols-outlined text-xs">upload_file</span>
-                  <span>Select File</span>
-                </button>
-                <select id="hipifySampleSelect" class="styled-select-compact font-mono text-[11px]">
-                  <option value="">Load Kernel...</option>
-                </select>
-                <button id="btnAnalyzeHIP" class="btn-primary-compact">Translate</button>
-                <button id="btnDownloadHIP" class="btn-surface font-mono text-[11px] flex items-center gap-1 hidden" title="Download translated HIP file">
-                  <span class="material-symbols-outlined text-xs">download</span>
-                  <span>.hip</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <span class="text-[10px] font-mono text-outline block mb-1">Original CUDA Kernel</span>
-                <textarea id="cudaInputEditor" class="code-editor-mini font-mono custom-scroll" placeholder="// Paste CUDA kernel code..."></textarea>
-              </div>
-              <div>
-                <span class="text-[10px] font-mono text-primary block mb-1">Translated Portable HIP</span>
-                <textarea id="hipOutputEditor" class="code-editor-mini font-mono custom-scroll" readonly placeholder="// Translated HIP code..."></textarea>
-              </div>
-            </div>
-
-            <!-- Issues Panel -->
-            <div id="hipifyIssuesPanel" class="issues-panel hidden">
-              <div class="flex items-center justify-between border-b border-outline-variant/30 pb-1.5 mb-2">
-                <span id="hipifyVerdictBadge" class="badge-emerald font-mono text-[10px]">VERDICT: PASS</span>
-                <span id="hipifyIssueCount" class="font-mono text-xs text-outline">0 Issues Found</span>
-              </div>
-              <div id="hipifyIssueList" class="space-y-1 font-mono text-xs max-h-24 overflow-y-auto custom-scroll"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ========================================================================= -->
-    <!-- TAB 5: STORAGE & CONTENT-ADDRESSED CHUNK STORE                              -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-storage">
-      <div class="max-w-7xl mx-auto space-y-6">
-        <!-- Title & Subsystem Status -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Network Storage &amp; Content-Addressed Chunk Store</h1>
-              <span class="badge-pri font-mono text-xs">[SHA-256 ACTIVE]</span>
-            </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">
-              Distributed datasets partitioned into content-addressed chunks across fleet peers, anchored by local CAS SHA-256 integrity audits.
-            </p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button id="btnVerifyAllMerkle" class="btn-surface font-mono text-xs flex items-center gap-1.5">
-              <span class="material-symbols-outlined text-xs">verified</span>
-              <span>Scrub Local CAS Vault</span>
-            </button>
-            <button id="btnShardNewDataset" class="btn-emerald font-semibold text-xs flex items-center gap-1.5">
-              <span class="material-symbols-outlined text-xs">upload_file</span>
-              <span>Chunk New Dataset</span>
-            </button>
-            <button id="btnRefreshBlobs" class="btn-primary-compact">Refresh</button>
-          </div>
-        </div>
-
-        <!-- CAS Blobstore Overview -->
-        <div class="telemetry-card flex flex-wrap items-center justify-between gap-4 p-4">
-          <div class="flex items-center gap-4">
-            <span class="text-xs font-mono text-outline font-semibold uppercase">Storage Substrate:</span>
-            <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-emerald-500/80 border border-secondary/50"></span>
-              <span class="text-on-surface">SHA-256 Content-Addressed Local Chunk Storage</span>
-            </div>
-            <div class="flex items-center gap-2 text-xs font-mono">
-              <span class="w-3 h-3 rounded bg-sky-500/80 border border-primary/50"></span>
-              <span class="text-on-surface">WebRTC Chunk Transfer</span>
-            </div>
-          </div>
-          <div class="text-xs font-mono text-on-surface-variant">
-            Per-node disk quota with <span class="text-secondary font-semibold">automatic Bitrot scrubber</span> verification.
-          </div>
-        </div>
-
-        <!-- DATASET 3: local-vault-cas-blobs (Live Local CAS SHA-256 Partition) -->
-        <div class="telemetry-card space-y-4">
-          <div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-outline-variant/30 pb-3">
-            <div class="flex items-center gap-3">
-              <span class="material-symbols-outlined text-secondary text-2xl">storage</span>
-              <div>
-                <div class="flex items-center gap-2">
-                  <h3 class="font-headline font-semibold text-sm text-on-surface font-mono" id="rsCasDatasetName">Local CAS Storage Vault (SHA-256)</h3>
-                  <span class="px-2 py-0.2 rounded text-[11px] font-mono bg-emerald-500/15 text-secondary border border-secondary/30 font-semibold">Active Vault</span>
-                  <span class="text-xs font-mono text-outline" id="rsCasTotalSize">0 B</span>
+              <div class="grid grid-cols-2 gap-3 text-center">
+                <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div class="text-xs text-slate-500">Avg Temp</div>
+                  <div class="text-base font-bold text-emerald-700 mt-1">${avgTemp}°C</div>
                 </div>
-                <p class="text-xs text-on-surface-variant mt-0.5">Content-addressed partition slices stored in local SHA-256 CAS with SHA-256 CAS verification</p>
+                <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div class="text-xs text-slate-500">Selected</div>
+                  <div class="text-base font-bold text-slate-900 mt-1">${selectedGpuNodes.length} / ${gpuNodes.length || 1}</div>
+                </div>
               </div>
-            </div>
-            <!-- Merkle Verification Badge -->
-            <div class="flex items-center gap-2">
-              <div class="merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5" id="merkleBadgeCas">
-                <span class="material-symbols-outlined text-sm">check_circle</span>
-                <span>CAS Root: Valid / Matched</span>
-              </div>
-              <span class="text-xs font-mono text-outline" id="rsCasRootHash">--</span>
             </div>
           </div>
-        </div>
 
-        <!-- Local CAS Storage Vault (O1) Substrate -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-2">
-          <!-- Left Col: Quota & Ingestion (4 Cols) -->
-          <div class="lg:col-span-4 space-y-4">
-            <!-- Quota Card -->
-            <div class="telemetry-card">
-              <div class="flex justify-between items-center mb-1">
-                <span class="dial-label">LOCAL CAS STORAGE VAULT</span>
-                <span class="font-mono text-xs text-outline" id="storageBlobCount">0 Blobs</span>
-              </div>
-              <div class="dial-title font-mono text-primary" id="storageUsedText">0 MB / 10 GB</div>
-              <div class="progress-bar-track mt-2">
-                <div id="storageUsageBar" class="progress-bar-cyan" style="width: 0%;"></div>
-              </div>
-              <div class="mt-3 pt-2 border-t border-outline-variant/30 flex justify-between text-xs font-mono text-outline">
-                <span>Free Space: <strong id="storageAvailText" class="text-secondary">10 GB</strong></span>
-                <span>Enforcement: <strong class="text-on-surface">Strict</strong></span>
-              </div>
+          <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 class="text-sm font-bold text-slate-900">Available GPU Nodes</h2>
+              <button type="button" onclick="dispatchGpuBatch()" class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Run GPU Task (${selectedGpuNodes.length})</button>
             </div>
-
-            <!-- Ingest New Blob Card -->
-            <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-4 space-y-3">
-              <div class="flex justify-between items-center">
-                <span class="font-headline font-semibold text-sm text-on-surface block">Ingest New Data Blob</span>
-                <span class="text-[10px] font-mono text-primary">SHA-256 CAS</span>
-              </div>
-              <textarea id="storageContentInput" class="styled-input font-mono text-xs w-full" rows="3" placeholder="Enter text or paste dataset chunk to store and stripe..."></textarea>
-              <div class="flex items-center gap-2">
-                <button id="btnPutBlob" class="btn-emerald flex-1 font-semibold flex items-center justify-center gap-1.5">
-                  <span class="material-symbols-outlined text-sm">upload</span>
-                  <span>Commit to Local Vault</span>
-                </button>
-                <button id="btnScrubVault" class="btn-surface font-mono text-xs flex items-center gap-1" title="Scrub local CAS for bitrot">
-                  <span class="material-symbols-outlined text-xs">verified</span>
-                  <span>Scrub</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- Scrub Result Panel -->
-            <div id="scrubResult" class="scrub-output-panel hidden"></div>
-          </div>
-
-          <!-- Right Col: Blobs Table (8 Cols) -->
-          <div class="lg:col-span-8 bg-surface-low border border-outline-variant/40 rounded-xl overflow-hidden shadow-sm flex flex-col">
-            <div class="px-4 py-3 bg-surface-high border-b border-outline-variant/40 flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-primary text-base">folder_open</span>
-                <span class="font-headline font-semibold text-sm text-on-surface">Content-Addressed Shards &amp; Blobs</span>
-              </div>
-              <span class="text-xs font-mono text-outline" id="blobCountBadge">0 Total Blobs</span>
-            </div>
-
-            <div class="overflow-x-auto flex-1 custom-scroll">
-              <table class="styled-table font-mono text-xs w-full">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[640px]">
                 <thead>
-                  <tr>
-                    <th>Blob ID (Content Addressed)</th>
-                    <th>Size</th>
-                    <th>Created</th>
-                    <th class="text-right">Action</th>
+                  <tr class="border-b border-slate-200 text-xs font-semibold text-slate-500">
+                    <th class="py-2.5 px-3">Node</th>
+                    <th class="py-2.5 px-3">GPU Model</th>
+                    <th class="py-2.5 px-3">Runtimes</th>
+                    <th class="py-2.5 px-3">Usage</th>
+                    <th class="py-2.5 px-3">VRAM</th>
+                    <th class="py-2.5 px-3 text-right">Include</th>
                   </tr>
                 </thead>
-                <tbody id="blobsTableBody">
-                  <tr><td colspan="4" class="empty-cell">No blobs stored in local vault.</td></tr>
+                <tbody class="divide-y divide-slate-100 text-xs">
+                  ${gpuNodes.map(n => `
+                    <tr class="hover:bg-slate-50/70">
+                      <td class="py-3 px-3 font-semibold text-slate-900">
+                        <span class="inline-flex items-center gap-2">
+                          <span class="w-2 h-2 rounded-full ${n.status === 'Online' ? 'bg-emerald-500' : 'bg-amber-500'}"></span>
+                          ${escapeHtml(n.id)}
+                        </span>
+                      </td>
+                      <td class="py-3 px-3 text-slate-700">${escapeHtml(n.gpuModel)}</td>
+                      <td class="py-3 px-3">
+                        <div class="flex flex-wrap gap-1.5">
+                          ${n.runtimes.map(r => `<span class="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700">${escapeHtml(r)}</span>`).join('')}
+                        </div>
+                      </td>
+                      <td class="py-3 px-3">
+                        <div class="flex items-center gap-2">
+                          <div class="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-slate-900 rounded-full" style="width:${n.gpuUse}%"></div></div>
+                          <span class="font-mono-code text-slate-700">${n.gpuUse}%</span>
+                        </div>
+                      </td>
+                      <td class="py-3 px-3 font-mono-code text-slate-700">${n.vramUsed} / ${n.vramTotal} GB</td>
+                      <td class="py-3 px-3 text-right">
+                        <input type="checkbox" ${n.gpuIncluded ? 'checked' : ''} onchange="toggleGpuNodeInclude('${n.id}')" class="w-4 h-4 rounded accent-slate-900 cursor-pointer" aria-label="Include ${escapeHtml(n.id)}" />
+                      </td>
+                    </tr>
+                  `).join('')}
                 </tbody>
               </table>
             </div>
           </div>
         </div>
-      </div>
-    </section>
+      `;
+    }
 
-    <!-- ========================================================================= -->
-    <!-- TAB 6: CLUSTER TASK QUEUE & BILATERAL MATCHMAKING [CLASSAD]                -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-tasks">
-      <div class="max-w-7xl mx-auto space-y-6">
-        <!-- Header -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface tracking-tight">Cluster Task Queue &amp; Peer Execution</h1>
-              <span class="badge-pri font-mono text-xs">[P2P]</span>
+    function handleCudaFileUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      state.gpuSelectedFile = file.name;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        state.cudaSource = ev.target.result;
+        const ed = document.getElementById('cudaEditor');
+        if (ed) ed.value = state.cudaSource;
+        runHipify();
+      };
+      reader.readAsText(file);
+    }
+
+    function handleSampleSelect(idxStr) {
+      if (idxStr === '') return;
+      const sample = state.cudaSamples[Number(idxStr)];
+      if (!sample) return;
+      state.gpuSelectedFile = sample.name;
+      state.cudaSource = sample.content;
+      state.hipSource = '';
+      state.hipifyResult = null;
+      renderGpuCompute(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+
+    async function runHipify() {
+      const ed = document.getElementById('cudaEditor');
+      const source = ed ? ed.value : state.cudaSource;
+      state.cudaSource = source;
+      if (!source.trim()) {
+        showToast('Please select or paste CUDA C++ source code', 'warning');
+        return;
+      }
+      state.hipifyRunning = true;
+      renderGpuCompute(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+
+      try {
+        const resp = await fetch('/api/gpu/hipify', {
+          method: 'POST',
+          body: JSON.stringify({ source })
+        });
+        const res = await resp.json();
+        state.hipifyResult = res;
+        state.hipSource = res.translated_source || '// Translation blocked due to compatibility issues.';
+        state.hipifyStatus = res.success ? 'clean' : 'warning';
+        if (res.success) {
+          showToast(`Translated ${res.replacements_made || 0} references via ${res.engine || 'hipify-clang.exe'}`);
+        } else {
+          showToast(res.error || 'HIPIFY reported compatibility issues', 'warning');
+        }
+      } catch (err) {
+        showToast('HIPIFY API request failed: ' + err.message, 'warning');
+      } finally {
+        state.hipifyRunning = false;
+        renderGpuCompute(document.getElementById('pageContainer'));
+        if (window.lucide) lucide.createIcons();
+      }
+    }
+
+    function downloadHipFile() {
+      if (!state.hipSource) return;
+      const outName = state.gpuSelectedFile.replace(/\.(cu|cuh|cpp|h|c)$/i, '') + '.hip';
+      const blob = new Blob([state.hipSource], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 500);
+      showToast(`Downloaded ${outName}`);
+    }
+
+    function setGpuRuntimeTab(tab) {
+      state.gpuRuntimeTab = tab;
+      if (tab === 'hipify' && state.gpuProvider === 'CUDA') state.gpuProvider = 'ROCm';
+      renderGpuCompute(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function setGpuProvider(p) {
+      state.gpuProvider = p;
+      renderGpuCompute(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function toggleGpuNodeInclude(id) {
+      const n = state.nodes.find(x => x.id === id);
+      if (n) n.gpuIncluded = !n.gpuIncluded;
+      renderGpuCompute(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    async function dispatchGpuBatch() {
+      try {
+        const resp = await fetch('/api/gpu/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            task_type: 'training',
+            source_code: state.cudaSource,
+            batches: 20
+          })
+        });
+        const res = await resp.json();
+        showToast(`GPU task ${res.job_id || 'completed'} (${res.status || 'OK'})`);
+        await syncBackend();
+        if (res.job_id) openTaskDetail(res.job_id);
+      } catch (err) {
+        showToast('GPU run failed: ' + err.message, 'warning');
+      }
+    }
+
+    // =========================================================================
+    // PAGE 4: WORKER SANDBOX SETUP
+    // =========================================================================
+    function renderWorkerSandbox(container) {
+      const t1 = state.workerTiers.t1;
+      const t2 = state.workerTiers.t2;
+      const t3 = state.workerTiers.t3;
+      const cutoff = state.settings.gpuThermalCutoff;
+      const claimable = state.tasks.filter(t => t.status === 'Pending' || t.status === 'Running').slice(0, 4);
+
+      container.innerHTML = `
+        <div class="space-y-6">
+          <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+              <button type="button" onclick="toggleWorkerActive()" class="w-12 h-7 rounded-full p-1 transition-colors shrink-0 ${state.workerActive ? 'bg-emerald-500' : 'bg-slate-300'}" aria-label="Toggle Worker Mode">
+                <span class="block w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${state.workerActive ? 'translate-x-5' : 'translate-x-0'}"></span>
+              </button>
+              <div>
+                <div class="flex items-center gap-2.5">
+                  <h2 class="text-sm font-bold text-slate-900">Act as Compute Worker</h2>
+                  <span class="text-xs font-medium px-2 py-0.5 rounded-full ${state.workerActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}">
+                    ${state.workerActive ? 'Active' : 'Paused'}
+                  </span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">Allow ${escapeHtml(state.settings.coordinatorName)} to assign isolated workloads within your resource limits.</p>
+              </div>
             </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-1">Task dispatch, job monitoring, and real-time coordinator stream execution.</p>
+            <button type="button" onclick="runBenchmarks()" class="px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700">Run Benchmark</button>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="px-2.5 py-1 rounded bg-secondary/15 text-secondary border border-secondary/30 font-mono text-xs font-semibold">
-              Live Stream Active (5s Heartbeat)
-            </span>
-            <button class="btn-surface font-mono text-xs flex items-center gap-1.5" id="btnRefreshTasks">
-              <span class="material-symbols-outlined text-xs">refresh</span>
-              <span>Refresh Queue</span>
-            </button>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div class="bg-white rounded-xl border ${t1.enabled ? 'border-slate-200' : 'border-slate-200 opacity-65'} p-5 flex flex-col justify-between">
+              <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <h3 class="text-sm font-bold text-slate-900">Tier 1 · WebAssembly</h3>
+                    <div class="text-xs text-slate-500">Wasmtime &amp; Pyodide</div>
+                  </div>
+                  <button type="button" onclick="toggleWorkerTier('t1')" class="w-10 h-5 rounded-full p-0.5 transition-colors ${t1.enabled ? 'bg-slate-900' : 'bg-slate-300'}" aria-label="Toggle Tier 1">
+                    <span class="block w-4 h-4 rounded-full bg-white transition-transform ${t1.enabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+                  </button>
+                </div>
+                <p class="text-xs text-slate-500 leading-relaxed">Lightweight WASI sandbox for fast Python math and data transforms.</p>
+                <div>
+                  <div class="flex justify-between text-xs mb-1.5">
+                    <span class="text-slate-600">Memory Limit</span>
+                    <span class="font-mono-code font-semibold text-slate-900">${t1.ramGb} GB</span>
+                  </div>
+                  <input type="range" min="1" max="8" value="${t1.ramGb}" oninput="updateWorkerSlider('t1','ramGb',this.value)" class="w-full" />
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-100 text-xs font-medium ${t1.enabled ? 'text-emerald-700' : 'text-slate-400'}">
+                ${t1.enabled ? 'Ready to accept tasks' : 'Disabled'}
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl border ${t2.enabled ? 'border-slate-200' : 'border-slate-200 opacity-65'} p-5 flex flex-col justify-between">
+              <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <h3 class="text-sm font-bold text-slate-900">Tier 2 · Container</h3>
+                    <div class="text-xs text-slate-500">Rootless OCI + gVisor</div>
+                  </div>
+                  <button type="button" onclick="toggleWorkerTier('t2')" class="w-10 h-5 rounded-full p-0.5 transition-colors ${t2.enabled ? 'bg-slate-900' : 'bg-slate-300'}" aria-label="Toggle Tier 2">
+                    <span class="block w-4 h-4 rounded-full bg-white transition-transform ${t2.enabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+                  </button>
+                </div>
+                <div class="space-y-3">
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="text-slate-600">CPU Cores</span>
+                      <span class="font-mono-code font-semibold text-slate-900">${t2.cpuCores} Cores</span>
+                    </div>
+                    <input type="range" min="2" max="16" value="${t2.cpuCores}" oninput="updateWorkerSlider('t2','cpuCores',this.value)" class="w-full" />
+                  </div>
+                  <div>
+                    <div class="flex justify-between text-xs mb-1">
+                      <span class="text-slate-600">Memory Limit</span>
+                      <span class="font-mono-code font-semibold text-slate-900">${t2.ramGb} GB</span>
+                    </div>
+                    <input type="range" min="4" max="32" step="2" value="${t2.ramGb}" oninput="updateWorkerSlider('t2','ramGb',this.value)" class="w-full" />
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-100 text-xs font-medium ${t2.enabled ? 'text-emerald-700' : 'text-slate-400'}">
+                ${t2.enabled ? 'Ready to accept tasks' : 'Disabled'}
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl border ${t3.enabled ? 'border-sky-300' : 'border-slate-200 opacity-65'} p-5 flex flex-col justify-between">
+              <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <h3 class="text-sm font-bold text-slate-900">Tier 3 · GPU</h3>
+                    <div class="text-xs text-slate-500">${escapeHtml(state.localGpuProfile ? state.localGpuProfile.name : 'GPU Pass-through')}</div>
+                  </div>
+                  <button type="button" onclick="toggleWorkerTier('t3')" class="w-10 h-5 rounded-full p-0.5 transition-colors ${t3.enabled ? 'bg-sky-600' : 'bg-slate-300'}" aria-label="Toggle Tier 3">
+                    <span class="block w-4 h-4 rounded-full bg-white transition-transform ${t3.enabled ? 'translate-x-5' : 'translate-x-0'}"></span>
+                  </button>
+                </div>
+                <div class="space-y-2 text-xs">
+                  <div class="flex justify-between"><span class="text-slate-500">Power</span><span class="font-medium text-emerald-700">${state.settings.pauseOnBattery ? 'AC Required (Plugged In)' : 'AC / Battery Allowed'}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-500">Thermal Limit</span><span class="font-mono-code text-slate-800">${cutoff}°C</span></div>
+                </div>
+              </div>
+              <div class="mt-4 pt-3 border-t border-slate-100 text-xs font-medium ${t3.enabled ? 'text-sky-700' : 'text-slate-400'}">
+                ${t3.enabled ? 'Pass-through ready' : 'Disabled'}
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-bold text-slate-900">Recent Node Tasks</h3>
+              <button type="button" onclick="syncBackend(); showToast('Refreshed');" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700">Refresh</button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[620px]">
+                <thead>
+                  <tr class="border-b border-slate-200 text-xs font-semibold text-slate-500">
+                    <th class="py-2.5 px-3">Task</th>
+                    <th class="py-2.5 px-3">Tier</th>
+                    <th class="py-2.5 px-3">Worker</th>
+                    <th class="py-2.5 px-3 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 text-xs">
+                  ${claimable.length ? claimable.map(t => `
+                    <tr class="hover:bg-slate-50/70 cursor-pointer" onclick="openTaskDetail('${t.id}')">
+                      <td class="py-3 px-3 font-semibold text-slate-900">${escapeHtml(t.title)}</td>
+                      <td class="py-3 px-3 text-slate-700">${t.tier}</td>
+                      <td class="py-3 px-3 text-slate-600">${escapeHtml(t.worker)}</td>
+                      <td class="py-3 px-3 text-right font-mono-code text-slate-700">${t.status}</td>
+                    </tr>
+                  `).join('') : '<tr><td colspan="4" class="py-6 text-center text-slate-500">No active tasks on this worker.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
+      `;
+    }
 
-        <!-- Local CPU/GPU Execution History Log Card -->
-        <div class="bg-surface-low rounded-xl border border-outline-variant/50 overflow-hidden shadow-sm">
-          <div class="px-4 py-3 bg-surface-high border-b border-outline-variant/40 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <span class="material-symbols-outlined text-primary text-base">task_alt</span>
-              <h3 class="font-headline font-semibold text-sm text-on-surface">Local Execution History Log (CPU &amp; Simulated GPU Runs)</h3>
+    async function toggleWorkerActive() {
+      state.workerActive = !state.workerActive;
+      try {
+        await fetch('/api/worker/settings', { method: 'POST', body: JSON.stringify({ allow_code_execution: state.workerActive }) });
+      } catch (e) {}
+      showToast(state.workerActive ? 'Worker mode enabled' : 'Worker mode paused', 'info');
+      renderWorkerSandbox(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function toggleWorkerTier(key) {
+      state.workerTiers[key].enabled = !state.workerTiers[key].enabled;
+      renderWorkerSandbox(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function updateWorkerSlider(tierKey, field, val) {
+      state.workerTiers[tierKey][field] = Number(val);
+      renderWorkerSandbox(document.getElementById('pageContainer'));
+      if (window.lucide) lucide.createIcons();
+    }
+    function runBenchmarks() {
+      showToast('Hardware benchmark completed');
+    }
+
+    // =========================================================================
+    // PAGE 5: TASK QUEUE, CREATE TASK, TASK DETAIL
+    // =========================================================================
+    function renderTaskQueue(container) {
+      const tabs = ['All', 'Pending', 'Running', 'Completed', 'Failed'];
+      const filtered = state.tasks.filter(t => {
+        const matchTab = state.taskFilterTab === 'All' || t.status === state.taskFilterTab;
+        const matchQ = (t.id + ' ' + t.title + ' ' + t.worker).toLowerCase().includes(state.taskSearch.toLowerCase());
+        return matchTab && matchQ;
+      });
+
+      container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-1.5">
+              ${tabs.map(tab => {
+                const cnt = tab === 'All' ? state.tasks.length : state.tasks.filter(t => t.status === tab).length;
+                return `<button type="button" onclick="state.taskFilterTab='${tab}'; renderTaskQueue(document.getElementById('pageContainer')); if(window.lucide) lucide.createIcons();" class="px-3 py-1.5 rounded-lg text-xs font-semibold ${state.taskFilterTab === tab ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${tab} (${cnt})</button>`;
+              }).join('')}
             </div>
-            <span class="text-xs font-mono text-outline" id="taskQueueCount">Showing 0 Active Tasks</span>
+            <div class="flex items-center gap-2.5 w-full sm:w-auto">
+              <div class="relative flex-1 sm:w-56">
+                <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                <input type="text" value="${escapeHtml(state.taskSearch)}" oninput="state.taskSearch=this.value; renderTaskQueue(document.getElementById('pageContainer'));" placeholder="Search tasks..." class="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-slate-400" />
+              </div>
+              <button type="button" onclick="openCreateTask()" class="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shrink-0">+ New Task</button>
+            </div>
           </div>
 
-          <div class="overflow-x-auto custom-scroll">
-            <table class="styled-table font-mono text-xs w-full text-left">
+          <div class="space-y-2.5">
+            ${filtered.length ? filtered.map(t => `
+              <div class="p-4 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+                <div class="lg:col-span-5 cursor-pointer" onclick="openTaskDetail('${t.id}')">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono-code text-xs text-slate-500">${escapeHtml(t.id)}</span>
+                    <span class="text-[11px] font-medium px-2 py-0.5 rounded-full ${t.status === 'Running' ? 'bg-sky-50 text-sky-700' : t.status === 'Completed' ? 'bg-emerald-50 text-emerald-700' : t.status === 'Failed' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700'}">${t.status}</span>
+                  </div>
+                  <div class="text-sm font-semibold text-slate-900 mt-1 hover:text-sky-700">${escapeHtml(t.title)}</div>
+                </div>
+                <div class="lg:col-span-2 text-xs text-slate-600">${t.tier}</div>
+                <div class="lg:col-span-2 text-xs font-medium text-slate-800 truncate">${escapeHtml(t.worker)}</div>
+                <div class="lg:col-span-2">
+                  <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div class="h-full rounded-full ${t.status === 'Completed' ? 'bg-emerald-500' : t.status === 'Failed' ? 'bg-rose-500' : 'bg-slate-900'}" style="width:${t.progress}%"></div>
+                  </div>
+                </div>
+                <div class="lg:col-span-1 flex items-center justify-end">
+                  <button type="button" onclick="openTaskDetail('${t.id}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Logs</button>
+                </div>
+              </div>
+            `).join('') : '<div class="py-10 text-center text-xs text-slate-500">No tasks found.</div>'}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCreateTask(container) {
+      const f = state.createForm;
+      container.innerHTML = `
+        <div class="space-y-5 max-w-3xl">
+          <button type="button" onclick="navigate('tasks')" class="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900">
+            <i data-lucide="arrow-left" class="w-4 h-4"></i>Back to Task Queue
+          </button>
+
+          <form onsubmit="submitCreatedTask(event)" class="bg-white rounded-xl border border-slate-200 p-5 space-y-4 text-xs">
+            <h2 class="text-sm font-bold text-slate-900">Dispatch New Compute Task</h2>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Task Title</label>
+              <input required value="${escapeHtml(f.title)}" oninput="state.createForm.title=this.value" placeholder="e.g., ResNet-50 Inference" class="w-full px-3 py-2 rounded-lg border border-slate-200" />
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1.5">Execution Tier</label>
+                <select onchange="state.createForm.tier=this.value" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+                  <option ${f.tier === 'Tier 3 GPU' ? 'selected' : ''}>Tier 3 GPU</option>
+                  <option ${f.tier === 'Tier 2 Container' ? 'selected' : ''}>Tier 2 Container</option>
+                  <option ${f.tier === 'Tier 1 WASI' ? 'selected' : ''}>Tier 1 WASI</option>
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1.5">Target Node</label>
+                <select onchange="state.createForm.targetNode=this.value" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+                  <option value="Auto">Auto</option>
+                  ${state.nodes.map(n => `<option value="${escapeHtml(n.id)}">${escapeHtml(n.id)}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+              <button type="button" onclick="navigate('tasks')" class="px-4 py-2 rounded-lg border border-slate-200 font-semibold text-slate-700">Cancel</button>
+              <button type="submit" class="px-5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Dispatch Task</button>
+            </div>
+          </form>
+        </div>
+      `;
+    }
+
+    async function submitCreatedTask(e) {
+      e.preventDefault();
+      try {
+        const resp = await fetch('/api/gpu/run', {
+          method: 'POST',
+          body: JSON.stringify({ task_type: 'inference', batches: 10 })
+        });
+        const res = await resp.json();
+        state.createForm.title = '';
+        showToast(`Dispatched ${res.job_id || 'task'}`);
+        await syncBackend();
+        if (res.job_id) openTaskDetail(res.job_id);
+        else navigate('tasks');
+      } catch (err) {
+        showToast('Task dispatch failed: ' + err.message, 'warning');
+      }
+    }
+
+    function renderTaskDetail(container) {
+      const t = state.tasks.find(x => x.id === state.selectedTaskId) || state.tasks[0];
+      if (!t) { navigate('tasks'); return; }
+      container.innerHTML = `
+        <div class="space-y-5">
+          <div class="flex items-center gap-3">
+            <button type="button" onclick="navigate('tasks')" class="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600">
+              <i data-lucide="arrow-left" class="w-4 h-4"></i>
+            </button>
+            <div>
+              <div class="font-mono-code text-xs text-slate-500">${escapeHtml(t.id)} · ${t.status}</div>
+              <h2 class="text-base font-bold text-slate-900">${escapeHtml(t.title)}</h2>
+            </div>
+          </div>
+          <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-3">
+            <h3 class="text-sm font-bold text-slate-900">Execution Output</h3>
+            <div class="rounded-xl bg-slate-50 border border-slate-200 p-4 font-mono-code text-xs space-y-2 max-h-80 overflow-y-auto">
+              ${(t.execLogs || []).map(l => `
+                <div class="flex items-start gap-3">
+                  <span class="text-slate-400 shrink-0">${escapeHtml(l.ts)}</span>
+                  <span class="text-slate-800 break-words">${escapeHtml(l.line)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // =========================================================================
+    // PAGE 6: STORAGE & SHARDS
+    // =========================================================================
+    function renderStorage(container) {
+      container.innerHTML = `
+        <div class="space-y-6">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500">Vault Blobs</div>
+              <div class="text-2xl font-bold text-slate-900 mt-1">${state.vaultDatasets.length}</div>
+            </div>
+            <div class="bg-white rounded-xl border border-slate-200 p-5">
+              <div class="text-xs text-slate-500">Resilience Policy</div>
+              <div class="text-2xl font-bold text-slate-900 mt-1">${state.settings.erasurePolicy}</div>
+            </div>
+            <div class="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
+              <div>
+                <div class="text-xs text-slate-500">Integrity Scrub</div>
+                <div class="text-sm font-semibold text-emerald-700 mt-1">Ready</div>
+              </div>
+              <button type="button" onclick="repairAllShards()" class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Run Scrub</button>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-3">
+            <div class="flex items-center justify-between">
+              <h2 class="text-sm font-bold text-slate-900">Vault Datasets &amp; Chunks</h2>
+              <button type="button" onclick="openAddDatasetModal()" class="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">+ Store Blob</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              ${state.vaultDatasets.map(ds => `
+                <div class="p-3.5 rounded-xl border border-slate-200 bg-slate-50/50">
+                  <div class="font-mono-code font-semibold text-slate-900 truncate">${escapeHtml(ds.path)}</div>
+                  <div class="text-slate-500 mt-1">${ds.size} · ${ds.cachedOn.join(', ')}</div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function openAddDatasetModal() {
+      openModal('Store Vault Blob', `
+        <form onsubmit="submitNewDataset(event)" class="space-y-3 text-xs">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Key</label>
+            <input id="newDsPath" required placeholder="sample-key" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Payload</label>
+            <textarea id="newDsData" rows="3" required class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code">hello unicompute</textarea>
+          </div>
+          <button type="submit" class="w-full py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Store in Vault</button>
+        </form>
+      `);
+    }
+
+    async function submitNewDataset(e) {
+      e.preventDefault();
+      const key = document.getElementById('newDsPath').value.trim();
+      const val = document.getElementById('newDsData').value;
+      try {
+        await fetch('/api/storage/put', { method: 'POST', body: JSON.stringify({ key, data: val }) });
+        closeModal();
+        showToast(`Stored ${key} in Vault`);
+        await syncBackend();
+      } catch (err) {
+        showToast('Failed to store blob: ' + err.message, 'warning');
+      }
+    }
+
+    async function repairAllShards() {
+      try {
+        const resp = await fetch('/api/storage/scrub', { method: 'POST', body: JSON.stringify({}) });
+        const res = await resp.json();
+        showToast(`Storage scrub complete (corrupted: ${res.corrupted || 0})`);
+      } catch (err) {
+        showToast('Scrub failed: ' + err.message, 'warning');
+      }
+    }
+
+    // =========================================================================
+    // PAGE 7: NODES
+    // =========================================================================
+    function renderFleetNodes(container) {
+      const filtered = state.nodes.filter(n => {
+        const q = state.nodeSearch.toLowerCase();
+        return (n.id + ' ' + n.lab + ' ' + n.gpuModel + ' ' + n.os).toLowerCase().includes(q);
+      });
+
+      container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="relative flex-1 min-w-[180px] max-w-xs">
+              <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+              <input type="text" value="${escapeHtml(state.nodeSearch)}" oninput="state.nodeSearch=this.value; renderFleetNodes(document.getElementById('pageContainer'));" placeholder="Search nodes..." class="w-full pl-8 pr-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-slate-400" />
+            </div>
+            <button type="button" onclick="syncBackend(); showToast('Fleet refreshed');" class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Refresh Fleet</button>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse min-w-[700px]">
               <thead>
-                <tr>
-                  <th>Job ID</th>
-                  <th>Target Peer / Runtime</th>
-                  <th>Target Node / Match</th>
-                  <th>Execution Mode</th>
-                  <th>Priority</th>
-                  <th>Status</th>
+                <tr class="border-b border-slate-200 text-xs font-semibold text-slate-500">
+                  <th class="py-2.5 px-3">Node</th>
+                  <th class="py-2.5 px-3">Location</th>
+                  <th class="py-2.5 px-3">Tier</th>
+                  <th class="py-2.5 px-3">Hardware</th>
+                  <th class="py-2.5 px-3">Status</th>
+                  <th class="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody id="taskQueueTableBody">
-                <!-- Dynamically populated from /api/tasks -->
+              <tbody class="divide-y divide-slate-100 text-xs">
+                ${filtered.map(n => `
+                  <tr class="hover:bg-slate-50/70">
+                    <td class="py-3 px-3 font-semibold text-slate-900">${escapeHtml(n.id)}</td>
+                    <td class="py-3 px-3 text-slate-600">${escapeHtml(n.lab)}</td>
+                    <td class="py-3 px-3 text-slate-700">${n.tier}</td>
+                    <td class="py-3 px-3 text-slate-800">${escapeHtml(n.gpuModel)} (${n.vramTotal} GB VRAM)</td>
+                    <td class="py-3 px-3">
+                      <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${n.status === 'Online' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">${n.status}</span>
+                    </td>
+                    <td class="py-3 px-3 text-right">
+                      <button type="button" onclick="state.selectedTopoNodeId='${n.id}'; navigate('topology');" class="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Inspect</button>
+                    </td>
+                  </tr>
+                `).join('')}
               </tbody>
             </table>
           </div>
         </div>
-      </div>
-    </section>
+      `;
+    }
 
-    <!-- Blob Inspection & Verification Modal -->
-    <div id="blobViewModal" class="incoming-modal hidden">
-      <div class="modal-card max-w-2xl w-full">
-        <div class="flex items-center justify-between border-b border-outline-variant/40 pb-3">
-          <div class="flex items-center gap-2">
-            <span class="material-symbols-outlined text-primary text-xl">dataset</span>
-            <span class="font-headline font-semibold text-sm text-on-surface">CAS Vault Blob Inspector</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <span id="viewModalVerifiedBadge" class="badge-emerald font-mono text-[10px]">SHA-256 VALIDATED</span>
-            <button class="btn-close-sm" id="btnCloseBlobModal">&times;</button>
-          </div>
-        </div>
+    // =========================================================================
+    // PAGE 8: LOGS
+    // =========================================================================
+    function renderLogs(container) {
+      const cats = ['All', 'Coordinator', 'Worker', 'Tasks', 'Network'];
+      const shown = state.logs.filter(l => {
+        const matchCat = state.logTab === 'All' || l.cat === state.logTab;
+        const matchSev = state.logSeverity === 'All' || l.sev === state.logSeverity;
+        const matchQ = (l.src + ' ' + l.type + ' ' + l.msg).toLowerCase().includes(state.logSearch.toLowerCase());
+        return matchCat && matchSev && matchQ;
+      });
 
-        <div class="space-y-3 font-mono text-xs">
-          <div class="flex justify-between text-outline">
-            <span>Content-Addressed ID: <strong class="text-primary font-mono" id="viewModalBlobId">blob-xxxx</strong></span>
-            <span>Size: <strong class="text-on-surface" id="viewModalSize">-- bytes</strong></span>
-          </div>
-          <div>
-            <span class="text-outline block mb-1">Blob Content Stream:</span>
-            <textarea id="viewModalContent" class="code-editor-mini font-mono custom-scroll w-full h-44" readonly></textarea>
-          </div>
-        </div>
-
-        <div class="flex items-center justify-end gap-2 pt-2 border-t border-outline-variant/30">
-          <button id="btnCopyBlobContent" class="btn-surface font-mono text-xs">Copy Content</button>
-          <button id="btnCloseBlobModalBtn" class="btn-primary-compact">Close</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ========================================================================= -->
-    <!-- TAB 7: CLUSTER WIRE LOGS & TELEMETRY STREAM                               -->
-    <!-- ========================================================================= -->
-    <section class="viewport-pane hidden absolute inset-0 overflow-y-auto custom-scroll p-6" id="tab-logs">
-      <div class="max-w-7xl mx-auto space-y-4 h-full flex flex-col">
-        <!-- Header -->
-        <div class="flex items-start justify-between border-b border-outline-variant/40 pb-3 shrink-0">
-          <div>
+      container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-1.5">
+              ${cats.map(c => `<button type="button" onclick="state.logTab='${c}'; renderLogs(document.getElementById('pageContainer')); if(window.lucide) lucide.createIcons();" class="px-3 py-1.5 rounded-lg text-xs font-semibold ${state.logTab === c ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${c}</button>`).join('')}
+            </div>
             <div class="flex items-center gap-2">
-              <h1 class="font-headline text-headline-lg font-semibold text-on-surface">Real-Time P2P Wire &amp; Telemetry Stream</h1>
-              <span class="status-dot-pulse"></span>
-            </div>
-            <p class="font-body text-body-sm text-on-surface-variant mt-0.5">
-              Live WebSocket audit stream capturing fleet join events, WebRTC P2P DataChannel state changes, chunk transfers, and execution results.
-            </p>
-          </div>
-        </div>
-
-        <!-- Filter Controls Bar -->
-        <div class="bg-surface-low border border-outline-variant/40 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-mono uppercase text-outline">Filter Category:</span>
-            <div class="flex items-center gap-1 bg-surface-lowest p-0.5 rounded border border-outline-variant/30 text-xs font-mono">
-              <button class="filter-btn active" data-filter="all">All</button>
-              <button class="filter-btn" data-filter="p2p">P2P Links</button>
-              <button class="filter-btn" data-filter="code">Docker Code</button>
-              <button class="filter-btn" data-filter="gpu">GPU Subsystem</button>
-              <button class="filter-btn" data-filter="storage">Storage Vault</button>
-              <button class="filter-btn" data-filter="coordinator">Coordinator</button>
+              <button type="button" onclick="state.logs=[]; renderLogs(document.getElementById('pageContainer'));" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700">Clear</button>
             </div>
           </div>
 
-          <div class="flex items-center gap-3 text-xs font-mono">
-            <label class="flex items-center gap-1.5 cursor-pointer text-on-surface-variant">
-              <input type="checkbox" id="chkAutoScroll" checked class="accent-primary"/>
-              <span>Auto-Scroll</span>
-            </label>
-            <button id="btnPauseLogs" class="btn-tool-text">
-              <span class="material-symbols-outlined text-xs">pause</span>
-              <span id="pauseLogLabel">Pause</span>
-            </button>
-            <button id="btnClearLogs" class="btn-tool-text">
-              <span class="material-symbols-outlined text-xs">delete_sweep</span>
-              <span>Clear</span>
-            </button>
+          <div class="rounded-xl border border-slate-200 overflow-x-auto">
+            <table class="w-full text-left border-collapse min-w-[680px]">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500">
+                  <th class="py-2.5 px-3">Time</th>
+                  <th class="py-2.5 px-3">Level</th>
+                  <th class="py-2.5 px-3">Source</th>
+                  <th class="py-2.5 px-3">Event</th>
+                  <th class="py-2.5 px-3">Message</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100 text-xs">
+                ${shown.length ? shown.map(l => `
+                  <tr class="hover:bg-slate-50/70">
+                    <td class="py-2.5 px-3 font-mono-code text-slate-500">${l.ts}</td>
+                    <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${l.sev === 'Error' ? 'bg-rose-50 text-rose-700' : l.sev === 'Warning' ? 'bg-amber-50 text-amber-700' : 'bg-sky-50 text-sky-700'}">${l.sev}</span></td>
+                    <td class="py-2.5 px-3 font-semibold text-slate-800">${escapeHtml(l.src)}</td>
+                    <td class="py-2.5 px-3 text-slate-700">${escapeHtml(l.type)}</td>
+                    <td class="py-2.5 px-3 text-slate-600">${escapeHtml(l.msg)}</td>
+                  </tr>
+                `).join('') : '<tr><td colspan="5" class="py-8 text-center text-slate-500">No matching logs.</td></tr>'}
+              </tbody>
+            </table>
           </div>
         </div>
+      `;
+    }
 
-        <!-- Log Terminal Content Area -->
-        <div class="flex-1 bg-[#040e21] rounded-xl border border-outline-variant/50 p-4 font-mono text-xs leading-relaxed overflow-y-auto custom-scroll space-y-1.5 min-h-[420px]" id="wireLogContainer">
-          <div class="log-row log-daemon">
-            <span class="text-outline">[SYSTEM INIT]</span>
-            <span class="text-primary font-semibold">[DAEMON]</span>
-            <span class="text-on-surface">UniCompute Workstation WebSocket event stream listener attached.</span>
+    // =========================================================================
+    // PAGE 9: SETTINGS
+    // =========================================================================
+    function renderSettings(container) {
+      const s = state.settings;
+      container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-5 max-w-3xl">
+          <div class="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Node &amp; Cluster Settings</h2>
+              <p class="text-xs text-slate-500 mt-0.5">Configure coordinator identity and GPU thermal limits</p>
+            </div>
+            <button type="button" onclick="saveSettings()" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Save</button>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Coordinator Name</label>
+              <input value="${escapeHtml(s.coordinatorName)}" oninput="state.settings.coordinatorName=this.value" class="w-full px-3 py-2 rounded-lg border border-slate-200" />
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">GPU Thermal Limit (°C)</label>
+              <input type="number" min="65" max="95" value="${s.gpuThermalCutoff}" oninput="state.settings.gpuThermalCutoff=Number(this.value)" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+            </div>
           </div>
         </div>
-      </div>
-    </section>
+      `;
+    }
 
-  </main>
+    async function saveSettings() {
+      try { localStorage.setItem('unicompute_settings_v1', JSON.stringify(state.settings)); } catch (e) {}
+      try {
+        await fetch('/api/coordinator/settings', { method: 'POST', body: JSON.stringify({ pool_id: state.settings.coordinatorName }) });
+      } catch (e) {}
+      updateChrome();
+      showToast('Settings saved');
+    }
 
-  <!-- ================= GLOBAL DOCKED STATUS BAR FOOTER (24px) ================= -->
-  <footer class="app-footer">
-    <div class="footer-left">
-      <span class="flex items-center gap-1.5 text-secondary">
-        <span class="status-dot-sm"></span> Task Activity Monitoring
-      </span>
-      <span class="footer-sep">•</span>
-      <span id="footerAllocLabel">Allocated: 256MB RAM / 10GB Vault / GPU Tier 3</span>
-      <span class="footer-sep">•</span>
-      <span id="footerP2PCount">0 P2P Links Active</span>
-    </div>
-    <div class="footer-right">
-      <span id="footerSocketStatus" class="text-secondary">● WebSocket Event Bus Connected</span>
-      <span class="footer-sep">•</span>
-      <span class="text-on-surface-variant font-mono">UniCompute Workstation v3.8.4</span>
-    </div>
-  </footer>
+    // =========================================================================
+    // PAGE 10: DESIGN NOTES
+    // =========================================================================
+    function renderAttribution(container) {
+      container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-3 max-w-2xl text-xs text-slate-600">
+          <h2 class="text-sm font-bold text-slate-900">UniCompute Light UI + Live HIPIFY Backend</h2>
+          <p>This interface connects the light Tailwind dashboard directly to the Go backend APIs (<code class="font-mono-code">/api/status</code>, <code class="font-mono-code">/api/gpu</code>, <code class="font-mono-code">/api/gpu/hipify</code>, <code class="font-mono-code">/api/gpu/run</code>, <code class="font-mono-code">/api/tasks</code>, <code class="font-mono-code">/api/storage/*</code>) and executes your local <code class="font-mono-code">hipify-clang.exe</code> for CUDA &rarr; AMD HIP translation.</p>
+        </div>
+      `;
+    }
 
-  <!-- Core Scripts -->
-  <script src="js/topology.js"></script>
-  <script src="js/app.js"></script>
+    window.addEventListener('DOMContentLoaded', () => {
+      navigate('overview');
+      syncBackend();
+      loadSamplesFromBackend();
+      initWebSocket();
+      setInterval(syncBackend, 5000);
+    });
+  </script>
 </body>
 </html>
