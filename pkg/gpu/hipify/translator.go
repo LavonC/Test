@@ -19,6 +19,7 @@ type TranslationResult struct {
 	Report           CompatibilityReport `json:"report"`
 	ReplacementsMade int                 `json:"replacements_made"`
 	Engine           string              `json:"engine,omitempty"`
+	Warning          string              `json:"warning,omitempty"`
 	Error            string              `json:"error,omitempty"`
 }
 
@@ -66,14 +67,17 @@ func FindHipifyClang() string {
 		}
 	}
 
-	// Check known local build/install locations on Windows
+	// Check standard OS/user install locations
 	candidates := []string{
-		`C:\Users\PARSHURAM\.gemini\antigravity\scratch\hipify_build\dist\bin\hipify-clang.exe`,
+		`/opt/rocm/bin/hipify-clang`,
+		`/opt/rocm/hip/bin/hipify-clang`,
+		`/usr/local/bin/hipify-clang`,
+		`C:\Program Files\AMD\ROCm\bin\hipify-clang.exe`,
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates,
-			filepath.Join(home, ".gemini", "antigravity", "scratch", "hipify_build", "dist", "bin", "hipify-clang.exe"),
 			filepath.Join(home, "hipify", "bin", "hipify-clang.exe"),
+			filepath.Join(home, "hipify", "bin", "hipify-clang"),
 		)
 	}
 
@@ -160,8 +164,10 @@ func TranslateCUDAToHIP(cudaSource string) TranslationResult {
 		}
 	}
 
+	var warning string
 	if hipifyExe := FindHipifyClang(); hipifyExe != "" {
-		if translated, count, err := translateWithHipifyClang(hipifyExe, cudaSource); err == nil {
+		translated, count, err := translateWithHipifyClang(hipifyExe, cudaSource)
+		if err == nil {
 			return TranslationResult{
 				Success:          true,
 				TranslatedSource: translated,
@@ -170,6 +176,7 @@ func TranslateCUDAToHIP(cudaSource string) TranslationResult {
 				Engine:           filepath.Base(hipifyExe),
 			}
 		}
+		warning = fmt.Sprintf("%s failed (%v); fell back to builtin-fallback", filepath.Base(hipifyExe), err)
 	}
 
 	translated, totalReplacements := translateBuiltin(cudaSource)
@@ -179,5 +186,6 @@ func TranslateCUDAToHIP(cudaSource string) TranslationResult {
 		Report:           report,
 		ReplacementsMade: totalReplacements,
 		Engine:           "builtin-fallback",
+		Warning:          warning,
 	}
 }

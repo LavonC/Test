@@ -1369,4 +1369,235 @@ func TestStubNode_PutBlobAlignment(t *testing.T) {
 	}
 }
 
+func TestNode_ExecuteRemoteCode_AllowlistAndLimits(t *testing.T) {
+	tmpDir := t.TempDir()
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	caller, err := NewNode(NodeConfig{
+		NodeID:       "code-caller",
+		PoolID:       "pool-code",
+		StorageDir:   filepath.Join(tmpDir, "caller"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode caller failed: %v", err)
+	}
+	defer caller.Close()
+
+	worker, err := NewNode(NodeConfig{
+		NodeID:       "code-worker",
+		PoolID:       "pool-code",
+		StorageDir:   filepath.Join(tmpDir, "worker"),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode worker failed: %v", err)
+	}
+	defer worker.Close()
+
+	// Configure executor with EMPTY allowlist first
+	worker.SetCodeExecutor(&stubCodeExecutor{})
+
+	workerReady := make(chan struct{}, 1)
+	worker.SetOnPeerConnected(func(peerID string) {
+		if peerID == "code-caller" {
+			select {
+			case workerReady <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := caller.Start(ctx); err != nil {
+		t.Fatalf("caller Start failed: %v", err)
+	}
+	if err := worker.Start(ctx); err != nil {
+		t.Fatalf("worker Start failed: %v", err)
+	}
+
+	// Wait until worker is registered in caller's fleet before ConnectPeer
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		peers, _ := caller.GetFleetNodes(ctx)
+		if len(peers) > 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	conn, err := caller.ConnectPeer(ctx, "code-worker")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	if err := conn.WaitChannelsReady(ctx); err != nil {
+		t.Fatalf("WaitChannelsReady failed: %v", err)
+	}
+	select {
+	case <-workerReady:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for worker peer connected callback")
+	}
+
+	baseReq := codeexec.Request{
+		Language:       "python",
+		Source:         "print('hi')",
+		Stdin:          "ok",
+		TimeoutSeconds: 5,
+	}
+
+	// 1. Empty allowlist rejects remote code jobs
+	respEmpty, err := caller.ExecuteRemoteCode(ctx, "code-worker", baseReq)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCode expected structured rejection response, got err: %v", err)
+	}
+	if respEmpty.ExitCode != -1 || !strings.Contains(respEmpty.Error, "allowlist") {
+		t.Fatalf("expected allowlist rejection with empty allowlist, got: %+v", respEmpty)
+	}
+
+	// 2. Specific peer ID succeeds
+	worker.SetCodeAllowlist("code-caller")
+	respPeer, err := caller.ExecuteRemoteCode(ctx, "code-worker", baseReq)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCode with specific allowlist failed: %v", err)
+	}
+	if respPeer.ExitCode != 0 || respPeer.Stdout != "dispatched:ok" {
+		t.Fatalf("expected success for allowlisted peer, got: %+v", respPeer)
+	}
+
+	// 3. Wildcard * succeeds
+	worker.SetCodeAllowlist("*")
+	respWild, err := caller.ExecuteRemoteCode(ctx, "code-worker", baseReq)
+	if err != nil {
+		t.Fatalf("ExecuteRemoteCode with wildcard allowlist failed: %v", err)
+	}
+	if respWild.ExitCode != 0 || respWild.Stdout != "dispatched:ok" {
+		t.Fatalf("expected success for wildcard allowlist, got: %+v", respWild)
+	}
+
+	// 4. Oversized source (> 12 KiB) is rejected
+	oversizedReq := baseReq
+	oversizedReq.Source = strings.Repeat("a", codeexec.MaxSourceBytes+1)
+	if _, err := caller.ExecuteRemoteCode(ctx, "code-worker", oversizedReq); err == nil {
+		t.Fatalf("expected oversized source (> %d bytes) to be rejected", codeexec.MaxSourceBytes)
+	}
+}
+
+type cancelAwareCodeExecutor struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (e *cancelAwareCodeExecutor) Execute(ctx context.Context, req codeexec.Request) codeexec.Response {
+	close(e.started)
+	<-ctx.Done()
+	close(e.canceled)
+	return codeexec.Response{
+		JobID:    req.JobID,
+		Language: req.Language,
+		ExitCode: -1,
+		Error:    ctx.Err().Error(),
+	}
+}
+
+type cancelAwareShellExecutor struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (e *cancelAwareShellExecutor) Execute(ctx context.Context, req remoteshell.ShellRequest) remoteshell.ShellResponse {
+	close(e.started)
+	<-ctx.Done()
+	close(e.canceled)
+	return remoteshell.ShellResponse{
+		ExecID:   req.ExecID,
+		ExitCode: -1,
+		Error:    ctx.Err().Error(),
+	}
+}
+
+func TestNode_CloseCancelsInFlightJobs(t *testing.T) {
+	tmpDir := t.TempDir()
+	worker, err := NewNode(NodeConfig{
+		NodeID:            "cancel-worker",
+		PoolID:            "pool-cancel",
+		StorageDir:        tmpDir,
+		StorageQuota:      10 * 1024 * 1024,
+		EnableRemoteShell: true,
+		ShellAllowlist:    []string{"caller-peer"},
+	})
+	if err != nil {
+		t.Fatalf("NewNode failed: %v", err)
+	}
+
+	codeExec := &cancelAwareCodeExecutor{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	shellExec := &cancelAwareShellExecutor{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	worker.SetCodeExecutor(codeExec, "caller-peer")
+	worker.SetShellExecutor(shellExec)
+
+	codeWire, err := codeexec.EncodeRequest(codeexec.Request{
+		JobID:          "in-flight-code",
+		Language:       "python",
+		Source:         "while True: pass",
+		TimeoutSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest code failed: %v", err)
+	}
+	shellWire, err := remoteshell.EncodeRequest(remoteshell.ShellRequest{
+		ExecID:    "in-flight-shell",
+		Command:   "sleep 30",
+		TimeoutMs: 30000,
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest shell failed: %v", err)
+	}
+
+	if !worker.handleInternalStreamMessage("caller-peer", codeWire) {
+		t.Fatalf("expected code request frame to be handled")
+	}
+	if !worker.handleInternalStreamMessage("caller-peer", shellWire) {
+		t.Fatalf("expected shell request frame to be handled")
+	}
+
+	select {
+	case <-codeExec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for mock code job to start")
+	}
+	select {
+	case <-shellExec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for mock shell job to start")
+	}
+
+	if err := worker.Close(); err != nil {
+		t.Fatalf("Node.Close() failed: %v", err)
+	}
+
+	select {
+	case <-codeExec.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Node.Close() did not cancel in-flight code job context")
+	}
+	select {
+	case <-shellExec.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Node.Close() did not cancel in-flight shell job context")
+	}
+}
+
 

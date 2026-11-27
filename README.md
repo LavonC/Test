@@ -25,13 +25,22 @@ Objective 1 owns the **peer-to-peer data transport substrate** and **contributed
 ```
 UniComputeOBJ1/
 ├── cmd/
-│   ├── unicompute-node/          # Contributor peer storage node CLI
+│   ├── unicompute-node/          # Contributor peer storage & compute node CLI
 │   ├── unicompute-coordinator/   # Signaling hub & embedded TURN coordinator CLI
-│   └── unicompute-relay/         # Standalone peer-elected contributor relay CLI
+│   ├── unicompute-gui/           # Desktop Workstation GUI daemon & embedded frontend
+│   ├── unicompute-relay/         # Standalone peer-elected contributor relay CLI
+│   ├── test-samples/             # Automated sample & boundary test runner
+│   └── verify-obj3/              # Objective 3 GPU hardware & governance verifier
+├── docs/
+│   ├── linux.md                  # Consolidated Linux guide (incl. Ubuntu 18.04/20.04 notes)
+│   └── windows.md                # Windows deployment & verification guide
 ├── pkg/
 │   ├── blobstore/                # Local disk vault, quota enforcement, atomic commits, SHA-256 validation
+│   ├── codeexec/                 # Air-gapped Docker code execution sandbox (C, C++, Python)
+│   ├── gpu/                      # Objective 3 GPU probe, watchdog, HIPIFY, ONNX runner, sandbox
 │   ├── nat/                      # Dual-stack STUN probing, CGNAT detection, virtual interface filtering
 │   ├── relay/                    # Standalone/legacy contributor relay (Syncthing relay-v1) and embedded TURN server
+│   ├── remoteshell/              # Allowlist-gated remote shell execution over WebRTC stream channel
 │   ├── transport/                # WebRTC manager, 16 MiB SCTP buffer, dual DataChannels, trickle ICE
 │   ├── instrumentation/          # Path metrics, candidate pair classification, fleet NAT telemetry
 │   ├── protocol/                 # Framing, envelopes, chunk transfer wire protocol
@@ -149,15 +158,32 @@ go test -v ./...
 
 ---
 
-## 7. Desktop GUI Control Room & Integrated Objectives
+## 7. Desktop Workstation GUI & Remote Code Execution
 
-UniCompute provides an industrial-grade Desktop Workstation GUI (`cmd/unicompute-gui`) with a 60 FPS HTML5 Canvas topology visualizer and 5 dedicated operational control panels:
+UniCompute provides a Desktop Workstation GUI (`cmd/unicompute-gui`) with a responsive sidebar control room across Coordinator, Worker, and System views:
 
-1. **P2P Topology Mesh (Tab 1)**: Interactive fleet topology canvas displaying the central coordinator, orbiting workstation rigs, dual-hemisphere cores (CPU/GPU load and CAS storage), animated WebRTC photon conduits along established links, hover HUDs, and the PC Inspector drawer with live SCTP ping and link controls.
-2. **CPU Containers (Tab 2 - Objective 2)**: Dark code editor, recursive sample dropdown (`samples/`), stdin stream input, execution timeout slider, target peer selection with `Local Worker (This Machine)` default, and real-time execution console.
-3. **GPU Subsystem (Tab 3 - Objective 3)**: Hardware telemetry probing, 50 ms battery/activity watchdog radar, regex-based CUDA-to-AMD HIPIFY compatibility analyzer/translator with blocker analysis, and pure-Go simulated ONNX training/checkpoint runner (`Simulated: true`, bounded by Win32 JobObject / POSIX limits).
-4. **CAS Vault (Tab 4 - Objective 1)**: Content-addressed storage stashing, live chunk table with size and creation timestamps, cryptographic blob view modal with SHA-256 verification and copy tool, deletion, and one-click Bit-Rot Integrity Scrub audit.
-5. **Wire Logs & Diagnostics (Tab 5)**: Live WebSocket event feed with category filters (All, Coordinator, P2P, Code, GPU, Storage), pause/resume toggle, auto-scroll, and log buffer clearing.
+- **Coordinator Views**:
+  - **Overview**: Cluster health, node/NAT telemetry, storage usage, and quick task creation.
+  - **Network Topology**: Interactive SVG P2P mesh displaying the coordinator, local node, connected WebRTC peers, and live latency/ping controls.
+  - **CPU Sandbox & Shell**: Multi-language editor (`python`, `c`, `cpp`), dynamic `samples/` loader, stdin input, timeout control, target peer selector (`Local Worker` or remote peers), and remote shell console.
+  - **GPU Compute**: Hardware telemetry (CUDA/DirectML), 50 ms battery/idle watchdog status, CUDA-to-AMD HIPIFY analyzer/translator (with `hipify-clang` integration + built-in fallback), and simulated ONNX training/inference runner (`simulated: true`).
+  - **Task Queue**: Live cluster job queue tracking dispatched CPU/GPU tasks.
+  - **Storage & Blobs**: Content-addressed storage (CAS) put/get/delete, SHA-256 verification modal, and Bit-Rot Integrity Scrub audit.
+- **Worker & System Views**:
+  - **Worker Allowlist**: Live management of `code_allowlist` peer IDs and wildcard `*` gating.
+  - **Nodes**: Fleet peer discovery, P2P connect/disconnect, and path telemetry.
+  - **Logs, Settings & Architecture**: Real-time WebSocket `/api/events` log stream, coordinator URL/auth-token/relay settings, and Objective 1–3 architecture summary.
+
+### Remote Code Execution (`unicompute-node` CLI & `pkg/codeexec`)
+Workers opt in to container execution via `-enable-code-execution`, `-code-allowlist <peerIDs|*>`, and `-code-timeout <1-30>` (requiring Docker images `gcc:14` for C/C++ and `python:3.13-slim` for Python). From a requester node CLI:
+```text
+> connect node-B
+> run node-B python "./my examples/hello world.py" ./input.txt
+```
+**Bounded Starter Limits**:
+- **Languages**: `c`, `cpp`, `python` (executed with `--network none`, `--ipc=none`, `--memory 256m`, `--read-only`, and `noexec` on `/tmp` for Python).
+- **Payload Caps**: Source <= 12 KiB, stdin <= 4 KiB, captured stdout/stderr <= 3 KiB each, DataChannel request frame <= 48 KiB.
+- **Timeout & Concurrency**: 1–30 seconds per job (default 10s); default worker concurrency of 2 concurrent jobs.
 
 ### Launching the Desktop Workstation
 - **Windows**: Run `.\run-gui.bat` or `.\run-gui.ps1`
@@ -165,6 +191,6 @@ UniCompute provides an industrial-grade Desktop Workstation GUI (`cmd/unicompute
 - **Go Toolchain**: `go run ./cmd/unicompute-gui -port 23080`
 
 For complete platform-specific operational guides, multi-node deployment walkthroughs, and security test suites, refer to:
-- **Windows Deployment & Testing Guide**: [`windows.md`](windows.md)
-- **Linux Deployment & Testing Guide**: [`linux.md`](linux.md)
+- **Windows Deployment & Testing Guide**: [`docs/windows.md`](docs/windows.md)
+- **Linux Deployment & Testing Guide**: [`docs/linux.md`](docs/linux.md)
 

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -830,5 +831,74 @@ func TestHub_ConcurrentPersistentTOFU_NoLostKeys(t *testing.T) {
 	}
 	if len(saved) != totalNodes {
 		t.Fatalf("expected %d persisted pinned keys without overwrite loss, got %d (%v)", totalNodes, len(saved), saved)
+	}
+}
+
+func TestClient_ReconnectStopsOnUnauthorized401(t *testing.T) {
+	hub, err := NewHub("127.0.0.1:0", "valid-secret")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	var attempts atomic.Int32
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen failed: %v", err)
+	}
+	defer proxyLn.Close()
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		}),
+	}
+	go func() { _ = srv.Serve(proxyLn) }()
+	defer srv.Close()
+
+	c, err := NewClient("ws://"+proxyLn.Addr().String()+"/ws", "bad-auth-node", nil, "wrong")
+	if err == nil || c != nil {
+		t.Fatalf("expected NewClient to fail with 401, got c=%v err=%v", c, err)
+	}
+
+	// Simulate reconnect loop hitting 401 after initial connection succeeded
+	c2, err := NewClient(hub.URL(), "reconn-401-node", nil, "valid-secret")
+	if err != nil {
+		t.Fatalf("NewClient valid failed: %v", err)
+	}
+	defer c2.Close()
+
+	// Point client at 401 endpoint and drop conn to trigger reconnect
+	c2.mu.Lock()
+	c2.url = "ws://" + proxyLn.Addr().String() + "/ws"
+	oldConn := c2.conn
+	c2.conn = nil
+	c2.mu.Unlock()
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
+
+	// Wait for 1 reconnect attempt (~500ms-750ms) and verify client stops retrying (closed=true)
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		c2.mu.Lock()
+		closed := c2.closed
+		c2.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	c2.mu.Lock()
+	closed := c2.closed
+	c2.mu.Unlock()
+	if !closed {
+		t.Fatalf("expected signaling client to close and stop reconnecting after HTTP 401")
+	}
+	attemptsBefore := attempts.Load()
+	time.Sleep(900 * time.Millisecond)
+	if attemptsAfter := attempts.Load(); attemptsAfter != attemptsBefore {
+		t.Fatalf("expected no further reconnect attempts after 401 stop, before=%d after=%d", attemptsBefore, attemptsAfter)
 	}
 }

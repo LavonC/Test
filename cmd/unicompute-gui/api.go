@@ -93,6 +93,22 @@ type EventMessage struct {
 	Payload   any       `json:"payload,omitempty"`
 }
 
+func newCoordinatorHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 1200 * time.Millisecond,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			req.Header.Del("Authorization")
+			if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+				return fmt.Errorf("cross-host redirect refused")
+			}
+			if len(via) >= 3 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+}
+
 func shortID(id string, n int) string {
 	if len(id) <= n {
 		return id
@@ -178,9 +194,7 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 		wsClients:      make(map[*wsClient]bool),
 		eventLog:       make([]EventMessage, 0, 100),
 		pendingPings:   make(map[string]chan time.Duration),
-		httpClient: &http.Client{
-			Timeout: 1200 * time.Millisecond,
-		},
+		httpClient:     newCoordinatorHTTPClient(),
 		localShellExec: remoteshell.NewSystemExecutor(),
 		tasks:          []ClusterTask{}, // Real empty task queue; no fake seed tasks
 	}
@@ -441,9 +455,15 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	url := strings.TrimSpace(body.URL)
+	rawURL := strings.TrimSpace(body.URL)
+	parsedURL, parseErr := url.Parse(rawURL)
+	if parseErr != nil || (parsedURL.Scheme != "ws" && parsedURL.Scheme != "wss") || parsedURL.Host == "" || parsedURL.Hostname() == "" {
+		http.Error(w, "invalid coordinator url: must be ws:// or wss:// with a valid host", http.StatusBadRequest)
+		return
+	}
+
 	s.mu.Lock()
-	s.coordinatorURL = url
+	s.coordinatorURL = rawURL
 	if body.AuthToken != nil {
 		tok := strings.TrimSpace(*body.AuthToken)
 		s.nodeConfig.AuthToken = tok
@@ -457,18 +477,18 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	reconnErr := s.node.ReconnectSignaling(ctx, url)
+	reconnErr := s.node.ReconnectSignaling(ctx, rawURL)
 
 	resp := map[string]any{
 		"status":         "reconnecting",
-		"url":            url,
+		"url":            rawURL,
 		"auth_token_set": s.node.HasAuthToken(),
 	}
-	msg := fmt.Sprintf("Connecting to coordinator: %s", url)
+	msg := fmt.Sprintf("Connecting to coordinator: %s", rawURL)
 	if reconnErr != nil {
 		resp["status"] = "reconnect_failed"
 		resp["reconnect_error"] = reconnErr.Error()
-		msg = fmt.Sprintf("Failed to connect to coordinator %s: %v", url, reconnErr)
+		msg = fmt.Sprintf("Failed to connect to coordinator %s: %v", rawURL, reconnErr)
 	}
 
 	s.Broadcast("coordinator_reconnect", "", msg, resp)
@@ -494,7 +514,11 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 
 	client := s.httpClient
 	if client == nil {
-		client = &http.Client{Timeout: 1200 * time.Millisecond}
+		client = newCoordinatorHTTPClient()
+	} else if client.CheckRedirect == nil {
+		clone := *client
+		clone.CheckRedirect = newCoordinatorHTTPClient().CheckRedirect
+		client = &clone
 	}
 
 	status := "RUNNING"
@@ -1067,12 +1091,29 @@ func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RLock()
 	nodeID := s.nodeConfig.NodeID
+	prefBackend := s.gpuConfig.PreferredBackend
 	s.mu.RUnlock()
+
+	prof, _ := s.node.GPUProfile()
+	backend := "CPU"
+	if prof.CUDASupported && (prefBackend == gpu.BackendCUDA || prefBackend == "") {
+		backend = "CUDA Tier 3"
+	} else if prof.DirectMLSupported {
+		backend = "DirectML Tier 3"
+	}
+	stageDAG := "LOCAL_GPU_EXEC"
+	runnerLabel := "ONNX Runner"
+	if resp.Simulated {
+		stageDAG = "LOCAL_GPU_SIMULATION"
+		runnerLabel = "Simulated ONNX Runner"
+		backend += " (Simulated)"
+	}
+
 	s.addTask(ClusterTask{
 		JobID:       req.JobID,
-		ClassAd:     fmt.Sprintf("Simulated ONNX Runner && Task == %q", body.TaskType),
-		TargetMatch: fmt.Sprintf("Matched -> %s (DirectML Tier 3)", nodeID),
-		StageDAG:    "LOCAL_GPU_SIMULATION",
+		ClassAd:     fmt.Sprintf("%s && Task == %q", runnerLabel, body.TaskType),
+		TargetMatch: fmt.Sprintf("Matched -> %s (%s)", nodeID, backend),
+		StageDAG:    stageDAG,
 		Priority:    "P0 CRITICAL",
 		Status:      status,
 		DurationMs:  durMs,

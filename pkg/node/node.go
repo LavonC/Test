@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -66,7 +67,6 @@ type Node struct {
 	tracker          *instrumentation.Tracker
 	privKey          ed25519.PrivateKey
 	unsolicitedBytes map[string]int64
-	shellSlots       chan struct{}
 
 	onChunkRecv func(peerID, chunkID string, size int64)
 	onStreamMsg func(peerID string, data []byte)
@@ -89,6 +89,8 @@ type Node struct {
 
 	started bool
 	closed  bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 // NewNode initializes a new Objective 1 peer storage node.
@@ -126,6 +128,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
 		cfg:               cfg,
 		store:             store,
@@ -133,13 +136,14 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		tracker:           tracker,
 		classifier:        classifier,
 		unsolicitedBytes:  make(map[string]int64),
-		shellSlots:        make(chan struct{}, remoteshell.DefaultMaxConcurrentShells),
 		fleetNodes:        make(map[string]bool),
 		shellExecutor:     remoteshell.NewSystemExecutor(),
 		shellAllowedPeers: shellAllowed,
 		codeAllowedPeers:  make(map[string]struct{}),
 		pendingCode:       make(map[string]pendingCodeResult),
 		pendingExecs:      make(map[string]chan remoteshell.ShellResponse),
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 
 	return n, nil
@@ -542,7 +546,9 @@ func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
 					Error:    "remote shell disabled on this node",
 				}
 				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
-					_ = n.SendStream(peerID, respBytes)
+					if sendErr := n.SendStream(peerID, respBytes); sendErr != nil {
+						log.Printf("[WARN] SendStream shell disabled response to %s failed: %v", peerID, sendErr)
+					}
 				}
 				return
 			}
@@ -554,34 +560,34 @@ func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
 					Error:    "peer not in shell allowlist",
 				}
 				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
-					_ = n.SendStream(peerID, respBytes)
+					if sendErr := n.SendStream(peerID, respBytes); sendErr != nil {
+						log.Printf("[WARN] SendStream shell allowlist rejection to %s failed: %v", peerID, sendErr)
+					}
 				}
 				return
 			}
 
 			if exec == nil {
-				exec = remoteshell.NewSystemExecutor()
+				n.mu.Lock()
+				if n.shellExecutor == nil {
+					n.shellExecutor = remoteshell.NewSystemExecutor()
+				}
+				exec = n.shellExecutor
+				n.mu.Unlock()
 			}
 
-			select {
-			case n.shellSlots <- struct{}{}:
-				defer func() { <-n.shellSlots }()
-			default:
-				errResp := remoteshell.ShellResponse{
-					ExecID:   req.ExecID,
-					ExitCode: -1,
-					Error:    "worker shell busy",
-				}
-				if respBytes, err := remoteshell.EncodeResponse(errResp); err == nil {
-					_ = n.SendStream(peerID, respBytes)
-				}
+			execCtx := n.ctx
+			if execCtx == nil {
+				execCtx = context.Background()
+			}
+			resp := exec.Execute(execCtx, req)
+			respBytes, err := remoteshell.EncodeResponse(resp)
+			if err != nil {
+				log.Printf("[WARN] EncodeResponse shell response for %s failed: %v", peerID, err)
 				return
 			}
-
-			resp := exec.Execute(context.Background(), req)
-			respBytes, err := remoteshell.EncodeResponse(resp)
-			if err == nil {
-				_ = n.SendStream(peerID, respBytes)
+			if sendErr := n.SendStream(peerID, respBytes); sendErr != nil {
+				log.Printf("[WARN] SendStream shell response to %s failed: %v", peerID, sendErr)
 			}
 		}()
 		return true
@@ -894,6 +900,9 @@ func (n *Node) Close() error {
 		return nil
 	}
 	n.closed = true
+	if n.cancel != nil {
+		n.cancel()
+	}
 
 	if n.transport != nil {
 		_ = n.transport.Close()

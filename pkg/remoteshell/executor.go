@@ -12,8 +12,10 @@ import (
 	"time"
 )
 
-const MaxShellOutputBytes = 256 * 1024 // 256 KiB cap per stream
-const DefaultMaxConcurrentShells = 2
+const (
+	MaxShellOutputBytes        = 24 * 1024 // 24 KiB cap per stream so JSON ShellResponse stays safely < 60 KiB SCTP limit
+	DefaultMaxConcurrentShells = 2
+)
 
 type cappedBuffer struct {
 	mu        sync.Mutex

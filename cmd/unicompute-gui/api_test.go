@@ -3,16 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/unicompute/obj1/pkg/gpu"
 	"github.com/unicompute/obj1/pkg/node"
 )
@@ -972,6 +975,565 @@ func TestAPI_LocalShellExecUsesSharedConcurrencyLimit(t *testing.T) {
 
 	if busyCount == 0 {
 		t.Fatalf("expected concurrent local /api/shell/exec requests > 2 to trigger shared 'worker shell busy' limit")
+	}
+}
+
+func TestAPI_CoordinatorConnect_RejectsInvalidSchemesAndHosts(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	badURLs := []string{
+		"http://127.0.0.1:8080/ws",
+		"https://127.0.0.1:8080/ws",
+		"file:///etc/passwd",
+		"ws:///no-host",
+		"wss://",
+		"://missing-scheme",
+	}
+
+	for _, bad := range badURLs {
+		body, _ := json.Marshal(map[string]string{"url": bad})
+		req := httptest.NewRequest(http.MethodPost, "/api/coordinator/connect", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /api/coordinator/connect with %q expected 400 Bad Request, got %d (%s)", bad, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestAPI_CoordinatorStatus_DoesNotLeakAuthTokenOnRedirect(t *testing.T) {
+	var leakedAuth string
+	var secondServerHit bool
+	evilTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondServerHit = true
+		leakedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"count":0,"nodes":[]}`))
+	}))
+	defer evilTarget.Close()
+
+	mockCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy"}`))
+		case "/api/nodes":
+			http.Redirect(w, r, evilTarget.URL+"/steal", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockCoord.Close()
+
+	coordWSURL := "ws://" + mockCoord.Listener.Addr().String() + "/ws"
+	s, mux, cleanup := setupTestServer(t, coordWSURL)
+	defer cleanup()
+
+	s.mu.Lock()
+	s.nodeConfig.AuthToken = "top-secret-cluster-token-123"
+	s.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator/status", nil)
+	req.Header.Set("Authorization", "Bearer "+s.SessionToken())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if secondServerHit {
+		t.Errorf("expected cross-host redirect to be refused without hitting target server")
+	}
+	if leakedAuth != "" {
+		t.Fatalf("security violation: AuthToken leaked across redirect: %q", leakedAuth)
+	}
+
+	// Also verify same-host 302 redirect strips Authorization header
+	var sameHostRedirectAuth string
+	var sameHostRedirectHit bool
+	sameHostCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy"}`))
+		case "/api/nodes":
+			http.Redirect(w, r, "/redirected-nodes", http.StatusFound)
+		case "/redirected-nodes":
+			sameHostRedirectHit = true
+			sameHostRedirectAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"count":0,"nodes":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer sameHostCoord.Close()
+
+	s2, mux2, cleanup2 := setupTestServer(t, "ws://"+sameHostCoord.Listener.Addr().String()+"/ws")
+	defer cleanup2()
+	s2.mu.Lock()
+	s2.nodeConfig.AuthToken = "top-secret-cluster-token-123"
+	s2.mu.Unlock()
+
+	reqSame := httptest.NewRequest(http.MethodGet, "/api/coordinator/status", nil)
+	reqSame.Header.Set("Authorization", "Bearer "+s2.SessionToken())
+	recSame := httptest.NewRecorder()
+	mux2.ServeHTTP(recSame, reqSame)
+	if recSame.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on same-host redirect, got %d", recSame.Code)
+	}
+	if !sameHostRedirectHit {
+		t.Errorf("expected same-host redirect target to be reached")
+	}
+	if sameHostRedirectAuth != "" {
+		t.Fatalf("security violation: AuthToken leaked on same-host 302 redirect: %q", sameHostRedirectAuth)
+	}
+}
+
+func TestStorageCAS_FullLifecycleAndValidation(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+	payload := "full-lifecycle-cas-payload-12345"
+
+	// 1. Validation: empty and malformed payloads must return 400
+	badPutBodies := []string{``, `{}`, `{"content":""}`, `{invalid`}
+	for _, b := range badPutBodies {
+		req := httptest.NewRequest(http.MethodPost, "/api/storage/put", strings.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /api/storage/put with %q expected 400, got %d", b, rec.Code)
+		}
+	}
+
+	reqMissingID := httptest.NewRequest(http.MethodGet, "/api/storage/get", nil)
+	reqMissingID.Header.Set("Authorization", "Bearer "+token)
+	recMissingID := httptest.NewRecorder()
+	mux.ServeHTTP(recMissingID, reqMissingID)
+	if recMissingID.Code != http.StatusBadRequest {
+		t.Errorf("GET /api/storage/get without id expected 400, got %d", recMissingID.Code)
+	}
+
+	for _, b := range []string{`{}`, `{"blob_id":""}`, `{invalid`} {
+		req := httptest.NewRequest(http.MethodPost, "/api/storage/del", strings.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /api/storage/del with %q expected 400, got %d", b, rec.Code)
+		}
+	}
+
+	// 2. PUT
+	putBody, _ := json.Marshal(map[string]string{"content": payload})
+	putReq := httptest.NewRequest(http.MethodPost, "/api/storage/put", bytes.NewReader(putBody))
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	mux.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+	var putRes map[string]any
+	_ = json.Unmarshal(putRec.Body.Bytes(), &putRes)
+	blobID, _ := putRes["blob_id"].(string)
+	if len(blobID) != 64 {
+		t.Fatalf("expected 64-char hex blob_id, got %q", blobID)
+	}
+
+	// 3. BLOBS list
+	listReq := httptest.NewRequest(http.MethodGet, "/api/storage/blobs", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/storage/blobs expected 200, got %d", listRec.Code)
+	}
+	var listRes struct {
+		Blobs []struct {
+			ID   string `json:"id"`
+			Size int64  `json:"size"`
+		} `json:"blobs"`
+	}
+	_ = json.Unmarshal(listRec.Body.Bytes(), &listRes)
+	found := false
+	for _, b := range listRes.Blobs {
+		if b.ID == blobID && b.Size == int64(len(payload)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected blob %s in /api/storage/blobs list, got %+v", blobID, listRes.Blobs)
+	}
+
+	// 4. GET
+	getReq := httptest.NewRequest(http.MethodGet, "/api/storage/get?id="+blobID, nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/storage/get expected 200, got %d", getRec.Code)
+	}
+	var getRes map[string]any
+	_ = json.Unmarshal(getRec.Body.Bytes(), &getRes)
+	if getRes["content"] != payload || getRes["verified"] != true {
+		t.Fatalf("unexpected GET response: %+v", getRes)
+	}
+
+	// 5. SCRUB
+	scrubReq := httptest.NewRequest(http.MethodPost, "/api/storage/scrub", strings.NewReader(`{}`))
+	scrubReq.Header.Set("Authorization", "Bearer "+token)
+	scrubReq.Header.Set("Content-Type", "application/json")
+	scrubRec := httptest.NewRecorder()
+	mux.ServeHTTP(scrubRec, scrubReq)
+	if scrubRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/storage/scrub expected 200, got %d", scrubRec.Code)
+	}
+	var scrubRes struct {
+		Status    string   `json:"status"`
+		Corrupted []string `json:"corrupted"`
+	}
+	_ = json.Unmarshal(scrubRec.Body.Bytes(), &scrubRes)
+	if scrubRes.Status != "complete" || len(scrubRes.Corrupted) != 0 {
+		t.Fatalf("expected clean scrub, got %+v", scrubRes)
+	}
+
+	// 6. DEL
+	delBody, _ := json.Marshal(map[string]string{"blob_id": blobID})
+	delReq := httptest.NewRequest(http.MethodPost, "/api/storage/del", bytes.NewReader(delBody))
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delReq.Header.Set("Content-Type", "application/json")
+	delRec := httptest.NewRecorder()
+	mux.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/storage/del expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	// 7. Confirm 404 on subsequent GET
+	afterDelReq := httptest.NewRequest(http.MethodGet, "/api/storage/get?id="+blobID, nil)
+	afterDelReq.Header.Set("Authorization", "Bearer "+token)
+	afterDelRec := httptest.NewRecorder()
+	mux.ServeHTTP(afterDelRec, afterDelReq)
+	if afterDelRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after delete, got %d: %s", afterDelRec.Code, afterDelRec.Body.String())
+	}
+}
+
+func TestGPU_HipifyAndRun(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	if err := s.node.EnableGPU(gpu.ManagerConfig{
+		StorageDir:         filepath.Join(t.TempDir(), "gpu"),
+		IgnoreBattery:      true,
+		IgnoreUserActivity: true,
+	}); err != nil {
+		t.Fatalf("EnableGPU failed: %v", err)
+	}
+
+	token := s.SessionToken()
+
+	// 1. HIPIFY empty source -> 400
+	emptyReq := httptest.NewRequest(http.MethodPost, "/api/gpu/hipify", strings.NewReader(`{"source":""}`))
+	emptyReq.Header.Set("Authorization", "Bearer "+token)
+	emptyReq.Header.Set("Content-Type", "application/json")
+	emptyRec := httptest.NewRecorder()
+	mux.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on empty hipify source, got %d", emptyRec.Code)
+	}
+
+	// 2. HIPIFY portable CUDA
+	portableBody, _ := json.Marshal(map[string]string{
+		"source": "__global__ void add(float *a) { cudaMalloc(&a, 16); cudaFree(a); }",
+	})
+	portReq := httptest.NewRequest(http.MethodPost, "/api/gpu/hipify", bytes.NewReader(portableBody))
+	portReq.Header.Set("Authorization", "Bearer "+token)
+	portReq.Header.Set("Content-Type", "application/json")
+	portRec := httptest.NewRecorder()
+	mux.ServeHTTP(portRec, portReq)
+	if portRec.Code != http.StatusOK {
+		t.Fatalf("portable hipify expected 200, got %d", portRec.Code)
+	}
+	var portRes map[string]any
+	_ = json.Unmarshal(portRec.Body.Bytes(), &portRes)
+	if portRes["success"] != true {
+		t.Errorf("expected portable hipify success=true, got %v", portRes)
+	}
+	if ts, _ := portRes["translated_source"].(string); !strings.Contains(ts, "hipMalloc") {
+		t.Errorf("expected translated_source to contain hipMalloc, got %q", ts)
+	}
+
+	// 3. HIPIFY warp blocker
+	warpBody, _ := json.Marshal(map[string]string{
+		"source": "__global__ void w(int *o) { o[0] = __shfl_down_sync(0xffffffff, 1, 1); }",
+	})
+	warpReq := httptest.NewRequest(http.MethodPost, "/api/gpu/hipify", bytes.NewReader(warpBody))
+	warpReq.Header.Set("Authorization", "Bearer "+token)
+	warpReq.Header.Set("Content-Type", "application/json")
+	warpRec := httptest.NewRecorder()
+	mux.ServeHTTP(warpRec, warpReq)
+	if warpRec.Code != http.StatusOK {
+		t.Fatalf("warp hipify expected 200, got %d", warpRec.Code)
+	}
+	var warpRes struct {
+		Success bool `json:"success"`
+		Report  struct {
+			HasWarpAssumptions bool `json:"has_warp_assumptions"`
+		} `json:"report"`
+	}
+	_ = json.Unmarshal(warpRec.Body.Bytes(), &warpRes)
+	if warpRes.Success || !warpRes.Report.HasWarpAssumptions {
+		t.Errorf("expected warp blocker to fail translation and flag has_warp_assumptions, got %+v", warpRes)
+	}
+
+	// 4. HIPIFY inline PTX asm("...")
+	ptxBody, _ := json.Marshal(map[string]string{
+		"source": "__device__ int p() { int x; asm(\"mov.u32 %0, 1;\" : \"=r\"(x)); return x; }",
+	})
+	ptxReq := httptest.NewRequest(http.MethodPost, "/api/gpu/hipify", bytes.NewReader(ptxBody))
+	ptxReq.Header.Set("Authorization", "Bearer "+token)
+	ptxReq.Header.Set("Content-Type", "application/json")
+	ptxRec := httptest.NewRecorder()
+	mux.ServeHTTP(ptxRec, ptxReq)
+	if ptxRec.Code != http.StatusOK {
+		t.Fatalf("ptx hipify expected 200, got %d", ptxRec.Code)
+	}
+	var ptxRes struct {
+		Success bool `json:"success"`
+		Report  struct {
+			HasInlinePTX bool `json:"has_inline_ptx"`
+		} `json:"report"`
+	}
+	_ = json.Unmarshal(ptxRec.Body.Bytes(), &ptxRes)
+	if ptxRes.Success || !ptxRes.Report.HasInlinePTX {
+		t.Errorf("expected inline PTX asm(\"...\") to fail translation and flag has_inline_ptx, got %+v", ptxRes)
+	}
+
+	// 5. GPU Run for inference & training -> simulated: true + task recorded in GET /api/tasks
+	for _, taskType := range []string{"inference", "training"} {
+		runBody, _ := json.Marshal(map[string]any{
+			"task_type": taskType,
+			"batches":   5,
+		})
+		runReq := httptest.NewRequest(http.MethodPost, "/api/gpu/run", bytes.NewReader(runBody))
+		runReq.Header.Set("Authorization", "Bearer "+token)
+		runReq.Header.Set("Content-Type", "application/json")
+		runRec := httptest.NewRecorder()
+		mux.ServeHTTP(runRec, runReq)
+		if runRec.Code != http.StatusOK {
+			t.Fatalf("POST /api/gpu/run (%s) expected 200, got %d: %s", taskType, runRec.Code, runRec.Body.String())
+		}
+		var runRes map[string]any
+		_ = json.Unmarshal(runRec.Body.Bytes(), &runRes)
+		if runRes["simulated"] != true {
+			t.Errorf("expected simulated=true for %s, got %v", taskType, runRes["simulated"])
+		}
+		if runRes["status"] != "completed" {
+			t.Errorf("expected status=completed for %s, got %v", taskType, runRes["status"])
+		}
+	}
+
+	tasksReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	tasksReq.Header.Set("Authorization", "Bearer "+token)
+	tasksRec := httptest.NewRecorder()
+	mux.ServeHTTP(tasksRec, tasksReq)
+	var tasksRes struct {
+		Tasks []ClusterTask `json:"tasks"`
+		Count int           `json:"count"`
+	}
+	_ = json.Unmarshal(tasksRec.Body.Bytes(), &tasksRes)
+	if tasksRes.Count != 2 {
+		t.Fatalf("expected 2 GPU tasks recorded in GET /api/tasks, got %d", tasksRes.Count)
+	}
+	seenInf, seenTrain := false, false
+	for _, task := range tasksRes.Tasks {
+		if strings.Contains(task.ClassAd, `"inference"`) {
+			seenInf = true
+		}
+		if strings.Contains(task.ClassAd, `"training"`) {
+			seenTrain = true
+		}
+	}
+	if !seenInf || !seenTrain {
+		t.Errorf("expected both inference and training tasks in /api/tasks, got %+v", tasksRes.Tasks)
+	}
+}
+
+func TestCodeRun_ValidationAndNoDockerFallback(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	token := s.SessionToken()
+
+	// 1. Empty source / invalid JSON -> 400
+	for _, b := range []string{`{"language":"python","source":""}`, `{bad`} {
+		req := httptest.NewRequest(http.MethodPost, "/api/code/run", strings.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST /api/code/run with %q expected 400, got %d", b, rec.Code)
+		}
+	}
+
+	// 2. Local execution with Docker disabled -> structured error JSON + FAILED (NO_DOCKER) task
+	runBody := `{"peer_id":"local","language":"python","source":"print('hello')"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/code/run", strings.NewReader(runBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 structured error JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode JSON: %v", err)
+	}
+	if res["exit_code"] != float64(-1) {
+		t.Errorf("expected exit_code -1, got %v", res["exit_code"])
+	}
+	if errMsg, _ := res["error"].(string); !strings.Contains(errMsg, "Docker") {
+		t.Errorf("expected structured Docker error message, got %q", errMsg)
+	}
+
+	tasksReq := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	tasksReq.Header.Set("Authorization", "Bearer "+token)
+	tasksRec := httptest.NewRecorder()
+	mux.ServeHTTP(tasksRec, tasksReq)
+	var tasksRes struct {
+		Tasks []ClusterTask `json:"tasks"`
+	}
+	_ = json.Unmarshal(tasksRec.Body.Bytes(), &tasksRes)
+	if len(tasksRes.Tasks) != 1 || tasksRes.Tasks[0].Status != "FAILED (NO_DOCKER)" {
+		t.Fatalf("expected 1 task with status FAILED (NO_DOCKER), got %+v", tasksRes.Tasks)
+	}
+}
+
+func TestEventsWS_AuthOriginAndLiveBroadcast(t *testing.T) {
+	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
+	defer cleanup()
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s.SetActivePort(0) // allow dynamic httptest server loopback port
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/events"
+
+	// 1. Unauthorized upgrade -> 401
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatalf("expected unauthorized /api/events upgrade to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got resp=%v err=%v", resp, err)
+	}
+
+	// 2. Foreign Origin -> 403
+	evilHdr := http.Header{"Origin": {"http://evil.example.com"}}
+	_, resp2, err2 := websocket.DefaultDialer.Dial(wsURL+"?token="+s.SessionToken(), evilHdr)
+	if err2 == nil {
+		t.Fatalf("expected foreign Origin /api/events upgrade to fail")
+	}
+	if resp2 == nil || resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden, got resp=%v err=%v", resp2, err2)
+	}
+
+	// 3. Valid ?token=<sessionToken> upgrade receives live Broadcast JSON event
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?token="+s.SessionToken(), nil)
+	if err != nil {
+		t.Fatalf("valid /api/events WebSocket dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	s.Broadcast("ws_live_test", "peer-ws-1", "hello live ws", map[string]string{"key": "val"})
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var got EventMessage
+	if err := conn.ReadJSON(&got); err != nil {
+		t.Fatalf("ReadJSON failed: %v", err)
+	}
+	if got.Type != "ws_live_test" || got.PeerID != "peer-ws-1" || got.Message != "hello live ws" {
+		t.Fatalf("unexpected WebSocket event received: %+v", got)
+	}
+}
+
+func TestWebAssets_NoInlineXSSAndValidJS(t *testing.T) {
+	subFS, err := fs.Sub(embeddedWebFS, "web")
+	if err != nil {
+		t.Fatalf("fs.Sub(embeddedWebFS, web) failed: %v", err)
+	}
+
+	htmlBytes, err := fs.ReadFile(subFS, "index.html")
+	if err != nil {
+		t.Fatalf("failed to read embedded web/index.html: %v", err)
+	}
+	htmlContent := string(htmlBytes)
+
+	// 1. Check all local <script src="..."> and <link href="..."> assets exist in embeddedWebFS
+	reSrc := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+)["']`)
+	reHref := regexp.MustCompile(`(?i)<link[^>]+href=["']([^"']+)["']`)
+	referencedLocal := make(map[string]bool)
+
+	checkLocalAsset := func(rawRef string) {
+		if strings.HasPrefix(rawRef, "http://") || strings.HasPrefix(rawRef, "https://") || strings.HasPrefix(rawRef, "//") {
+			return
+		}
+		clean := strings.TrimPrefix(rawRef, "/")
+		if clean == "" {
+			return
+		}
+		if _, statErr := fs.Stat(subFS, clean); statErr != nil {
+			t.Errorf("index.html references local asset %q which is missing from embeddedWebFS: %v", rawRef, statErr)
+		}
+		referencedLocal[clean] = true
+	}
+
+	for _, m := range reSrc.FindAllStringSubmatch(htmlContent, -1) {
+		checkLocalAsset(m[1])
+	}
+	for _, m := range reHref.FindAllStringSubmatch(htmlContent, -1) {
+		checkLocalAsset(m[1])
+	}
+
+	// 2. Scan all embedded .html and .js files for inline onclick="...${ interpolation (XSS regression)
+	// and verify no unreferenced JS/CSS dead assets exist in web/
+	reInlineXSS := regexp.MustCompile(`(?i)on[a-z]+\s*=\s*["'][^"']*\$\{`)
+	err = fs.WalkDir(subFS, ".", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
+			if !referencedLocal[p] {
+				t.Errorf("unreferenced dead frontend asset %q found in embeddedWebFS", p)
+			}
+		}
+		if strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".js") {
+			data, readErr := fs.ReadFile(subFS, p)
+			if readErr != nil {
+				return readErr
+			}
+			if match := reInlineXSS.FindString(string(data)); match != "" {
+				t.Errorf("inline event handler template interpolation detected in %s: %q", p, match)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir embeddedWebFS failed: %v", err)
 	}
 }
 

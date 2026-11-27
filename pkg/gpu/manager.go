@@ -25,6 +25,7 @@ type ManagerConfig struct {
 	UserActiveThreshold time.Duration
 	ResumeGracePeriod   time.Duration
 	IgnoreBattery       bool
+	IgnoreUserActivity  bool
 }
 
 // Manager orchestrates hardware probing, sandboxing, watchdog, and execution for Objective 3.
@@ -88,6 +89,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		UserActiveThreshold: cfg.UserActiveThreshold,
 		ResumeGracePeriod:   cfg.ResumeGracePeriod,
 		IgnoreBattery:       cfg.IgnoreBattery,
+		IgnoreUserActivity:  cfg.IgnoreUserActivity,
 	}, m.handleWatchdogPause, m.handleWatchdogResume)
 
 	m.watchdog = wd
@@ -202,14 +204,14 @@ func (m *Manager) ExecuteTask(ctx context.Context, req GPUTaskRequest) GPUTaskRe
 		}
 	}
 
-	// 1. Pre-flight check: if request is native CUDA code and this machine is AMD or Intel
+	// 1. Pre-flight check: if request is native CUDA code and this machine is non-NVIDIA (AMD, Intel, CPU)
 	if req.SourceCode != "" {
 		report := hipify.AnalyzeCUDASource(req.SourceCode)
-		if m.profile.Vendor == VendorAMD && !report.TargetAMDSupported {
+		if m.profile.Vendor != VendorNVIDIA && !report.TargetAMDSupported {
 			resp.Status = "rejected"
 			resp.DiagnosticMessage = fmt.Sprintf(
-				"CUDA kernel incompatible with AMD GPU (found %d issue(s): Warp/PTX assumptions). Export to portable ONNX capsule.",
-				len(report.Issues),
+				"CUDA kernel incompatible with %s GPU (found %d issue(s): Warp/PTX assumptions). Export to portable ONNX capsule.",
+				m.profile.Vendor, len(report.Issues),
 			)
 			resp.ExecutionMs = time.Since(start).Milliseconds()
 			return resp

@@ -48,13 +48,23 @@ sudo mv /tmp/unicompute-coordinator /opt/unicompute/unicompute-coordinator
 sudo chmod +x /opt/unicompute/unicompute-coordinator
 sudo chown unicompute:unicompute /opt/unicompute/unicompute-coordinator
 
-# 7. Install Environment Config
+# 7. Install Persistent Environment Config (preserve existing UNICOMPUTE_AUTH_TOKEN if present)
+EXISTING_AUTH_TOKEN=""
+if [ -f /etc/default/unicompute-coordinator ]; then
+    EXISTING_AUTH_TOKEN=$(grep -E '^UNICOMPUTE_AUTH_TOKEN=' /etc/default/unicompute-coordinator | cut -d'=' -f2- || true)
+fi
+if [ -z "${EXISTING_AUTH_TOKEN}" ]; then
+    EXISTING_AUTH_TOKEN="${UNICOMPUTE_AUTH_TOKEN:-$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+fi
+
 sudo bash -c "cat <<EOF > /etc/default/unicompute-coordinator
 PUBLIC_IP=${PUBLIC_IP}
 UNICOMPUTE_LISTEN=0.0.0.0:8080
 UNICOMPUTE_PUBLIC_IP=${PUBLIC_IP}
 UNICOMPUTE_REALM=unicompute.edu
+UNICOMPUTE_AUTH_TOKEN=${EXISTING_AUTH_TOKEN}
 EOF"
+sudo chmod 600 /etc/default/unicompute-coordinator
 
 # 8. Install Systemd Service
 sudo cp deploy/unicompute-coordinator.service /etc/systemd/system/
