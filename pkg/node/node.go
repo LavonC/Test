@@ -45,13 +45,16 @@ type NodeConfig struct {
 	STUNServersV4     []string
 	STUNServersV6     []string
 	TURNServers       []transport.TURNServerConfig
-	RelayAddr                       string        // Optional contributor relay address (deprecated)
-	FallbackTimeout                 time.Duration // ICE wait timeout configuration
 	EnableRemoteShell               bool          // Opt-in gate for remote shell execution
 	ShellAllowlist                  []string      // Explicit peer IDs allowed to execute shell commands
 	AllowUnsolicitedChunks          bool          // Explicit opt-in for unsolicited OnChunkReceived disk writes
 	DisableUnsolicitedChunks        bool          // Reject unsolicited OnChunkReceived disk writes unless AllowUnsolicitedChunks is true
 	MaxUnsolicitedChunkBytesPerPeer int64         // Per-peer byte cap for unsolicited chunk writes (default 64 MiB)
+}
+
+type pendingShellResult struct {
+	peerID string
+	ch     chan remoteshell.ShellResponse
 }
 
 // Node represents a full Objective 1 peer node combining storage substrate,
@@ -84,7 +87,7 @@ type Node struct {
 	pendingCodeMu    sync.Mutex
 	pendingCode      map[string]pendingCodeResult
 	pendingExecsMu   sync.Mutex
-	pendingExecs     map[string]chan remoteshell.ShellResponse
+	pendingExecs     map[string]pendingShellResult
 	gpuManager       *gpu.Manager
 
 	started bool
@@ -141,7 +144,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		shellAllowedPeers: shellAllowed,
 		codeAllowedPeers:  make(map[string]struct{}),
 		pendingCode:       make(map[string]pendingCodeResult),
-		pendingExecs:      make(map[string]chan remoteshell.ShellResponse),
+		pendingExecs:      make(map[string]pendingShellResult),
 		ctx:               ctx,
 		cancel:            cancel,
 	}
@@ -225,6 +228,27 @@ func (n *Node) handleSignalingEnvelope(env protocol.Envelope) {
 	if env.Type == protocol.MsgRegisterAck {
 		var ack protocol.RegisterAckPayload
 		if json.Unmarshal(env.Payload, &ack) == nil && ack.Error == "" && len(ack.TURNServers) > 0 {
+			turns := make([]transport.TURNServerConfig, 0, len(ack.TURNServers))
+			for _, ts := range ack.TURNServers {
+				turns = append(turns, transport.TURNServerConfig{
+					URL:        ts.URL,
+					Username:   ts.Username,
+					Credential: ts.Credential,
+				})
+			}
+			n.mu.RLock()
+			tm := n.transport
+			n.mu.RUnlock()
+			if tm != nil {
+				tm.SetDynamicTURNServers(turns)
+			}
+		}
+		return
+	}
+
+	if env.Type == protocol.MsgTURNRefreshAck {
+		var ack protocol.TURNRefreshAckPayload
+		if json.Unmarshal(env.Payload, &ack) == nil && ack.Error == "" {
 			turns := make([]transport.TURNServerConfig, 0, len(ack.TURNServers))
 			for _, ts := range ack.TURNServers {
 				turns = append(turns, transport.TURNServerConfig{
@@ -601,15 +625,17 @@ func (n *Node) handleInternalStreamMessage(peerID string, data []byte) bool {
 		}
 
 		n.pendingExecsMu.Lock()
-		ch, ok := n.pendingExecs[resp.ExecID]
-		if ok {
+		pending, ok := n.pendingExecs[resp.ExecID]
+		if ok && pending.peerID == peerID {
 			delete(n.pendingExecs, resp.ExecID)
+		} else {
+			ok = false
 		}
 		n.pendingExecsMu.Unlock()
 
-		if ok && ch != nil {
+		if ok && pending.ch != nil {
 			select {
-			case ch <- resp:
+			case pending.ch <- resp:
 			default:
 			}
 		}
@@ -648,7 +674,14 @@ func (n *Node) ExecuteRemoteCommand(ctx context.Context, peerID string, req remo
 	respCh := make(chan remoteshell.ShellResponse, 1)
 
 	n.pendingExecsMu.Lock()
-	n.pendingExecs[req.ExecID] = respCh
+	if n.pendingExecs == nil {
+		n.pendingExecs = make(map[string]pendingShellResult)
+	}
+	if _, exists := n.pendingExecs[req.ExecID]; exists {
+		n.pendingExecsMu.Unlock()
+		return remoteshell.ShellResponse{}, fmt.Errorf("exec ID %q is already pending", req.ExecID)
+	}
+	n.pendingExecs[req.ExecID] = pendingShellResult{peerID: peerID, ch: respCh}
 	n.pendingExecsMu.Unlock()
 
 	defer func() {
@@ -920,13 +953,6 @@ func (n *Node) Close() error {
 	return nil
 }
 
-// SetFallbackTimeout updates the configured GUI relay threshold setting.
-func (n *Node) SetFallbackTimeout(d time.Duration) {
-	n.mu.Lock()
-	n.cfg.FallbackTimeout = d
-	n.mu.Unlock()
-}
-
 // SetRemoteShellConfig dynamically updates remote shell enablement and allowlist.
 func (n *Node) SetRemoteShellConfig(enabled bool, allowlist []string) {
 	n.mu.Lock()
@@ -937,13 +963,6 @@ func (n *Node) SetRemoteShellConfig(enabled bool, allowlist []string) {
 	for _, p := range allowlist {
 		n.shellAllowedPeers[p] = struct{}{}
 	}
-}
-
-// FallbackTimeout returns the active blind relay fallback timeout threshold.
-func (n *Node) FallbackTimeout() time.Duration {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	return n.cfg.FallbackTimeout
 }
 
 // ReconnectSignaling closes the current signaling client (if any) and connects to newURL.

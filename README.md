@@ -116,7 +116,7 @@ This implementation directly addresses and resolves all six architectural defect
 All test suites pass natively using standard Go testing:
 
 ```powershell
-$env:GOTMPDIR="c:\Users\HP\Desktop\Noval\Projects\UniComputeOBJ1\.tmp"
+$env:GOTMPDIR="$PWD\.tmp"
 go test -v ./...
 ```
 
@@ -172,7 +172,7 @@ UniCompute provides a Desktop Workstation GUI (`cmd/unicompute-gui`) with a resp
 - **Worker & System Views**:
   - **Worker Allowlist**: Live management of `code_allowlist` peer IDs and wildcard `*` gating.
   - **Nodes**: Fleet peer discovery, P2P connect/disconnect, and path telemetry.
-  - **Logs, Settings & Architecture**: Real-time WebSocket `/api/events` log stream, coordinator URL/auth-token/relay settings, and Objective 1–3 architecture summary.
+  - **Logs, Settings & Architecture**: Real-time WebSocket `/api/events` log stream, coordinator URL / `UNICOMPUTE_AUTH_TOKEN` settings, and Objective 1–3 architecture summary.
 
 ### Remote Code Execution (`unicompute-node` CLI & `pkg/codeexec`)
 Workers opt in to container execution via `-enable-code-execution`, `-code-allowlist <peerIDs|*>`, and `-code-timeout <1-30>` (requiring Docker images `gcc:14` for C/C++ and `python:3.13-slim` for Python). From a requester node CLI:

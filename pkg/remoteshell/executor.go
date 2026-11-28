@@ -111,7 +111,7 @@ func (e *SystemExecutor) Execute(ctx context.Context, req ShellRequest) ShellRes
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
 
-	runErr := cmd.Run()
+	runErr := runCommandWithProcessGroup(execCtx, cmd)
 	elapsed := time.Since(start).Milliseconds()
 
 	resp := ShellResponse{

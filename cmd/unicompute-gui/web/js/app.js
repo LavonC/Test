@@ -12,6 +12,9 @@
   const match = hash.match(/token=([a-fA-F0-9]+)/);
   if (match && match[1]) {
     sessionStorage.setItem('unicompute_gui_token', match[1]);
+    if (window.history && typeof window.history.replaceState === 'function') {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
   }
 })();
 
@@ -115,8 +118,6 @@ const state = {
     directPeersCount: 0,
     relayedPeersCount: 0,
     avgRttMs: 0,
-    relayThreshold: 2.0,
-    joinToken: 'UC-LOCAL',
     transport: 'WebRTC DataChannel (ICE/DTLS/SCTP)',
   },
   localGpuProfile: null,
@@ -183,8 +184,6 @@ const state = {
   settingsDraft: {
     coordinatorURL: '',
     authToken: '',
-    relayThreshold: 2.0,
-    joinToken: '',
   },
 
   nodes: [],
@@ -194,10 +193,157 @@ const state = {
   telemetryHistory: [],
 };
 
-let activeCharts = [];
 let wsInstance = null;
 let wsReconnectAttempts = 0;
 let wsReconnectTimer = null;
+
+// =========================================================================
+// OFFLINE SVG ICONS & CANVAS CHART
+// =========================================================================
+const ICON_PATHS = {
+  'activity': '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  'alert-triangle': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  'arrow-left': '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  'boxes': '<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/>',
+  'check-circle-2': '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  'code-2': '<path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/>',
+  'copy': '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  'cpu': '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>',
+  'database': '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+  'download': '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+  'file-up': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M12 12v6"/><path d="m15 15-3-3-3 3"/>',
+  'info': '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  'layers': '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  'layout-dashboard': '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+  'list-checks': '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+  'menu': '<line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/>',
+  'plus': '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  'search': '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  'server': '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  'share-2': '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+  'shield-alert': '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  'shield-check': '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  'sliders-horizontal': '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
+  'terminal': '<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
+  'x': '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+};
+
+function renderIcons(root = document) {
+  const nodes = root.querySelectorAll ? root.querySelectorAll('i[data-lucide]') : [];
+  nodes.forEach(el => {
+    const name = el.getAttribute('data-lucide');
+    const paths = ICON_PATHS[name];
+    if (!paths) return;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    const cls = el.getAttribute('class');
+    if (cls) svg.setAttribute('class', cls);
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = paths;
+    el.replaceWith(svg);
+  });
+}
+
+function drawOverviewChart(canvas, samples) {
+  if (!canvas || !canvas.getContext) return;
+  const parent = canvas.parentElement;
+  const width = (parent && parent.clientWidth) ? parent.clientWidth : 600;
+  const height = (parent && parent.clientHeight) ? parent.clientHeight : 256;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = width + 'px';
+  canvas.style.height = height + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, width, height);
+
+  const pad = { top: 12, right: 16, bottom: 26, left: 36 };
+  const plotW = Math.max(40, width - pad.left - pad.right);
+  const plotH = Math.max(40, height - pad.top - pad.bottom);
+
+  let maxVal = 100;
+  samples.forEach(s => {
+    maxVal = Math.max(maxVal, Number(s.vramPct || 0), Number(s.storagePct || 0), Number(s.avgRttMs || 0));
+  });
+  maxVal = Math.ceil(maxVal / 25) * 25;
+  if (maxVal <= 0) maxVal = 100;
+
+  ctx.font = '11px system-ui, -apple-system, sans-serif';
+  ctx.textBaseline = 'middle';
+  const gridSteps = 4;
+  for (let i = 0; i <= gridSteps; i++) {
+    const val = Math.round((maxVal / gridSteps) * i);
+    const y = pad.top + plotH - (i / gridSteps) * plotH;
+    ctx.strokeStyle = '#F1F5F9';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+
+    ctx.fillStyle = '#64748B';
+    ctx.textAlign = 'right';
+    ctx.fillText(String(val), pad.left - 8, y);
+  }
+
+  const count = samples.length;
+  const xFor = (idx) => count <= 1 ? pad.left + plotW / 2 : pad.left + (idx / (count - 1)) * plotW;
+  const yFor = (v) => pad.top + plotH - (Math.max(0, Number(v || 0)) / maxVal) * plotH;
+
+  // X-axis labels (up to 5 ticks)
+  ctx.fillStyle = '#64748B';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const labelStep = Math.max(1, Math.ceil(count / 5));
+  for (let i = 0; i < count; i += labelStep) {
+    ctx.fillText(String(samples[i].label || ''), xFor(i), pad.top + plotH + 8);
+  }
+
+  const drawSeries = (vals, color, fillColor, dashed) => {
+    if (!vals.length) return;
+    ctx.save();
+    if (dashed) ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    vals.forEach((v, idx) => {
+      const x = xFor(idx);
+      const y = yFor(v);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    if (fillColor && vals.length > 1) {
+      ctx.setLineDash([]);
+      ctx.lineTo(xFor(vals.length - 1), pad.top + plotH);
+      ctx.lineTo(xFor(0), pad.top + plotH);
+      ctx.closePath();
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+    }
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    vals.forEach((v, idx) => {
+      ctx.beginPath();
+      ctx.arc(xFor(idx), yFor(v), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.restore();
+  };
+
+  drawSeries(samples.map(s => s.vramPct), '#8B5CF6', 'rgba(139,92,246,0.08)', false);
+  drawSeries(samples.map(s => s.storagePct), '#0EA5E9', null, false);
+  drawSeries(samples.map(s => s.avgRttMs), '#10B981', null, true);
+}
 
 // =========================================================================
 // UTILITIES
@@ -221,8 +367,7 @@ function formatBytes(bytes) {
 }
 
 function destroyCharts() {
-  activeCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
-  activeCharts = [];
+  // No external chart library instances to destroy; canvas redraws on page render.
 }
 
 function showToast(message, tone = 'success') {
@@ -233,7 +378,7 @@ function showToast(message, tone = 'success') {
   el.className = 'pointer-events-auto flex items-center gap-2.5 bg-slate-900 text-white text-xs font-medium px-4 py-3 rounded-xl shadow-lg border border-slate-700 max-w-sm';
   el.innerHTML = `<i data-lucide="${iconName}" class="w-4 h-4 shrink-0 ${iconColor}"></i><span>${escapeHtml(message)}</span>`;
   stack.appendChild(el);
-  if (window.lucide) lucide.createIcons({ nodes: [el] });
+  renderIcons(el);
   setTimeout(() => {
     el.style.opacity = '0';
     el.style.transition = 'opacity 0.25s ease';
@@ -276,7 +421,7 @@ function openModal(title, bodyHtml) {
   const bd = document.getElementById('modalBackdrop');
   bd.classList.remove('hidden');
   bd.classList.add('flex');
-  if (window.lucide) lucide.createIcons({ nodes: [bd] });
+  renderIcons(bd);
 }
 
 function closeModal() {
@@ -369,9 +514,6 @@ async function syncBackend() {
       if (!state.settingsDraft.coordinatorURL && status.coordinator_url) {
         state.settingsDraft.coordinatorURL = status.coordinator_url;
       }
-      if (!state.settingsDraft.joinToken && status.join_token) {
-        state.settingsDraft.joinToken = status.join_token;
-      }
     }
 
     if (coord) {
@@ -386,14 +528,10 @@ async function syncBackend() {
         directPeersCount: Number(coord.direct_peers_count || 0),
         relayedPeersCount: Number(coord.relayed_peers_count || 0),
         avgRttMs: Number(coord.avg_rtt_ms || 0),
-        relayThreshold: Number(coord.relay_threshold || 2.0),
-        joinToken: coord.join_token || 'UC-LOCAL',
         transport: coord.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)',
       };
       if (state.currentPage !== 'settings') {
         state.settingsDraft.coordinatorURL = state.coordStatus.coordinatorURL;
-        state.settingsDraft.relayThreshold = state.coordStatus.relayThreshold;
-        state.settingsDraft.joinToken = state.coordStatus.joinToken;
       }
     }
 
@@ -640,7 +778,6 @@ function updateChrome() {
   document.getElementById('sidebarCoordinatorName').textContent = state.localNodeId;
   document.getElementById('sidebarNodeSummary').textContent = `${connectedP2PCount}/${totalPeers} P2P · ${state.coordStatus.status}`;
   document.getElementById('navTaskBadge').textContent = state.tasks.length;
-  document.getElementById('topbarJoinCode').textContent = state.coordStatus.joinToken || 'UC-LOCAL';
 
   const dot = document.getElementById('sidebarStatusDot');
   const pill = document.getElementById('topbarPill');
@@ -704,7 +841,7 @@ function renderCurrentPageOnly() {
   else if (page === 'logs') renderLogs(container);
   else if (page === 'settings') renderSettings(container);
   else if (page === 'attribution') renderAttribution(container);
-  if (window.lucide) lucide.createIcons();
+  renderIcons(container);
 }
 
 function navigate(page) {
@@ -729,6 +866,9 @@ function navigate(page) {
 
 function openCreateTask(preselectedNode = 'Auto') {
   state.createForm.targetNode = preselectedNode;
+  if (preselectedNode && preselectedNode !== 'Auto') {
+    state.createForm.tier = 'Tier 2 Container';
+  }
   navigate('create-task');
 }
 
@@ -897,31 +1037,11 @@ function renderOverview(container) {
   `;
 
   const ctx = document.getElementById('overviewUtilChart');
-  if (ctx && window.Chart) {
+  if (ctx) {
     const samples = state.telemetryHistory.length
       ? state.telemetryHistory
       : [{ label: 'Now', vramPct, storagePct, avgRttMs: Number((state.coordStatus.avgRttMs || 0).toFixed(1)) }];
-    const chart = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: samples.map(s => s.label),
-        datasets: [
-          { label: 'VRAM %', data: samples.map(s => s.vramPct), borderColor: '#8B5CF6', backgroundColor: 'rgba(139,92,246,0.08)', fill: true, tension: 0.3, borderWidth: 2, pointRadius: 2.5 },
-          { label: 'Storage %', data: samples.map(s => s.storagePct), borderColor: '#0EA5E9', backgroundColor: 'transparent', fill: false, tension: 0.3, borderWidth: 2, pointRadius: 2.5 },
-          { label: 'Avg RTT (ms)', data: samples.map(s => s.avgRttMs), borderColor: '#10B981', backgroundColor: 'transparent', fill: false, tension: 0.3, borderWidth: 2, borderDash: [4, 4], pointRadius: 2 },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { grid: { display: false }, ticks: { color: '#64748B', font: { size: 11 } } },
-          y: { min: 0, grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', font: { size: 11 } } },
-        },
-      },
-    });
-    activeCharts.push(chart);
+    drawOverviewChart(ctx, samples);
   }
 }
 
@@ -1660,10 +1780,15 @@ function renderCreateTask(container) {
           </div>
           <div>
             <label class="block font-semibold text-slate-700 mb-1.5">Target Node</label>
-            <select id="ctTargetNode" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
-              <option value="Auto" ${f.targetNode === 'Auto' ? 'selected' : ''}>Auto (local)</option>
-              ${state.nodes.map(n => `<option value="${escapeHtml(n.id)}" ${f.targetNode === n.id ? 'selected' : ''}>${escapeHtml(n.id)}</option>`).join('')}
+            <select id="ctTargetNode" ${isContainer ? '' : 'disabled'} class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
+              ${isContainer ? `
+                <option value="Auto" ${f.targetNode === 'Auto' ? 'selected' : ''}>Auto (local)</option>
+                ${state.nodes.map(n => `<option value="${escapeHtml(n.id)}" ${f.targetNode === n.id ? 'selected' : ''}>${escapeHtml(n.id)}</option>`).join('')}
+              ` : `
+                <option value="Auto" selected>Local Node Only (${escapeHtml(state.localNodeId)})</option>
+              `}
             </select>
+            ${!isContainer ? '<p class="text-[11px] text-slate-500 mt-1">Tier 3 GPU capsules execute locally on this node.</p>' : ''}
           </div>
         </div>
 
@@ -1884,7 +2009,7 @@ async function viewBlobAction(blobId) {
             ${isValid ? 'SHA-256 Valid' : 'Checksum Invalid'}
           </span>
         </div>
-        <div class="text-slate-500">Size: ${escapeHtml(res.size_bytes ?? res.size ?? 0)} bytes</div>
+        <div class="text-slate-500">Size: ${escapeHtml(res.size_bytes ?? res.size ?? 0)} bytes${res.truncated ? ' (preview truncated at 512 KiB)' : ''}</div>
         <pre class="p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-slate-800 max-h-72 overflow-auto whitespace-pre-wrap break-words">${escapeHtml(res.content || '')}</pre>
       </div>
     `);
@@ -2068,30 +2193,8 @@ function renderSettings(container) {
             <label class="block font-semibold text-slate-700 mb-1.5">Cluster Auth Token (write-only; never echoed)</label>
             <div class="flex gap-2">
               <input id="setAuthToken" type="password" value="${escapeHtml(d.authToken)}" placeholder="${cs.authTokenSet ? 'Token configured (enter new token to replace)' : 'Enter UNICOMPUTE_AUTH_TOKEN...'}" class="flex-1 px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+              <button type="button" data-action="save-settings" class="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Save Token</button>
               <button type="button" data-action="clear-auth-token" class="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold">Clear Token</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-4 text-xs">
-        <div class="flex items-center justify-between border-b border-slate-100 pb-4">
-          <div>
-            <h2 class="text-base font-bold text-slate-900">Relay &amp; Join Settings</h2>
-            <p class="text-slate-500 mt-0.5">Persisted on GUI server via <code class="font-mono-code">POST /api/coordinator/settings</code></p>
-          </div>
-          <button type="button" data-action="save-settings" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Save Settings</button>
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label class="block font-semibold text-slate-700 mb-1.5">Relay Threshold (0.5 – 5.0 s)</label>
-            <input id="setRelayThreshold" type="number" step="0.1" min="0.5" max="5.0" value="${d.relayThreshold}" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
-          </div>
-          <div>
-            <label class="block font-semibold text-slate-700 mb-1.5">Join Token</label>
-            <div class="flex gap-2">
-              <input id="setJoinToken" value="${escapeHtml(d.joinToken)}" class="flex-1 px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
-              <button type="button" data-action="rotate-join-token" class="px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 font-semibold text-slate-700">Rotate</button>
             </div>
           </div>
         </div>
@@ -2128,13 +2231,7 @@ async function connectCoordinatorAction() {
 }
 
 async function saveSettings(extra = {}) {
-  const payload = {
-    relay_threshold: Number(state.settingsDraft.relayThreshold),
-    ...extra,
-  };
-  if (state.settingsDraft.joinToken && !extra.rotate_token) {
-    payload.join_token = state.settingsDraft.joinToken.trim();
-  }
+  const payload = { ...extra };
   if (state.settingsDraft.authToken && state.settingsDraft.authToken.trim() !== '' && !extra.clear_auth_token) {
     payload.auth_token = state.settingsDraft.authToken.trim();
   }
@@ -2144,11 +2241,10 @@ async function saveSettings(extra = {}) {
       body: JSON.stringify(payload),
     });
     state.settingsDraft.authToken = '';
-    if (res.join_token) state.settingsDraft.joinToken = res.join_token;
     if (res.reconnect_error) {
       showToast(`Settings saved; reconnect note: ${res.reconnect_error}`, 'warning');
     } else {
-      showToast(`Settings saved (relay_threshold=${res.relay_threshold}s)`);
+      showToast(`Cluster auth token ${res.auth_token_set ? 'saved' : 'cleared'}`);
     }
     await syncBackend();
   } catch (err) {
@@ -2188,7 +2284,6 @@ document.addEventListener('click', (e) => {
 
   if (action === 'close-mobile-nav') toggleMobileNav(false);
   else if (action === 'open-mobile-nav') toggleMobileNav(true);
-  else if (action === 'copy-join-code') copyText(state.coordStatus.joinToken || 'UC-LOCAL', `Join code ${state.coordStatus.joinToken || 'UC-LOCAL'} copied`);
   else if (action === 'open-create-task') openCreateTask('Auto');
   else if (action === 'goto-settings') navigate('settings');
   else if (action === 'close-modal') {
@@ -2224,7 +2319,6 @@ document.addEventListener('click', (e) => {
   else if (action === 'clear-logs') { state.logs = []; updateLogsTableOnly(); }
   else if (action === 'connect-coordinator') connectCoordinatorAction();
   else if (action === 'save-settings') saveSettings();
-  else if (action === 'rotate-join-token') saveSettings({ rotate_token: true });
   else if (action === 'clear-auth-token') saveSettings({ clear_auth_token: true });
 });
 
@@ -2260,8 +2354,6 @@ document.addEventListener('input', (e) => {
   else if (el.id === 'ctGpuSource') state.createForm.gpuSourceCode = el.value;
   else if (el.id === 'setCoordUrl') state.settingsDraft.coordinatorURL = el.value;
   else if (el.id === 'setAuthToken') state.settingsDraft.authToken = el.value;
-  else if (el.id === 'setRelayThreshold') state.settingsDraft.relayThreshold = Number(el.value);
-  else if (el.id === 'setJoinToken') state.settingsDraft.joinToken = el.value;
 });
 
 document.addEventListener('change', (e) => {
@@ -2299,7 +2391,13 @@ document.addEventListener('change', (e) => {
   } else if (el.id === 'sbLanguage') state.sandbox.language = el.value;
   else if (el.id === 'sbTargetPeer') state.sandbox.targetPeer = el.value;
   else if (el.id === 'shellTargetPeer') state.sandbox.shellPeer = el.value;
-  else if (el.id === 'ctTier') { state.createForm.tier = el.value; renderCurrentPageOnly(); }
+  else if (el.id === 'ctTier') {
+    state.createForm.tier = el.value;
+    if (el.value !== 'Tier 2 Container') {
+      state.createForm.targetNode = 'Auto';
+    }
+    renderCurrentPageOnly();
+  }
   else if (el.id === 'ctTargetNode') state.createForm.targetNode = el.value;
   else if (el.id === 'ctLang') state.createForm.language = el.value;
   else if (el.id === 'ctGpuType') state.createForm.gpuTaskType = el.value;
@@ -2325,6 +2423,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('DOMContentLoaded', () => {
+  renderIcons(document);
   navigate('overview');
   syncBackend();
   loadSamplesFromBackend();

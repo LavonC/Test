@@ -341,7 +341,7 @@ try {
 
         # 4.6 GPU Sandboxed Run API
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $runResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/run" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ task_type = "gemm"; batches = 10 } | ConvertTo-Json)
+        $runResp = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/api/gpu/run" -Method Post -ContentType "application/json" -Headers $authHeaders -Body (@{ task_type = "training"; batches = 10 } | ConvertTo-Json)
         $sw.Stop()
         $passed = ($runResp.status -eq "completed") -and ($runResp.processed_batches -eq 10)
         Record-Result -Category "GUI API" -TestName "/api/gpu/run" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Batches=10, Time=$($runResp.execution_ms)ms"

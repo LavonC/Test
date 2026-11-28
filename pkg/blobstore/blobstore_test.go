@@ -577,3 +577,125 @@ func TestBlobStore_ShardedLayoutAndLegacyFlatReload(t *testing.T) {
 		t.Fatalf("expected legacy flat blob to be deleted")
 	}
 }
+
+func TestBlobStore_SweepsOrphanedTempFilesOnStartup(t *testing.T) {
+	root := t.TempDir()
+	tmpDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll tmp failed: %v", err)
+	}
+	orphan1 := filepath.Join(tmpDir, "upload-crash-12345")
+	if err := os.WriteFile(orphan1, []byte("partial crash data"), 0644); err != nil {
+		t.Fatalf("WriteFile orphan1 failed: %v", err)
+	}
+	orphanSub := filepath.Join(tmpDir, "nested-crash")
+	if err := os.MkdirAll(orphanSub, 0755); err != nil {
+		t.Fatalf("MkdirAll nested failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanSub, "chunk"), []byte("stale"), 0644); err != nil {
+		t.Fatalf("WriteFile nested failed: %v", err)
+	}
+
+	store, err := NewDiskBlobStore(Config{
+		RootDir:    root,
+		QuotaBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewDiskBlobStore failed: %v", err)
+	}
+	defer store.Close()
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir tmpDir failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected NewDiskBlobStore to sweep all crash-orphaned temp entries, found %d", len(entries))
+	}
+}
+
+type blockingChunkReader struct {
+	data    []byte
+	offset  int
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingChunkReader) Read(p []byte) (int, error) {
+	if r.offset == 0 && len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.offset += n
+		return n, nil
+	}
+	r.once.Do(func() {
+		close(r.started)
+	})
+	<-r.release
+	return 0, io.EOF
+}
+
+func TestBlobStore_ConcurrentStagingBoundedByQuota(t *testing.T) {
+	root := t.TempDir()
+	const quota int64 = 1024
+	store, err := NewDiskBlobStore(Config{
+		RootDir:    root,
+		QuotaBytes: quota,
+	})
+	if err != nil {
+		t.Fatalf("NewDiskBlobStore failed: %v", err)
+	}
+	defer store.Close()
+
+	// Goroutine 1 stages 700 bytes and pauses mid-stream before committing
+	r1 := &blockingChunkReader{
+		data:    bytes.Repeat([]byte("A"), 700),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	put1ErrCh := make(chan error, 1)
+	go func() {
+		_, err := store.Put("staged-blob-1", r1)
+		put1ErrCh <- err
+	}()
+
+	<-r1.started
+
+	// Concurrent Put of 600 bytes (700 + 600 = 1300 > 1024) must fail immediately due to reservedBytes
+	_, err2 := store.Put("staged-blob-2", bytes.NewReader(bytes.Repeat([]byte("B"), 600)))
+	if !errors.Is(err2, ErrQuotaExceeded) {
+		close(r1.release)
+		t.Fatalf("expected concurrent Put exceeding remaining reserved quota to fail with ErrQuotaExceeded, got: %v", err2)
+	}
+
+	// Verify tmp/ never holds more than quota
+	var tmpBytes int64
+	entries, _ := os.ReadDir(filepath.Join(root, "tmp"))
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil {
+			tmpBytes += info.Size()
+		}
+	}
+	if tmpBytes > quota {
+		close(r1.release)
+		t.Fatalf("tmp/ staged bytes %d exceeded quota %d", tmpBytes, quota)
+	}
+
+	// Release Put 1 so it commits cleanly
+	close(r1.release)
+	if err1 := <-put1ErrCh; err1 != nil {
+		t.Fatalf("first Put failed: %v", err1)
+	}
+
+	store.mu.RLock()
+	reservedAfter := store.reservedBytes
+	store.mu.RUnlock()
+	if reservedAfter != 0 {
+		t.Fatalf("expected reservedBytes == 0 after Put completion, got %d", reservedAfter)
+	}
+
+	// Now 324 bytes remain; a 300-byte Put must succeed
+	if _, err := store.Put("staged-blob-3", bytes.NewReader(bytes.Repeat([]byte("C"), 300))); err != nil {
+		t.Fatalf("expected 300-byte Put within remaining quota to succeed, got: %v", err)
+	}
+}

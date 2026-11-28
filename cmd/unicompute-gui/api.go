@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -61,15 +60,18 @@ type ServerState struct {
 	pendingPings   map[string]chan time.Duration
 	pingMu         sync.Mutex
 	httpClient     *http.Client
-	localShellExec *remoteshell.SystemExecutor
-	coordCacheMu   sync.Mutex
-	coordCache     coordProbeCache
-	startTime      time.Time
-	relayThreshold float64
-	joinToken      string
-	allowRemoteGUI bool
-	tasksMu        sync.RWMutex
-	tasks          []ClusterTask
+	localShellExec      *remoteshell.SystemExecutor
+	coordCacheMu        sync.Mutex
+	coordCache          coordProbeCache
+	fleetCacheMu        sync.Mutex
+	fleetCacheAt        time.Time
+	fleetCacheNodes     []string
+	fleetCacheCoordURL  string
+	fleetCacheAuthToken string
+	startTime           time.Time
+	allowRemoteGUI      bool
+	tasksMu             sync.RWMutex
+	tasks               []ClusterTask
 }
 
 // ClusterTask represents a DAG / ClassAd scheduled cluster task.
@@ -177,10 +179,6 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 	tokenBytes := make([]byte, 32)
 	_, _ = rand.Read(tokenBytes)
 
-	joinBytes := make([]byte, 4)
-	_, _ = rand.Read(joinBytes)
-	initJoinToken := fmt.Sprintf("UC-%04X-%04X", binary.BigEndian.Uint16(joinBytes[0:2]), binary.BigEndian.Uint16(joinBytes[2:4]))
-
 	s := &ServerState{
 		node:           n,
 		nodeConfig:     nCfg,
@@ -189,8 +187,6 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 		coordinatorURL: nCfg.SignalingURL,
 		sessionToken:   hex.EncodeToString(tokenBytes),
 		startTime:      time.Now(),
-		relayThreshold: 2.0,
-		joinToken:      initJoinToken,
 		wsClients:      make(map[*wsClient]bool),
 		eventLog:       make([]EventMessage, 0, 100),
 		pendingPings:   make(map[string]chan time.Duration),
@@ -207,10 +203,12 @@ func NewServerState(n *node.Node, nCfg node.NodeConfig, gpuEnabled bool, gCfg gp
 
 	// Register event hooks from node
 	n.SetOnFleetPeerJoined(func(peerID string) {
+		s.invalidateFleetCache()
 		s.Broadcast("fleet_peer_joined", peerID, fmt.Sprintf("Peer '%s' registered with coordinator", peerID), nil)
 	})
 
 	n.SetOnFleetPeerLeft(func(peerID string) {
+		s.invalidateFleetCache()
 		s.Broadcast("fleet_peer_left", peerID, fmt.Sprintf("Peer '%s' disconnected from coordinator", peerID), nil)
 	})
 
@@ -403,10 +401,52 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+func (s *ServerState) getCachedFleetNodes(ctx context.Context) ([]string, error) {
+	s.mu.RLock()
+	coordURL := s.coordinatorURL
+	authToken := s.nodeConfig.AuthToken
+	s.mu.RUnlock()
+
+	s.fleetCacheMu.Lock()
+	defer s.fleetCacheMu.Unlock()
+
+	if !s.fleetCacheAt.IsZero() &&
+		time.Since(s.fleetCacheAt) < 3*time.Second &&
+		s.fleetCacheCoordURL == coordURL &&
+		s.fleetCacheAuthToken == authToken {
+		cp := make([]string, len(s.fleetCacheNodes))
+		copy(cp, s.fleetCacheNodes)
+		return cp, nil
+	}
+
+	nodes, err := s.node.GetFleetNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if nodes == nil {
+		nodes = []string{}
+	}
+	s.fleetCacheAt = time.Now()
+	s.fleetCacheCoordURL = coordURL
+	s.fleetCacheAuthToken = authToken
+	s.fleetCacheNodes = make([]string, len(nodes))
+	copy(s.fleetCacheNodes, nodes)
+
+	cp := make([]string, len(nodes))
+	copy(cp, nodes)
+	return cp, nil
+}
+
+func (s *ServerState) invalidateFleetCache() {
+	s.fleetCacheMu.Lock()
+	s.fleetCacheAt = time.Time{}
+	s.fleetCacheNodes = nil
+	s.fleetCacheMu.Unlock()
+}
+
 func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	coordURL := s.coordinatorURL
-	joinToken := s.joinToken
 	nodeID := s.nodeConfig.NodeID
 	poolID := s.nodeConfig.PoolID
 	s.mu.RUnlock()
@@ -417,7 +457,7 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 		natRep = &nat.NATReport{NATType: nat.NATTypeUnknown}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	fleet, _ := s.node.GetFleetNodes(ctx)
+	fleet, _ := s.getCachedFleetNodes(ctx)
 	cancel()
 	peers := s.node.GetConnectedPeers()
 
@@ -428,7 +468,6 @@ func (s *ServerState) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"node_id":          nodeID,
 		"pool_id":          poolID,
 		"coordinator_url":  coordURL,
-		"join_token":       joinToken,
 		"storage":          usage,
 		"nat":              natRep,
 		"fleet_count":      len(fleet),
@@ -474,6 +513,7 @@ func (s *ServerState) handleCoordinatorConnect(w http.ResponseWriter, r *http.Re
 	s.coordCacheMu.Lock()
 	s.coordCache = coordProbeCache{}
 	s.coordCacheMu.Unlock()
+	s.invalidateFleetCache()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -499,8 +539,6 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 	s.mu.RLock()
 	coordURL := s.coordinatorURL
 	startTime := s.startTime
-	relayThreshold := s.relayThreshold
-	joinToken := s.joinToken
 	authToken := s.nodeConfig.AuthToken
 	s.mu.RUnlock()
 
@@ -574,7 +612,7 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 			}
 			// Remote HTTP probe failed or timed out; check locally cached fleet with fast timeout
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			fleet, fErr := s.node.GetFleetNodes(ctx)
+			fleet, fErr := s.getCachedFleetNodes(ctx)
 			cancel()
 			if fErr == nil && len(fleet) > 0 {
 				fleetCount = len(fleet)
@@ -659,8 +697,6 @@ func (s *ServerState) handleCoordinatorStatus(w http.ResponseWriter, r *http.Req
 		"nat_type":            natType,
 		"fleet_count":         fleetCount,
 		"node_ids":            nodeIDs,
-		"join_token":          joinToken,
-		"relay_threshold":     relayThreshold,
 		"avg_rtt_ms":          avgRTT,
 		"direct_peers_count":  directCount,
 		"relayed_peers_count": relayedCount,
@@ -674,11 +710,8 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var body struct {
-			RelayThreshold *float64 `json:"relay_threshold"`
-			RotateToken    bool     `json:"rotate_token"`
-			JoinToken      string   `json:"join_token"`
-			AuthToken      *string  `json:"auth_token"`
-			ClearAuthToken bool     `json:"clear_auth_token"`
+			AuthToken      *string `json:"auth_token"`
+			ClearAuthToken bool    `json:"clear_auth_token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid settings payload: "+err.Error(), http.StatusBadRequest)
@@ -686,23 +719,6 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 		}
 
 		s.mu.Lock()
-		if body.RelayThreshold != nil {
-			val := *body.RelayThreshold
-			if val < 0.5 || val > 5.0 {
-				s.mu.Unlock()
-				http.Error(w, "relay_threshold must be between 0.5 and 5.0", http.StatusBadRequest)
-				return
-			}
-			s.relayThreshold = val
-			s.node.SetFallbackTimeout(time.Duration(val * float64(time.Second)))
-		}
-		if body.RotateToken {
-			u := uuid.New()
-			s.joinToken = fmt.Sprintf("UC-%02X%02X-%02X%02X", u[0], u[1], u[2], u[3])
-		} else if body.JoinToken != "" {
-			s.joinToken = strings.TrimSpace(body.JoinToken)
-		}
-
 		tokenUpdated := false
 		if body.ClearAuthToken {
 			s.nodeConfig.AuthToken = ""
@@ -714,47 +730,48 @@ func (s *ServerState) handleCoordinatorSettings(w http.ResponseWriter, r *http.R
 			s.node.SetAuthToken(tok)
 			tokenUpdated = true
 		}
-		thresh := s.relayThreshold
-		token := s.joinToken
 		coordURL := s.coordinatorURL
 		authTokenSet := s.node.HasAuthToken()
 		s.mu.Unlock()
 
 		var reconnErr error
-		if tokenUpdated && coordURL != "" {
+		if tokenUpdated {
 			s.coordCacheMu.Lock()
 			s.coordCache = coordProbeCache{}
 			s.coordCacheMu.Unlock()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			reconnErr = s.node.ReconnectSignaling(ctx, coordURL)
+			s.invalidateFleetCache()
+			if coordURL != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				reconnErr = s.node.ReconnectSignaling(ctx, coordURL)
+			}
 		}
 
 		resp := map[string]any{
-			"relay_threshold": thresh,
-			"join_token":      token,
-			"auth_token_set":  authTokenSet,
+			"auth_token_set": authTokenSet,
 		}
 		if reconnErr != nil {
 			resp["reconnect_error"] = reconnErr.Error()
 		}
 
-		s.Broadcast("coordinator_settings_updated", "", fmt.Sprintf("Relay threshold set to %.1fs", thresh), resp)
+		msg := "Coordinator settings updated"
+		if body.ClearAuthToken {
+			msg = "Cluster auth token cleared"
+		} else if body.AuthToken != nil {
+			msg = "Cluster auth token updated"
+		}
+		s.Broadcast("coordinator_settings_updated", "", msg, resp)
 
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
 	s.mu.RLock()
-	thresh := s.relayThreshold
-	token := s.joinToken
 	authTokenSet := s.node.HasAuthToken()
 	s.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"relay_threshold": thresh,
-		"join_token":      token,
-		"auth_token_set":  authTokenSet,
+		"auth_token_set": authTokenSet,
 	})
 }
 
@@ -858,7 +875,7 @@ func (s *ServerState) handleFleet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	fleet, err := s.node.GetFleetNodes(ctx)
+	fleet, err := s.getCachedFleetNodes(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": []string{}})
 		return
@@ -1053,6 +1070,12 @@ func (s *ServerState) handleGPURun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	body.TaskType = strings.ToLower(strings.TrimSpace(body.TaskType))
+	if body.TaskType != "inference" && body.TaskType != "training" {
+		http.Error(w, `task_type must be "inference" or "training"`, http.StatusBadRequest)
 		return
 	}
 
@@ -1386,9 +1409,19 @@ func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	// Read up to 512 KiB for viewer preview
-	buf := make([]byte, 512*1024)
-	n, _ := io.ReadFull(reader, buf)
+	// Read up to 512 KiB for viewer preview (+1 sentinel byte to detect truncation)
+	const maxPreviewBytes = 512 * 1024
+	buf := make([]byte, maxPreviewBytes+1)
+	n, readErr := io.ReadFull(reader, buf)
+	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("failed to read blob: %v", readErr)})
+		return
+	}
+	truncated := false
+	if n > maxPreviewBytes {
+		truncated = true
+		n = maxPreviewBytes
+	}
 	content := string(buf[:n])
 
 	verified, verifyErr := s.node.VerifyBlob(blobID)
@@ -1399,6 +1432,7 @@ func (s *ServerState) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 		"content":    content,
 		"size":       n,
 		"size_bytes": n,
+		"truncated":  truncated,
 		"verified":   isValid,
 		"valid":      isValid,
 	})
@@ -1463,6 +1497,26 @@ func (s *ServerState) handleStorageScrub(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "complete", "corrupted": corrupted})
 }
 
+func resolveSamplesDir(cwdDir, exePath string) string {
+	cwdSamples := filepath.Join(cwdDir, "samples")
+	if info, err := os.Stat(cwdSamples); err == nil && info.IsDir() {
+		return cwdSamples
+	}
+	if exePath != "" {
+		exeDir := filepath.Dir(exePath)
+		candidates := []string{
+			filepath.Join(exeDir, "..", "samples"),
+			filepath.Join(exeDir, "samples"),
+		}
+		for _, cand := range candidates {
+			if cInfo, cErr := os.Stat(cand); cErr == nil && cInfo.IsDir() {
+				return cand
+			}
+		}
+	}
+	return cwdSamples
+}
+
 func (s *ServerState) handleSamples(w http.ResponseWriter, r *http.Request) {
 	type SampleItem struct {
 		Name     string `json:"name"`
@@ -1473,8 +1527,12 @@ func (s *ServerState) handleSamples(w http.ResponseWriter, r *http.Request) {
 
 	samples := []SampleItem{}
 
+	cwd, _ := os.Getwd()
+	exePath, _ := os.Executable()
+	samplesDir := resolveSamplesDir(cwd, exePath)
+
 	// Dynamically scan samples/ directory recursively
-	_ = filepath.Walk("samples", func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(samplesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

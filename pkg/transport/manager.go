@@ -98,6 +98,7 @@ func NewManager(cfg Config, sigClient *signaling.Client, tracker *instrumentatio
 		pendingCandidates: make(map[string][]webrtc.ICECandidateInit),
 		remoteDescSet:     make(map[string]bool),
 	}
+	m.bindSignalingTURNRefresh(sigClient)
 
 	return m, nil
 }
@@ -1031,14 +1032,32 @@ func (m *Manager) Close() error {
 	return nil
 }
 
+func (m *Manager) bindSignalingTURNRefresh(sig *signaling.Client) {
+	if sig == nil {
+		return
+	}
+	sig.SetOnTURNRefresh(func(servers []protocol.TURNServerInfo) {
+		turns := make([]TURNServerConfig, 0, len(servers))
+		for _, ts := range servers {
+			turns = append(turns, TURNServerConfig{
+				URL:        ts.URL,
+				Username:   ts.Username,
+				Credential: ts.Credential,
+			})
+		}
+		m.SetDynamicTURNServers(turns)
+	})
+}
+
 // SetSignalingClient dynamically updates the signaling client instance.
 func (m *Manager) SetSignalingClient(sig *signaling.Client) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.sigClient = sig
 	if len(m.privKey) == 0 && sig != nil {
 		m.pubKey = sig.PublicKey()
 	}
+	m.mu.Unlock()
+	m.bindSignalingTURNRefresh(sig)
 }
 
 // SetDynamicTURNServers replaces coordinator-issued TURN server configurations.
@@ -1046,6 +1065,15 @@ func (m *Manager) SetDynamicTURNServers(servers []TURNServerConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dynamicTURNServers = append([]TURNServerConfig(nil), servers...)
+}
+
+// DynamicTURNServers returns a copy of coordinator-issued dynamic TURN servers.
+func (m *Manager) DynamicTURNServers() []TURNServerConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make([]TURNServerConfig, len(m.dynamicTURNServers))
+	copy(res, m.dynamicTURNServers)
+	return res
 }
 
 // SetLocalCGNAT updates whether the local node is behind RFC 6598 CGNAT.

@@ -41,7 +41,6 @@ func main() {
 	turnServer := flag.String("turn", "", "TURN server address (e.g., turn:relay.example.com:3478, comma-separated for multiple)")
 	turnUser := flag.String("turn-user", "", "TURN server username")
 	turnCred := flag.String("turn-cred", "", "TURN server credential / password")
-	relayAddr := flag.String("relay", "", "Contributor relay address (deprecated: use TURN for NAT relay fallback)")
 	runRelay := flag.Bool("run-relay", false, "Contribute relay bandwidth to the fleet (deprecated: use embedded/external TURN)")
 	enableCodeExecution := flag.Bool("enable-code-execution", false, "Enable Docker sandbox code execution on this worker")
 	codeAllowlist := flag.String("code-allowlist", "", "Comma-separated node IDs allowed to submit code jobs")
@@ -151,23 +150,19 @@ func main() {
 			defer contributorRelay.Close()
 			log.Printf("[INFO] Contributor relay running on %s\n", contributorRelay.Addr().String())
 		}
-	} else if *relayAddr != "" {
-		log.Println("[DEPRECATED] -relay is deprecated; native Pion WebRTC ICE with embedded/external TURN is preferred.")
 	}
 
 	quotaBytes := *quotaGB * 1024 * 1024 * 1024
 	n, err := node.NewNode(node.NodeConfig{
-		NodeID:            *nodeID,
-		PoolID:            *poolID,
-		StorageDir:        *storageDir,
-		StorageQuota:      quotaBytes,
-		SignalingURL:      *signalingURL,
-		AuthToken:         *authToken,
-		STUNServersV4:     stunListV4,
-		STUNServersV6:     stunListV6,
-		TURNServers:       turnConfigs,
-		RelayAddr:         *relayAddr,
-		FallbackTimeout:                 2000 * time.Millisecond,
+		NodeID:                          *nodeID,
+		PoolID:                          *poolID,
+		StorageDir:                      *storageDir,
+		StorageQuota:                    quotaBytes,
+		SignalingURL:                    *signalingURL,
+		AuthToken:                       *authToken,
+		STUNServersV4:                   stunListV4,
+		STUNServersV6:                   stunListV6,
+		TURNServers:                     turnConfigs,
 		EnableRemoteShell:               *enableRemoteShell,
 		ShellAllowlist:                  shellList,
 		AllowUnsolicitedChunks:          *allowUnsolicitedChunks,
@@ -370,7 +365,7 @@ func main() {
 				fmt.Println("  shell <peerID|all> <cmd...>    - Alias for remote command execution")
 				fmt.Println("  run <peerID> <c|cpp|python> <source-file> [stdin-file] - Run source code in a Docker sandbox")
 				fmt.Println("  gpu                            - Display GPU hardware profile & watchdog state")
-				fmt.Println("  gpu-run <c|cpp|onnx> <file>    - Run GPU workload with Win32 JobObject governance")
+				fmt.Println("  gpu-run <c|cpp|onnx> <file>    - Run local simulated GPU workload (ONNX runner / CUDA pre-flight)")
 				fmt.Println("  hipify <cuda-source-file>      - Analyze CUDA C++ source for AMD compatibility & translate")
 				fmt.Println("  quit, exit                     - Terminate the node")
 			case "peers", "users", "nodes":
@@ -887,7 +882,7 @@ func main() {
 						"input": {1.0, 2.0, 3.0, 4.0},
 					}
 				}
-				fmt.Printf("[GPU-RUN] Executing %s task %s under Win32 JobObject governance...\n", lang, req.JobID)
+				fmt.Printf("[GPU-RUN] Executing %s task %s (local simulated run)...\n", lang, req.JobID)
 				execCtx, cancelExec := context.WithTimeout(context.Background(), 60*time.Second)
 				resp, execErr := n.ExecuteGPUTask(execCtx, req)
 				cancelExec()

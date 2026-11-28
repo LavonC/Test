@@ -46,6 +46,11 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const (
+	MaxHubClients    = 1000
+	MaxHubPinnedKeys = 5000
+)
+
 // HubConfig configures a signaling Hub.
 type HubConfig struct {
 	ListenAddr     string
@@ -54,6 +59,8 @@ type HubConfig struct {
 	TURNURL        string // Optional TURN server URL (e.g. "turn:1.2.3.4:3478")
 	TURNSecret     string // Shared secret for time-limited TURN REST credentials
 	TURNTTLSeconds int64  // TURN credential TTL in seconds (default 3600)
+	MaxClients     int    // Optional client cap (default MaxHubClients = 1000)
+	MaxPinnedKeys  int    // Optional pinned key cap (default MaxHubPinnedKeys = 5000)
 }
 
 // Hub manages WebSocket signaling connections and routes messages between peers.
@@ -66,6 +73,8 @@ type Hub struct {
 	turnURL        string
 	turnSecret     string
 	turnTTLSeconds int64
+	maxClients     int
+	maxPinnedKeys  int
 	httpServer     *http.Server
 	listener       net.Listener
 	addr           string
@@ -104,6 +113,14 @@ func NewHubWithConfig(cfg HubConfig) (*Hub, error) {
 	if cfg.TURNTTLSeconds <= 0 {
 		cfg.TURNTTLSeconds = 3600
 	}
+	maxClients := cfg.MaxClients
+	if maxClients <= 0 {
+		maxClients = MaxHubClients
+	}
+	maxPinnedKeys := cfg.MaxPinnedKeys
+	if maxPinnedKeys <= 0 {
+		maxPinnedKeys = MaxHubPinnedKeys
+	}
 
 	pinned := make(map[string]string)
 	if cfg.PinnedKeysPath != "" {
@@ -116,6 +133,9 @@ func NewHubWithConfig(cfg HubConfig) (*Hub, error) {
 				}
 				for k, v := range loaded {
 					if k != "" && v != "" {
+						if len(pinned) >= maxPinnedKeys {
+							break
+						}
 						pinned[k] = strings.ToLower(v)
 					}
 				}
@@ -137,6 +157,8 @@ func NewHubWithConfig(cfg HubConfig) (*Hub, error) {
 		turnURL:        strings.TrimSpace(cfg.TURNURL),
 		turnSecret:     cfg.TURNSecret,
 		turnTTLSeconds: cfg.TURNTTLSeconds,
+		maxClients:     maxClients,
+		maxPinnedKeys:  maxPinnedKeys,
 		listener:       ln,
 		addr:           ln.Addr().String(),
 		authToken:      cfg.AuthToken,
@@ -235,6 +257,10 @@ func (h *Hub) PinPublicKey(nodeID string, pubKey ed25519.PublicKey) error {
 		return errors.New("invalid nodeID or ed25519 public key")
 	}
 	h.mu.Lock()
+	if _, exists := h.pinnedKeys[nodeID]; !exists && len(h.pinnedKeys) >= h.maxPinnedKeys {
+		h.mu.Unlock()
+		return fmt.Errorf("hub pinned keys capacity exceeded (max %d)", h.maxPinnedKeys)
+	}
 	h.pinnedKeys[nodeID] = strings.ToLower(hex.EncodeToString(pubKey))
 	shouldPersist := h.pinnedKeysPath != ""
 	h.mu.Unlock()
@@ -448,10 +474,20 @@ func (c *clientConn) readPump() {
 				c.rejectRegister(targetNodeID, "duplicate nodeID registration rejected")
 				return
 			}
+			if len(c.hub.clients) >= c.hub.maxClients {
+				c.hub.mu.Unlock()
+				c.rejectRegister(targetNodeID, "hub client capacity exceeded")
+				return
+			}
 			pinnedPub, pinned := c.hub.pinnedKeys[targetNodeID]
 			if pinned && pinnedPub != normPubKey {
 				c.hub.mu.Unlock()
 				c.rejectRegister(targetNodeID, "nodeID public key mismatch")
+				return
+			}
+			if !pinned && len(c.hub.pinnedKeys) >= c.hub.maxPinnedKeys {
+				c.hub.mu.Unlock()
+				c.rejectRegister(targetNodeID, "hub pinned keys capacity exceeded")
 				return
 			}
 			newlyPinned := !pinned
@@ -499,6 +535,7 @@ func (c *clientConn) readPump() {
 						Credential: p,
 					},
 				}
+				ackPayloadObj.TURNTTLSeconds = turnTTL
 			}
 			ackPayload, _ := json.Marshal(ackPayloadObj)
 			ackEnv := protocol.Envelope{
@@ -508,6 +545,44 @@ func (c *clientConn) readPump() {
 				Payload:  ackPayload,
 			}
 			data, _ := json.Marshal(ackEnv)
+			select {
+			case c.sendChan <- data:
+			default:
+			}
+			continue
+		}
+
+		if env.Type == protocol.MsgTURNRefresh {
+			if c.nodeID == "" {
+				continue
+			}
+			c.hub.mu.RLock()
+			turnURL := c.hub.turnURL
+			turnSecret := c.hub.turnSecret
+			turnTTL := c.hub.turnTTLSeconds
+			c.hub.mu.RUnlock()
+
+			refreshPayloadObj := protocol.TURNRefreshAckPayload{
+				TURNTTLSeconds: turnTTL,
+			}
+			if turnURL != "" && turnSecret != "" {
+				u, p := relay.GenerateRESTCredentials(c.nodeID, turnSecret, turnTTL)
+				refreshPayloadObj.TURNServers = []protocol.TURNServerInfo{
+					{
+						URL:        turnURL,
+						Username:   u,
+						Credential: p,
+					},
+				}
+			}
+			refreshPayload, _ := json.Marshal(refreshPayloadObj)
+			refreshEnv := protocol.Envelope{
+				Type:     protocol.MsgTURNRefreshAck,
+				SenderID: "coordinator",
+				TargetID: c.nodeID,
+				Payload:  refreshPayload,
+			}
+			data, _ := json.Marshal(refreshEnv)
 			select {
 			case c.sendChan <- data:
 			default:
@@ -635,21 +710,23 @@ func (c *clientConn) rejectRegister(targetNodeID, reason string) {
 
 // Client connects to the signaling hub and handles peer negotiation.
 type Client struct {
-	mu           sync.Mutex
-	writeMu      sync.Mutex // Serializes all writes to WebSocket connection
-	url          string
-	nodeID       string
-	authToken    string
-	privKey      ed25519.PrivateKey
-	pubKey       ed25519.PublicKey
-	peerKeys     map[string]string // nodeID -> hex-encoded ed25519 public key
-	turnServers  []protocol.TURNServerInfo
-	conn         *websocket.Conn
-	handler      func(protocol.Envelope)
-	reconnectCtx context.Context
-	cancel       context.CancelFunc
-	sendQueue    chan []byte
-	closed       bool
+	mu            sync.Mutex
+	writeMu       sync.Mutex // Serializes all writes to WebSocket connection
+	url           string
+	nodeID        string
+	authToken     string
+	privKey       ed25519.PrivateKey
+	pubKey        ed25519.PublicKey
+	peerKeys      map[string]string // nodeID -> hex-encoded ed25519 public key
+	turnServers   []protocol.TURNServerInfo
+	onTURNRefresh func([]protocol.TURNServerInfo)
+	turnRefreshCh chan time.Duration
+	conn          *websocket.Conn
+	handler       func(protocol.Envelope)
+	reconnectCtx  context.Context
+	cancel        context.CancelFunc
+	sendQueue     chan []byte
+	closed        bool
 }
 
 // NewClient initializes a signaling client with an ephemeral ed25519 keypair, auto-reconnection, and keepalive.
@@ -691,15 +768,16 @@ func newClientWithKey(wsURL string, nodeID string, privKey ed25519.PrivateKey, h
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
-		url:          wsURL,
-		nodeID:       nodeID,
-		privKey:      privKey,
-		pubKey:       pubKey,
-		peerKeys:     make(map[string]string),
-		handler:      handler,
-		reconnectCtx: ctx,
-		cancel:       cancel,
-		sendQueue:    make(chan []byte, 100),
+		url:           wsURL,
+		nodeID:        nodeID,
+		privKey:       privKey,
+		pubKey:        pubKey,
+		peerKeys:      make(map[string]string),
+		turnRefreshCh: make(chan time.Duration, 1),
+		handler:       handler,
+		reconnectCtx:  ctx,
+		cancel:        cancel,
+		sendQueue:     make(chan []byte, 100),
 	}
 	if len(authTokens) > 0 {
 		c.authToken = authTokens[0]
@@ -841,6 +919,31 @@ func (c *Client) readLoop() {
 	}
 }
 
+func (c *Client) scheduleTURNRefresh(ttlSeconds int64) {
+	if ttlSeconds <= 0 {
+		ttlSeconds = 3600
+	}
+	delay := time.Duration(ttlSeconds) * 750 * time.Millisecond
+	if delay < 100*time.Millisecond {
+		delay = 100 * time.Millisecond
+	}
+	select {
+	case <-c.turnRefreshCh:
+	default:
+	}
+	select {
+	case c.turnRefreshCh <- delay:
+	default:
+	}
+}
+
+// SetOnTURNRefresh sets an optional callback invoked whenever coordinator TURN credentials refresh.
+func (c *Client) SetOnTURNRefresh(fn func([]protocol.TURNServerInfo)) {
+	c.mu.Lock()
+	c.onTURNRefresh = fn
+	c.mu.Unlock()
+}
+
 func (c *Client) processIncomingMetadata(env protocol.Envelope) {
 	switch env.Type {
 	case protocol.MsgRegisterAck:
@@ -849,6 +952,24 @@ func (c *Client) processIncomingMetadata(env protocol.Envelope) {
 			c.mu.Lock()
 			c.turnServers = append([]protocol.TURNServerInfo(nil), ack.TURNServers...)
 			c.mu.Unlock()
+			if len(ack.TURNServers) > 0 {
+				c.scheduleTURNRefresh(ack.TURNTTLSeconds)
+			}
+		}
+	case protocol.MsgTURNRefreshAck:
+		var ack protocol.TURNRefreshAckPayload
+		if json.Unmarshal(env.Payload, &ack) == nil && ack.Error == "" {
+			c.mu.Lock()
+			c.turnServers = append([]protocol.TURNServerInfo(nil), ack.TURNServers...)
+			cb := c.onTURNRefresh
+			c.mu.Unlock()
+			if len(ack.TURNServers) > 0 {
+				c.scheduleTURNRefresh(ack.TURNTTLSeconds)
+			}
+			if cb != nil {
+				cp := append([]protocol.TURNServerInfo(nil), ack.TURNServers...)
+				cb(cp)
+			}
 		}
 	case protocol.MsgPeerJoined:
 		var ev protocol.PeerEventPayload
@@ -961,12 +1082,49 @@ func (c *Client) reconnect() {
 
 func (c *Client) writeLoop() {
 	pingTicker := time.NewTicker(20 * time.Second)
-	defer pingTicker.Stop()
+	var turnTimer *time.Timer
+	var turnTimerC <-chan time.Time
+	defer func() {
+		pingTicker.Stop()
+		if turnTimer != nil {
+			turnTimer.Stop()
+		}
+	}()
 
 	for {
 		select {
 		case <-c.reconnectCtx.Done():
 			return
+		case delay := <-c.turnRefreshCh:
+			if turnTimer != nil {
+				turnTimer.Stop()
+			}
+			turnTimer = time.NewTimer(delay)
+			turnTimerC = turnTimer.C
+		case <-turnTimerC:
+			turnTimerC = nil
+			c.mu.Lock()
+			conn := c.conn
+			c.mu.Unlock()
+			if conn != nil {
+				reqBytes, _ := json.Marshal(protocol.Envelope{
+					Type:     protocol.MsgTURNRefresh,
+					SenderID: c.nodeID,
+					TargetID: "coordinator",
+				})
+				c.writeMu.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				err := conn.WriteMessage(websocket.TextMessage, reqBytes)
+				c.writeMu.Unlock()
+				if err != nil {
+					c.mu.Lock()
+					if !c.closed && c.conn == conn {
+						_ = c.conn.Close()
+						c.conn = nil
+					}
+					c.mu.Unlock()
+				}
+			}
 		case msg := <-c.sendQueue:
 			c.mu.Lock()
 			conn := c.conn
@@ -1055,6 +1213,22 @@ func (c *Client) URL() string {
 	return c.url
 }
 
+func newQueryHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			req.Header.Del("Authorization")
+			if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+				return fmt.Errorf("cross-host redirect refused")
+			}
+			if len(via) >= 3 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+}
+
 // QueryPeers requests the current list of online node IDs from the coordinator.
 func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 	// First attempt via HTTP /api/nodes if reachable
@@ -1071,7 +1245,7 @@ func (c *Client) QueryPeers(ctx context.Context) ([]string, error) {
 		if c.authToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.authToken)
 		}
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := newQueryHTTPClient()
 		resp, err := client.Do(req)
 		if err == nil {
 			defer resp.Body.Close()

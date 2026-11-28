@@ -3,7 +3,11 @@ package remoteshell
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -294,4 +298,61 @@ func TestEncodeResponse_FitsSCTPFrameLimit(t *testing.T) {
 	if !strings.Contains(decoded.Stdout, "[output truncated]") || !strings.Contains(decoded.Stderr, "[output truncated]") {
 		t.Fatalf("expected both stdout and stderr to be capped with truncation notice")
 	}
+}
+
+func TestSystemExecutor_ChildProcessKilledOnTimeout(t *testing.T) {
+	exec := NewSystemExecutor()
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+
+	var cmdStr string
+	var shellType ShellType
+	if runtime.GOOS == "windows" {
+		shellType = ShellPowerShell
+		// Spawn a long-lived child process, record its PID, and block until timeout
+		escaped := strings.ReplaceAll(pidFile, `'`, `''`)
+		cmdStr = fmt.Sprintf(
+			"$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','ping -n 30 127.0.0.1 >nul' -PassThru -NoNewWindow; [System.IO.File]::WriteAllText('%s', [string]$p.Id); Start-Sleep -Seconds 30",
+			escaped,
+		)
+	} else {
+		shellType = ShellSh
+		cmdStr = fmt.Sprintf("sleep 30 & echo $! > %q; wait", pidFile)
+	}
+
+	req := ShellRequest{
+		ExecID:    "test-orphan-kill",
+		Command:   cmdStr,
+		ShellType: shellType,
+		TimeoutMs: 1200,
+	}
+
+	start := time.Now()
+	resp := exec.Execute(context.Background(), req)
+	elapsed := time.Since(start)
+
+	if !strings.Contains(resp.Error, "timed out") {
+		t.Fatalf("expected timeout error, got exit=%d err=%q stderr=%q", resp.ExitCode, resp.Error, resp.Stderr)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Execute hung waiting on orphaned child process: elapsed=%v", elapsed)
+	}
+
+	rawPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("failed to read child PID file %s: %v", pidFile, err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil || childPID <= 0 {
+		t.Fatalf("invalid child PID %q: %v", string(rawPID), err)
+	}
+
+	// Poll briefly to allow OS process termination to complete
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isProcessAlive(childPID) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("orphaned child process PID %d survived shell timeout", childPID)
 }

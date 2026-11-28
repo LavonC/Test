@@ -7,6 +7,8 @@
 
 # 3. Set UNICOMPUTE_AUTH_TOKEN as a secret environment variable in the Render dashboard so free-tier
 #    spin-downs do not generate ephemeral tokens and lock out connected worker nodes.
+# 4. Free-tier instances use an ephemeral filesystem: TOFU pinned keys (UNICOMPUTE_PINNED_KEYS)
+#    reset on spin-down or redeploy unless backed by persistent storage (Render Persistent Disk on a paid plan).
 
 services:
   - type: web

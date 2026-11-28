@@ -4,80 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>UniCompute — Distributed Volunteer Computing Platform</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['Inter', 'system-ui', 'sans-serif'],
-            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
-          }
-        }
-      }
-    };
-  </script>
-  <style>
-    body {
-      font-family: 'Inter', system-ui, sans-serif;
-      background-color: #F8FAFC;
-      color: #0F172A;
-    }
-    .font-mono-code {
-      font-family: 'JetBrains Mono', ui-monospace, monospace;
-    }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 9999px; }
-    ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
-
-    @keyframes dashFlow {
-      to { stroke-dashoffset: -24; }
-    }
-    .flow-line {
-      stroke-dasharray: 5 5;
-      animation: dashFlow 1.6s linear infinite;
-    }
-
-    input[type="range"] {
-      -webkit-appearance: none;
-      appearance: none;
-      height: 6px;
-      border-radius: 9999px;
-      background: #E2E8F0;
-      outline: none;
-    }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 9999px;
-      background: #0F172A;
-      border: 2px solid #FFFFFF;
-      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25);
-      cursor: pointer;
-    }
-    .nav-active {
-      background-color: #0F172A;
-      color: #FFFFFF;
-    }
-    .nav-active svg {
-      color: #FFFFFF;
-    }
-    .nav-idle {
-      color: #475569;
-    }
-    .nav-idle:hover {
-      background-color: #F1F5F9;
-      color: #0F172A;
-    }
-  </style>
+  <link rel="stylesheet" href="/css/app.css" />
 </head>
 <body class="bg-[#F8FAFC] text-slate-900 antialiased overflow-x-hidden">
   <!-- Mobile Sidebar Backdrop -->
@@ -176,11 +103,6 @@
         </div>
 
         <div class="flex items-center gap-2.5 shrink-0">
-          <button type="button" data-action="copy-join-code" class="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-mono-code text-slate-700 transition-colors" title="Copy cluster join code">
-            <span class="text-slate-400">Join</span>
-            <span id="topbarJoinCode" class="font-semibold text-slate-900">UC-LOCAL</span>
-            <i data-lucide="copy" class="w-3.5 h-3.5 text-slate-400"></i>
-          </button>
           <button type="button" data-action="open-create-task" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors">
             <i data-lucide="plus" class="w-3.5 h-3.5"></i>
             <span>New Task</span>

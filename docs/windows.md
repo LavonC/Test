@@ -54,7 +54,7 @@ This guide provides end-to-end instructions for installing prerequisites, buildi
 UniCompute integrates distributed volunteer compute, storage, and cross-platform hardware acceleration across three primary objectives:
 - **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, standalone/legacy relay primitives (`pkg/relay`), WebRTC SCTP multiplexing (`stream` and `chunk`, DTLS 1.2 via `pion/dtls/v2`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
 - **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 256m`, `--cpus 1.0`, `--read-only`, `--ipc=none`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
-- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (DirectX 12 / DirectML, CUDA, DXGI, NVML), 50 ms battery/activity watchdog preemption, Win32 JobObject memory limits, regex-based CUDA-to-AMD HIPIFY compatibility analysis & symbol translation, and pure-Go simulated ONNX training checkpoint persistence (`Simulated: true`).
+- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (DirectX 12 / DirectML, CUDA, DXGI, NVML), 50 ms battery/activity watchdog preemption, Win32 JobObject memory/priority limits for external child PIDs assigned via `JobObjectSandbox.AssignProcess`, regex-based CUDA-to-AMD HIPIFY compatibility analysis & symbol translation, and pure-Go simulated ONNX training checkpoint persistence (`Simulated: true`).
 - **Desktop Workstation GUI**: A standalone desktop web app (`cmd/unicompute-gui`) featuring a responsive Tailwind sidebar control room across Coordinator (Overview, Network Topology SVG mesh, CPU Sandbox & Shell, GPU Compute, Task Queue, Storage & Blobs), Worker (Worker Allowlist, Nodes), and System (Logs, Settings, Architecture) views.
 
 The project compiles into the following binaries in the `bin/` directory:
@@ -302,7 +302,7 @@ powershell -ExecutionPolicy Bypass -File .\test_all.ps1
    - **`pkg/gpu/hipify`**: Regex-based pre-flight compatibility analysis, 32-thread warp blocker detection, and CUDA-to-HIP symbol translation.
    - **`pkg/gpu/onnx`**: Pure-Go simulated ONNX runner (`Simulated: true`), checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
    - **`pkg/gpu/watchdog`**: 50 ms battery/user-activity preemption and sustained-idle resume state transitions.
-   - **`pkg/instrumentation`**: Prometheus metrics counters and histograms.
+   - **`pkg/instrumentation`**: In-memory `Tracker` collecting per-peer `PathMetrics` (direct vs relayed pair types, RTT, bytes sent/received) and `FleetNATStats` CGNAT prevalence aggregation.
    - **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, and Hyper-V/WSL adapter pruning.
    - **`pkg/relay`**: Standalone/legacy Syncthing relay-v1 end-to-end byte proxying and embedded TURN server lifecycle.
    - **`pkg/remoteshell`**: Windows PowerShell command execution, concurrency limits, SCTP wire-frame truncation, and timeout enforcement.
@@ -675,8 +675,8 @@ Objective 3 adds hardware acceleration discovery and background student governan
     * Line 9: NVIDIA 32-thread warp synchronous intrinsic does not map to AMD 64-thread wavefronts.
    ```
 
-3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes workloads governed by Win32 JobObject memory ceilings and `IDLE_PRIORITY_CLASS`.
-   *(Note: The pure-Go ONNX runner is an educational simulation/mock labeled `Simulated: true` that validates checkpoint serialization, preemption loops, and SHA-256 state hashing without requiring external CGO/ONNX Runtime C-bindings).*
+3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes local simulated GPU workloads (`Simulated: true`) using the pure-Go ONNX runner and CUDA pre-flight analyzer.
+   *(Note: The pure-Go ONNX runner executes in-process and is explicitly labeled `Simulated: true` to validate checkpoint serialization, preemption loops, and SHA-256 state hashing without external CGO/ONNX Runtime C-bindings. Win32 `JobObjectSandbox` applies to external child PIDs assigned via `AssignProcess`, as verified in `cmd/verify-obj3`.)*
 
 ---
 
@@ -783,7 +783,7 @@ Status: Calculation completed successfully.
 ---
 
 ### 9.2 C++ High-Precision Computation (`fib.cpp`)
-Compiles with GCC 14 (`g++ -std=c++17 -O2 -pipe`) and computes the first 45 Fibonacci numbers and Golden Ratio convergence.
+Compiles with GCC 14 (`g++ -std=c++17 -O1 -pipe`) and computes the first 45 Fibonacci numbers and Golden Ratio convergence.
 
 #### Creation Command:
 ```powershell
@@ -871,7 +871,7 @@ Status: C++ computation completed successfully.
 ---
 
 ### 9.3 C ISO C17 Runtime Benchmark (`hello.c`)
-Compiles with GCC 14 (`gcc -std=c17 -O2 -pipe`) and calculates 32-bit FNV-1a cryptographic hashes of UniCompute system strings.
+Compiles with GCC 14 (`gcc -std=c17 -O1 -pipe`) and calculates 32-bit FNV-1a cryptographic hashes of UniCompute system strings.
 
 #### Creation Command:
 ```powershell
@@ -1352,15 +1352,15 @@ The GUI organizes Coordinator, Worker, and System controls in a left navigation 
 
 | Section | View | Primary Capabilities |
 |---|---|---|
-| **Coordinator** | **Overview** | Cluster status pill, join code, node/NAT telemetry, storage usage, and quick task creation. |
+| **Coordinator** | **Overview** | Cluster status pill, node/NAT telemetry, storage usage, and quick task creation. |
 | **Coordinator** | **Network Topology** | Interactive SVG P2P mesh showing the coordinator, local workstation, connected WebRTC peers, and live RTT/ping controls. |
 | **Coordinator** | **CPU Sandbox & Shell** | Multi-language editor (Python, C, C++), recursive sample loader, stdin stream injection, execution timeout slider, target peer selection (`Local Worker` default), and remote shell console. |
-| **Coordinator** | **GPU Compute** | Live DXGI/DirectML hardware telemetry, 50 ms AC power/idle watchdog radar, CUDA-to-AMD HIPIFY analyzer/translator (`hipify-clang` + built-in fallback), and pure-Go Simulated ONNX Runner (`simulated: true`, bounded by Win32 JobObject). |
+| **Coordinator** | **GPU Compute** | Live DXGI/DirectML hardware telemetry, 50 ms AC power/idle watchdog radar, CUDA-to-AMD HIPIFY analyzer/translator (`hipify-clang` + built-in fallback), and pure-Go Simulated ONNX Runner (`simulated: true`). |
 | **Coordinator** | **Task Queue** | Dynamic task queue tracking CPU and GPU jobs across the fleet (initialized empty with 0 fake seed tasks). |
 | **Coordinator** | **Storage & Blobs** | Content-addressed storage vault (`local-vault-cas-blobs`), SHA-256 verification modal, blob deletion, and Bit-Rot Integrity Scrub audit. |
 | **Worker** | **Worker Allowlist** | Live management of `code_allowlist` peer IDs and wildcard `*` permissions. |
 | **Worker** | **Nodes** | Fleet peer discovery, P2P connect/disconnect controls, and path telemetry. |
-| **System** | **Logs / Settings / Architecture** | Real-time `/api/events` WebSocket log feed, coordinator URL / `UNICOMPUTE_AUTH_TOKEN` / relay settings, and Objective 1–3 architecture summary. |
+| **System** | **Logs / Settings / Architecture** | Real-time `/api/events` WebSocket log feed, coordinator URL / `UNICOMPUTE_AUTH_TOKEN` settings, and Objective 1–3 architecture summary. |
 
 ---
 

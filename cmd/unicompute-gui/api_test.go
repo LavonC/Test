@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,12 +35,11 @@ func setupTestServer(t *testing.T, coordinatorURL string) (*ServerState, *http.S
 	_ = os.MkdirAll(storageDir, 0755)
 
 	nCfg := node.NodeConfig{
-		NodeID:          "test-gui-node",
-		PoolID:          "test-pool",
-		StorageDir:      storageDir,
-		StorageQuota:    10 * 1024 * 1024,
-		SignalingURL:    coordinatorURL,
-		FallbackTimeout: 2 * time.Second,
+		NodeID:       "test-gui-node",
+		PoolID:       "test-pool",
+		StorageDir:   storageDir,
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: coordinatorURL,
 	}
 
 	n, err := node.NewNode(nCfg)
@@ -194,7 +197,7 @@ func TestCoordinatorStatus_UnreachableCoordinatorFallback(t *testing.T) {
 	}
 }
 
-func TestCoordinatorSettings_ValidationAndRotation(t *testing.T) {
+func TestCoordinatorSettings_ValidationAndAuthToken(t *testing.T) {
 	s, mux, cleanup := setupTestServer(t, "ws://127.0.0.1:8080/ws")
 	defer cleanup()
 
@@ -211,51 +214,17 @@ func TestCoordinatorSettings_ValidationAndRotation(t *testing.T) {
 
 	var getRes map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &getRes)
-	if getRes["relay_threshold"] != 2.0 {
-		t.Errorf("expected default relay_threshold 2.0, got %v", getRes["relay_threshold"])
+	if getRes["auth_token_set"] != false {
+		t.Errorf("expected default auth_token_set false, got %v", getRes["auth_token_set"])
+	}
+	if _, hasRelay := getRes["relay_threshold"]; hasRelay {
+		t.Errorf("unexpected dead relay_threshold field in /api/coordinator/settings: %v", getRes)
+	}
+	if _, hasJoin := getRes["join_token"]; hasJoin {
+		t.Errorf("unexpected dead join_token field in /api/coordinator/settings: %v", getRes)
 	}
 
-	// 2. POST valid relay_threshold update
-	postBody := `{"relay_threshold": 3.5}`
-	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(postBody))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST valid threshold expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var postRes map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &postRes)
-	if postRes["relay_threshold"] != 3.5 {
-		t.Errorf("expected updated relay_threshold 3.5, got %v", postRes["relay_threshold"])
-	}
-	if s.node.FallbackTimeout() != 3500*time.Millisecond {
-		t.Errorf("expected node FallbackTimeout to be 3.5s, got %v", s.node.FallbackTimeout())
-	}
-
-	// 3. POST threshold below bounds (< 0.5s) -> 400 Bad Request
-	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{"relay_threshold": 0.2}`))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for threshold < 0.5, got %d", rec.Code)
-	}
-
-	// 4. POST threshold above bounds (> 5.0s) -> 400 Bad Request
-	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{"relay_threshold": 5.5}`))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 Bad Request for threshold > 5.0, got %d", rec.Code)
-	}
-
-	// 5. POST malformed JSON -> 400 Bad Request
+	// 2. POST malformed JSON -> 400 Bad Request
 	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{invalid json`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -263,22 +232,6 @@ func TestCoordinatorSettings_ValidationAndRotation(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for malformed JSON, got %d", rec.Code)
-	}
-
-	// 6. POST rotate token
-	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{"rotate_token": true}`))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on rotate_token, got %d", rec.Code)
-	}
-	var rotateRes map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &rotateRes)
-	newToken, ok := rotateRes["join_token"].(string)
-	if !ok || !strings.HasPrefix(newToken, "UC-") || len(newToken) < 11 {
-		t.Errorf("expected rotated token with UC- prefix and 11+ chars, got %v", newToken)
 	}
 }
 
@@ -381,7 +334,7 @@ func TestAPI_SecurityAuthAndOrigin(t *testing.T) {
 	}
 
 	// 3. POST with Content-Type: text/plain returns 415 Unsupported Media Type
-	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{"relay_threshold": 3.0}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/coordinator/settings", bytes.NewBufferString(`{"auth_token": "abc"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "text/plain")
 	rec = httptest.NewRecorder()
@@ -485,6 +438,34 @@ func TestStorageCAS_PutAndGet(t *testing.T) {
 	}
 	if getRes["valid"] != true {
 		t.Errorf("expected valid == true, got %v", getRes["valid"])
+	}
+	if getRes["truncated"] != false {
+		t.Errorf("expected truncated == false for small blob, got %v", getRes["truncated"])
+	}
+
+	// 3. Large blob (> 512 KiB) sets truncated: true and caps preview at 512 KiB
+	oversized := bytes.Repeat([]byte("A"), 512*1024+128)
+	hBig := sha256.Sum256(oversized)
+	bigID := hex.EncodeToString(hBig[:])
+	if _, err := s.node.PutBlob(bigID, bytes.NewReader(oversized)); err != nil {
+		t.Fatalf("PutBlob oversized failed: %v", err)
+	}
+	reqBig := httptest.NewRequest(http.MethodGet, "/api/storage/get?id="+bigID, nil)
+	reqBig.Header.Set("Authorization", "Bearer "+token)
+	recBig := httptest.NewRecorder()
+	mux.ServeHTTP(recBig, reqBig)
+	if recBig.Code != http.StatusOK {
+		t.Fatalf("GET oversized blob expected 200, got %d: %s", recBig.Code, recBig.Body.String())
+	}
+	var bigRes map[string]any
+	if err := json.Unmarshal(recBig.Body.Bytes(), &bigRes); err != nil {
+		t.Fatalf("failed to decode oversized get response: %v", err)
+	}
+	if bigRes["truncated"] != true {
+		t.Errorf("expected truncated == true for >512 KiB blob, got %v", bigRes["truncated"])
+	}
+	if bigRes["size_bytes"] != float64(512*1024) {
+		t.Errorf("expected size_bytes == %d, got %v", 512*1024, bigRes["size_bytes"])
 	}
 }
 
@@ -1320,7 +1301,23 @@ func TestGPU_HipifyAndRun(t *testing.T) {
 		t.Errorf("expected inline PTX asm(\"...\") to fail translation and flag has_inline_ptx, got %+v", ptxRes)
 	}
 
-	// 5. GPU Run for inference & training -> simulated: true + task recorded in GET /api/tasks
+	// 5. GPU Run rejects invalid task_type -> 400 Bad Request
+	for _, badType := range []string{"", "gemm", "matmul"} {
+		badBody, _ := json.Marshal(map[string]any{
+			"task_type": badType,
+			"batches":   5,
+		})
+		badReq := httptest.NewRequest(http.MethodPost, "/api/gpu/run", bytes.NewReader(badBody))
+		badReq.Header.Set("Authorization", "Bearer "+token)
+		badReq.Header.Set("Content-Type", "application/json")
+		badRec := httptest.NewRecorder()
+		mux.ServeHTTP(badRec, badReq)
+		if badRec.Code != http.StatusBadRequest {
+			t.Errorf("POST /api/gpu/run with task_type=%q expected 400, got %d: %s", badType, badRec.Code, badRec.Body.String())
+		}
+	}
+
+	// 6. GPU Run for inference & training -> simulated: true + task recorded in GET /api/tasks
 	for _, taskType := range []string{"inference", "training"} {
 		runBody, _ := json.Marshal(map[string]any{
 			"task_type": taskType,
@@ -1490,6 +1487,7 @@ func TestWebAssets_NoInlineXSSAndValidJS(t *testing.T) {
 
 	checkLocalAsset := func(rawRef string) {
 		if strings.HasPrefix(rawRef, "http://") || strings.HasPrefix(rawRef, "https://") || strings.HasPrefix(rawRef, "//") {
+			t.Errorf("external CDN/network asset %q forbidden in offline web/index.html", rawRef)
 			return
 		}
 		clean := strings.TrimPrefix(rawRef, "/")
@@ -1534,6 +1532,89 @@ func TestWebAssets_NoInlineXSSAndValidJS(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("WalkDir embeddedWebFS failed: %v", err)
+	}
+}
+
+func TestAPI_FleetNodesCacheDeduplicatesStatusAndFleet(t *testing.T) {
+	var hits atomic.Int32
+	mockCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/nodes" {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"count":1,"nodes":["peer-cached-1"]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockCoord.Close()
+
+	coordWSURL := "ws://" + mockCoord.Listener.Addr().String() + "/ws"
+	s, mux, cleanup := setupTestServer(t, coordWSURL)
+	defer cleanup()
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.node.Start(startCtx); err != nil {
+		t.Logf("node start note (expected if no ws): %v", err)
+	}
+
+	token := s.SessionToken()
+	hitsBefore := hits.Load()
+
+	// Issue /api/status followed immediately by /api/fleet
+	req1 := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req1.Header.Set("Authorization", "Bearer "+token)
+	rec1 := httptest.NewRecorder()
+	mux.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("GET /api/status expected 200, got %d", rec1.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/fleet", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET /api/fleet expected 200, got %d", rec2.Code)
+	}
+
+	if gotHits := hits.Load() - hitsBefore; gotHits != 1 {
+		t.Fatalf("expected 3s fleet cache to issue exactly 1 coordinator /api/nodes request across /api/status + /api/fleet, got %d", gotHits)
+	}
+}
+
+func TestHandleSamples_ExecutableRelativeFallback(t *testing.T) {
+	base := t.TempDir()
+
+	// 1. CWD has no samples; fallback to ../samples relative to executable
+	cwdEmpty := filepath.Join(base, "cwd-empty")
+	_ = os.MkdirAll(cwdEmpty, 0755)
+	parentSamples := filepath.Join(base, "samples")
+	_ = os.MkdirAll(parentSamples, 0755)
+	binDir := filepath.Join(base, "bin")
+	_ = os.MkdirAll(binDir, 0755)
+	exeInBin := filepath.Join(binDir, "unicompute-gui")
+
+	if got := resolveSamplesDir(cwdEmpty, exeInBin); got != parentSamples {
+		t.Fatalf("expected fallback to %q, got %q", parentSamples, got)
+	}
+
+	// 2. If ../samples does not exist, fallback to exeDir/samples
+	isolatedRoot := filepath.Join(base, "isolated")
+	exeSubDir := filepath.Join(isolatedRoot, "app")
+	exeSamples := filepath.Join(exeSubDir, "samples")
+	_ = os.MkdirAll(exeSamples, 0755)
+	exeInApp := filepath.Join(exeSubDir, "unicompute-gui")
+	if got := resolveSamplesDir(cwdEmpty, exeInApp); got != exeSamples {
+		t.Fatalf("expected fallback to %q, got %q", exeSamples, got)
+	}
+
+	// 3. CWD samples takes precedence over executable fallback
+	cwdWithSamples := filepath.Join(base, "cwd-with-samples")
+	cwdSamples := filepath.Join(cwdWithSamples, "samples")
+	_ = os.MkdirAll(cwdSamples, 0755)
+	if got := resolveSamplesDir(cwdWithSamples, exeInBin); got != cwdSamples {
+		t.Fatalf("expected CWD samples %q to win, got %q", cwdSamples, got)
 	}
 }
 

@@ -604,6 +604,11 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 		payload := data[protocol.ChunkHeaderFixedSize+idLen:]
 
 		if totalSize > MaxInFlightBytesPerPeer {
+			if flags&protocol.FlagStart != 0 {
+				go func() {
+					_ = c.SendChunkError(chunkID, fmt.Sprintf("chunk size %d exceeds max in-flight bytes %d", totalSize, MaxInFlightBytesPerPeer))
+				}()
+			}
 			return
 		}
 
@@ -620,15 +625,24 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 			}
 			if len(c.inFlight) >= MaxInFlightChunksPerPeer {
 				c.inFlightMu.Unlock()
+				go func() {
+					_ = c.SendChunkError(chunkID, "in-flight chunk count capacity exceeded")
+				}()
 				return
 			}
 			if totalSize > MaxInFlightBytesPerPeer-c.totalInFlightBytes {
 				c.inFlightMu.Unlock()
+				go func() {
+					_ = c.SendChunkError(chunkID, "in-flight byte capacity exceeded")
+				}()
 				return
 			}
 			tmpFile, err := c.createTempChunkFile()
 			if err != nil {
 				c.inFlightMu.Unlock()
+				go func() {
+					_ = c.SendChunkError(chunkID, fmt.Sprintf("failed to allocate chunk temp file: %v", err))
+				}()
 				return
 			}
 			inflight = &inFlightChunk{
@@ -659,19 +673,26 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 						c.deleteInFlightLocked(chunkID, true)
 					}
 					c.inFlightMu.Unlock()
+					go func() {
+						_ = c.SendChunkError(chunkID, "in-flight chunk capacity exceeded")
+					}()
 					return
 				}
 				inflight.totalSize = totalSize
 				c.totalInFlightBytes += totalSize
 			} else if totalSize != inflight.totalSize {
+				expectedSize := inflight.totalSize
 				if inflight.hasWaiter {
 					select {
-					case inflight.errCh <- fmt.Errorf("chunk size mismatch: expected %d, got %d", inflight.totalSize, totalSize):
+					case inflight.errCh <- fmt.Errorf("chunk size mismatch: expected %d, got %d", expectedSize, totalSize):
 					default:
 					}
 					c.deleteInFlightLocked(chunkID, true)
 				}
 				c.inFlightMu.Unlock()
+				go func() {
+					_ = c.SendChunkError(chunkID, fmt.Sprintf("chunk size mismatch: expected %d, got %d", expectedSize, totalSize))
+				}()
 				return
 			}
 			tmpFile, err := c.createTempChunkFile()
@@ -684,19 +705,28 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				}
 				c.deleteInFlightLocked(chunkID, true)
 				c.inFlightMu.Unlock()
+				go func() {
+					_ = c.SendChunkError(chunkID, err.Error())
+				}()
 				return
 			}
 			inflight.tmpFile = tmpFile
 			inflight.tmpPath = tmpFile.Name()
 		} else if totalSize != inflight.totalSize {
+			expectedSize := inflight.totalSize
 			if inflight.hasWaiter {
 				select {
-				case inflight.errCh <- fmt.Errorf("chunk size mismatch: expected %d, got %d", inflight.totalSize, totalSize):
+				case inflight.errCh <- fmt.Errorf("chunk size mismatch: expected %d, got %d", expectedSize, totalSize):
 				default:
 				}
 				c.deleteInFlightLocked(chunkID, true)
 			}
 			c.inFlightMu.Unlock()
+			if flags&protocol.FlagStart != 0 {
+				go func() {
+					_ = c.SendChunkError(chunkID, fmt.Sprintf("chunk size mismatch: expected %d, got %d", expectedSize, totalSize))
+				}()
+			}
 			return
 		}
 
@@ -706,6 +736,11 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				c.deleteInFlightLocked(chunkID, true)
 			}
 			c.inFlightMu.Unlock()
+			if flags&protocol.FlagStart != 0 {
+				go func() {
+					_ = c.SendChunkError(chunkID, "invalid chunk frame offset or length")
+				}()
+			}
 			return
 		}
 
@@ -716,6 +751,11 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 				c.deleteInFlightLocked(chunkID, true)
 			}
 			c.inFlightMu.Unlock()
+			if flags&protocol.FlagStart != 0 {
+				go func() {
+					_ = c.SendChunkError(chunkID, "unexpected initial chunk offset")
+				}()
+			}
 			return
 		}
 
@@ -844,8 +884,8 @@ func (c *PeerConnection) handleChunkMessage(data []byte) {
 // SendChunk streams chunk bytes in 60 KiB frames over the reliable SCTP DataChannel
 // and waits for receiver DataMsgChunkAck (0x13) or DataMsgChunkError (0x14).
 func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Reader, totalSize int64) error {
-	if totalSize < 0 {
-		return fmt.Errorf("invalid totalSize: %d", totalSize)
+	if totalSize < 0 || uint64(totalSize) > MaxInFlightBytesPerPeer {
+		return fmt.Errorf("invalid totalSize: %d (max %d)", totalSize, MaxInFlightBytesPerPeer)
 	}
 	idBytes := []byte(chunkID)
 	if len(idBytes) == 0 || len(idBytes) > protocol.MaxChunkIDLen {
@@ -902,6 +942,10 @@ func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Rea
 
 		for {
 			select {
+			case err := <-ackCh:
+				return err
+			case <-c.stopKeep:
+				return ErrConnectionClosed
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
@@ -929,6 +973,10 @@ func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Rea
 				// Backpressure: wait if SCTP send buffer exceeds threshold (4 MiB)
 				for dc.BufferedAmount() > 4*1024*1024 {
 					select {
+					case err := <-ackCh:
+						return err
+					case <-c.stopKeep:
+						return ErrConnectionClosed
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-time.After(5 * time.Millisecond):

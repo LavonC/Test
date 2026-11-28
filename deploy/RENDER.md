@@ -12,7 +12,7 @@ This guide outlines how to host the UniCompute Central Coordinator on [Render](h
 | **Health Checks & APIs** | **YES** | Health endpoint at `/health` and node registry at `/api/nodes`. |
 | **Direct Peer-to-Peer Data** | **YES (Unaffected)** | Data travels directly between laptops over UDP hole punching; never touches Render. |
 | **Embedded UDP TURN Relay** | **NO** | Render Web Services only route HTTP/TCP. Raw UDP port 3478 is not exposed. Set `UNICOMPUTE_TURN=false`. |
-| **Free Tier Spin-Down** | **Notice** | Free instances sleep after 15 min of inactivity. Keep warm using UptimeRobot / cron-job.org hitting `/health`. |
+| **Free Tier Spin-Down & Ephemeral Disk** | **Notice** | Free instances sleep after 15 min of inactivity and use an **ephemeral disk**; any in-memory or local-disk TOFU pinned keys (`UNICOMPUTE_PINNED_KEYS`) reset on spin-down or redeploy unless backed by persistent storage (e.g., a Render Persistent Disk on a paid plan). |
 
 ---
 
@@ -45,7 +45,7 @@ This guide outlines how to host the UniCompute Central Coordinator on [Render](h
 
 ### Method B: Render Blueprint (`render.yaml`)
 
-Because [`render.yaml`](file:///c:/Users/HP/Desktop/Noval/Projects/UniComputeOBJ1/render.yaml) is included in the root directory:
+Because [`render.yaml`](../render.yaml) is included in the root directory:
 1. Go to [Render Dashboard](https://dashboard.render.com/) $\to$ **Blueprints**.
 2. Select your repository.
 3. Render will automatically detect `render.yaml` and configure the Web Service with health check and environment variables.

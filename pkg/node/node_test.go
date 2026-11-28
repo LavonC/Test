@@ -1600,4 +1600,135 @@ func TestNode_CloseCancelsInFlightJobs(t *testing.T) {
 	}
 }
 
+func TestNode_DropsCrossPeerShellResponseSpoofing(t *testing.T) {
+	tmpDir := t.TempDir()
+	n, err := NewNode(NodeConfig{
+		NodeID:       "shell-spoof-checker",
+		PoolID:       "pool-sec",
+		StorageDir:   tmpDir,
+		StorageQuota: 10 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewNode failed: %v", err)
+	}
+	defer n.Close()
+
+	const execID = "exec-bound-1"
+	respCh := make(chan remoteshell.ShellResponse, 1)
+	n.pendingExecsMu.Lock()
+	n.pendingExecs[execID] = pendingShellResult{
+		peerID: "peer-legit",
+		ch:     respCh,
+	}
+	n.pendingExecsMu.Unlock()
+
+	spoofedWire, err := remoteshell.EncodeResponse(remoteshell.ShellResponse{
+		ExecID:   execID,
+		ExitCode: 0,
+		Stdout:   "spoofed output",
+	})
+	if err != nil {
+		t.Fatalf("EncodeResponse failed: %v", err)
+	}
+
+	if !n.handleInternalStreamMessage("peer-evil", spoofedWire) {
+		t.Fatalf("expected shell response frame to be handled")
+	}
+
+	select {
+	case got := <-respCh:
+		t.Fatalf("security violation: accepted spoofed ShellResponse from peer-evil: %+v", got)
+	default:
+	}
+
+	// Pending entry must remain intact for peer-legit
+	n.pendingExecsMu.Lock()
+	_, stillPending := n.pendingExecs[execID]
+	n.pendingExecsMu.Unlock()
+	if !stillPending {
+		t.Fatalf("expected pendingExecs[%q] to remain intact after cross-peer spoof attempt", execID)
+	}
+
+	legitWire, err := remoteshell.EncodeResponse(remoteshell.ShellResponse{
+		ExecID:   execID,
+		ExitCode: 0,
+		Stdout:   "legit output",
+	})
+	if err != nil {
+		t.Fatalf("EncodeResponse legit failed: %v", err)
+	}
+	if !n.handleInternalStreamMessage("peer-legit", legitWire) {
+		t.Fatalf("expected legit shell response frame to be handled")
+	}
+
+	select {
+	case got := <-respCh:
+		if got.Stdout != "legit output" {
+			t.Fatalf("expected legit output, got %q", got.Stdout)
+		}
+	default:
+		t.Fatalf("expected legit ShellResponse to be delivered")
+	}
+}
+
+func TestNode_TURNCredentialRefreshUpdatesTransport(t *testing.T) {
+	hub, err := signaling.NewHubWithConfig(signaling.HubConfig{
+		ListenAddr:     "127.0.0.1:0",
+		TURNURL:        "turn:198.51.100.30:3478",
+		TURNSecret:     "node-turn-refresh-secret",
+		TURNTTLSeconds: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig failed: %v", err)
+	}
+	defer hub.Close()
+
+	n, err := NewNode(NodeConfig{
+		NodeID:       "turn-refresh-node-1",
+		PoolID:       "pool-turn",
+		StorageDir:   t.TempDir(),
+		StorageQuota: 10 * 1024 * 1024,
+		SignalingURL: hub.URL(),
+	})
+	if err != nil {
+		t.Fatalf("NewNode failed: %v", err)
+	}
+	defer n.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := n.Start(ctx); err != nil {
+		t.Fatalf("Node.Start failed: %v", err)
+	}
+
+	var initUser string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		turns := n.signaling.TURNServers()
+		if len(turns) == 1 {
+			initUser = turns[0].Username
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if initUser == "" {
+		t.Fatalf("timed out waiting for initial coordinator TURN credentials")
+	}
+
+	// Wait for ~75% of 2s (= 1.5s) automatic refresh to update transport.Manager dynamicTURNServers
+	var refreshedUser string
+	refreshDeadline := time.Now().Add(3500 * time.Millisecond)
+	for time.Now().Before(refreshDeadline) {
+		dyn := n.transport.DynamicTURNServers()
+		if len(dyn) == 1 && dyn[0].Username != "" && dyn[0].Username != initUser {
+			refreshedUser = dyn[0].Username
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if refreshedUser == "" {
+		t.Fatalf("expected transport.Manager.DynamicTURNServers() to update after TURN credential refresh (initial=%q, current=%+v)", initUser, n.transport.DynamicTURNServers())
+	}
+}
+
 

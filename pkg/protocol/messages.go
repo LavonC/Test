@@ -19,6 +19,8 @@ const (
 	MsgPeerListResponse MessageType = "peer_list_resp"
 	MsgPeerJoined       MessageType = "peer_joined"
 	MsgPeerLeft         MessageType = "peer_left"
+	MsgTURNRefresh      MessageType = "turn_refresh"
+	MsgTURNRefreshAck   MessageType = "turn_refresh_ack"
 
 	// DataChannel protocol messages
 	DataMsgChunkRequest  byte = 0x10
@@ -29,11 +31,7 @@ const (
 	DataMsgStreamLog     byte = 0x20
 	DataMsgKeepalive     byte = 0x30
 
-	// Objective 3 GPU protocol messages
-	DataMsgGPUTaskRequest        byte = 0x40
-	DataMsgGPUTaskResponse       byte = 0x41
-	DataMsgGPUPreemptAlert       byte = 0x42
-	DataMsgGPUCheckpointAnnounce byte = 0x43
+	// Reserved 0x40-0x43 for future remote GPU wire protocol dispatch.
 )
 
 // Envelope wraps all WebSocket signaling control plane messages.
@@ -90,9 +88,17 @@ type RegisterPayload struct {
 
 // RegisterAckPayload is returned by the coordinator upon registration acceptance or rejection.
 type RegisterAckPayload struct {
-	NodeID      string           `json:"node_id,omitempty"`
-	TURNServers []TURNServerInfo `json:"turn_servers,omitempty"`
-	Error       string           `json:"error,omitempty"`
+	NodeID         string           `json:"node_id,omitempty"`
+	TURNServers    []TURNServerInfo `json:"turn_servers,omitempty"`
+	TURNTTLSeconds int64            `json:"turn_ttl_seconds,omitempty"`
+	Error          string           `json:"error,omitempty"`
+}
+
+// TURNRefreshAckPayload is returned by the coordinator with refreshed time-limited TURN credentials.
+type TURNRefreshAckPayload struct {
+	TURNServers    []TURNServerInfo `json:"turn_servers,omitempty"`
+	TURNTTLSeconds int64            `json:"turn_ttl_seconds,omitempty"`
+	Error          string           `json:"error,omitempty"`
 }
 
 // PeerListPayload contains a list of online nodes on the network.

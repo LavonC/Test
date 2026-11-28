@@ -57,7 +57,7 @@ This guide provides end-to-end instructions for installing prerequisites, compil
 UniCompute integrates distributed volunteer compute, storage, and cross-platform hardware acceleration across three primary objectives:
 - **Objective 1 (P2P Transport & Storage Substrate)**: Dual-stack ICE, CGNAT RFC 6598 hole punching, standalone/legacy relay primitives (`pkg/relay`), WebRTC SCTP multiplexing (`stream` and `chunk`, DTLS 1.2 via `pion/dtls/v2`), and content-addressed storage (CAS) disk vault with SHA-256 scrub auditing.
 - **Objective 2 (Isolated Compute Engine)**: Air-gapped Docker container execution (`--network none`, `--memory 256m`, `--cpus 1.0`, `--read-only`, `--ipc=none`, dropping all capabilities), remote shell execution, and language runtimes (C/C++, Python).
-- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing (CUDA, ROCm, Vulkan), 50 ms battery/activity watchdog preemption, cgroup/setrlimit memory limits, regex-based CUDA-to-AMD HIPIFY compatibility analysis & symbol translation, and pure-Go simulated ONNX training checkpoint persistence (`Simulated: true`).
+- **Objective 3 (Cross-Platform GPU Acceleration & Governance)**: Hardware probing via `nvidia-smi` / `rocm-smi` CLI, 50 ms battery/activity watchdog preemption, `nice 19` priority via `syscall.Setpriority` for assigned child PIDs (`JobObjectSandbox`), regex-based CUDA-to-AMD HIPIFY compatibility analysis & symbol translation, and pure-Go simulated ONNX training checkpoint persistence (`Simulated: true`).
 - **Desktop Workstation GUI**: A standalone desktop web app (`cmd/unicompute-gui`) featuring a responsive Tailwind sidebar control room across Coordinator (Overview, Network Topology SVG mesh, CPU Sandbox & Shell, GPU Compute, Task Queue, Storage & Blobs), Worker (Worker Allowlist, Nodes), and System (Logs, Settings, Architecture) views.
 
 The project compiles into standalone, CGO-free Linux ELF executables in the `bin/` directory:
@@ -378,11 +378,11 @@ go run ./cmd/verify-obj3
 - **`cmd/unicompute-node`**: Interactive CLI quoted argument and Windows/POSIX path parsing (`splitConsoleArgs`).
 - **`pkg/blobstore`**: Atomic filesystem commits, SHA-256 verification, quota accounting, bitrot scrub audit.
 - **`pkg/codeexec`**: Bounded code request/response framing, 12 KiB source and 4 KiB stdin ceiling checks.
-- **`pkg/gpu`**: Hardware capability discovery, ROCm/CUDA dynamic loading, temperature/VRAM monitoring.
+- **`pkg/gpu`**: Hardware capability discovery via `nvidia-smi` / `rocm-smi` CLI probing, temperature/VRAM monitoring.
 - **`pkg/gpu/hipify`**: Regex-based pre-flight compatibility analysis, 32-thread warp blocker detection, and CUDA-to-HIP symbol translation.
 - **`pkg/gpu/onnx`**: Pure-Go simulated ONNX runner (`Simulated: true`), checkpoint serialization, SHA-256 state hashing, interruptible preemption loop.
 - **`pkg/gpu/watchdog`**: 50 ms battery/user-activity preemption and sustained-idle resume state transitions.
-- **`pkg/instrumentation`**: Prometheus metrics counters and histograms.
+- **`pkg/instrumentation`**: In-memory `Tracker` collecting per-peer `PathMetrics` (direct vs relayed pair types, RTT, bytes sent/received) and `FleetNATStats` CGNAT prevalence aggregation.
 - **`pkg/nat`**: RFC 6598 CGNAT detection (`100.64.0.0/10`), dual-stack STUN probing, and virtual adapter pruning (`docker0`, `veth`).
 - **`pkg/relay`**: Standalone/legacy Syncthing relay-v1 blind end-to-end byte transfer and embedded TURN server lifecycle.
 - **`pkg/remoteshell`**: Linux shell execution (`/bin/sh`, `/bin/bash`), concurrency limits, SCTP wire-frame truncation, and timeout enforcement.
@@ -662,9 +662,9 @@ Objective 3 adds GPU hardware capability discovery, 50 ms battery/activity watch
 #### Node Flags for GPU Subsystem:
 | Flag | Default | Description |
 |---|---|---|
-| `-enable-gpu` | `false` | Enables GPU capability probing, 50 ms watchdog, and memory limits. |
+| `-enable-gpu` | `false` | Enables GPU capability probing, 50 ms watchdog, and GPU manager governance. |
 | `-gpu-backend` | `auto` | Preferred compute backend: `auto`, `cuda`, `directml`. |
-| `-gpu-mem-limit-mb` | `2048` | Process memory ceiling in MB. |
+| `-gpu-mem-limit-mb` | `2048` | Memory ceiling in MB (enforced via Win32 JobObject on Windows; Linux `JobObjectSandbox` applies `nice 19` priority via `syscall.Setpriority` for external child PIDs). |
 | `-gpu-watchdog-poll-ms` | `50` | Watchdog polling frequency in ms (battery and idle monitoring). |
 | `-gpu-ignore-battery` | `false` | Bypass battery check for AC-connected servers and desktop nodes. |
 
@@ -692,7 +692,7 @@ Objective 3 adds GPU hardware capability discovery, 50 ms battery/activity watch
    [SUCCESS] Kernel successfully translated to portable HIP C++ (7 replacements made).
    ```
 
-3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes workloads with memory and priority limits.
+3. **`gpu-run <c|cpp|onnx> <file> [batches]`**: Executes local simulated GPU workloads (`Simulated: true`).
 
 ---
 
@@ -799,7 +799,7 @@ Status: Calculation completed successfully.
 ---
 
 ### 10.2 C++ High-Precision Computation (`fib.cpp`)
-Compiles with GCC 14 (`g++ -std=c++17 -O2 -pipe`) and calculates 45 Fibonacci numbers and Golden Ratio convergence.
+Compiles with GCC 14 (`g++ -std=c++17 -O1 -pipe`) and calculates 45 Fibonacci numbers and Golden Ratio convergence.
 
 #### Creation Command:
 ```bash
@@ -886,7 +886,7 @@ Status: C++ computation completed successfully.
 ---
 
 ### 10.3 C ISO C17 Runtime Benchmark (`hello.c`)
-Compiles with GCC 14 (`gcc -std=c17 -O2 -pipe`) and calculates 32-bit FNV-1a cryptographic hashes of UniCompute system strings.
+Compiles with GCC 14 (`gcc -std=c17 -O1 -pipe`) and calculates 32-bit FNV-1a cryptographic hashes of UniCompute system strings.
 
 #### Creation Command:
 ```bash
@@ -1306,7 +1306,7 @@ Open the printed `http://127.0.0.1:23080/#token=<sessionToken>` URL (or pass `-l
 ### 12.2 Sidebar Workstation Views
 The GUI organizes Coordinator, Worker, and System controls in a left navigation sidebar:
 - **Coordinator**:
-  - **Overview**: Cluster status pill, join code, node/NAT telemetry, storage usage, and quick task launcher.
+  - **Overview**: Cluster status pill, node/NAT telemetry, storage usage, and quick task launcher.
   - **Network Topology**: Interactive SVG P2P mesh showing the coordinator, local workstation, connected WebRTC peers, and live SCTP ping/connect controls.
   - **CPU Sandbox & Shell**: Multi-language editor (`python`, `c`, `cpp`), dynamic `samples/` loader, stdin input, execution timeout slider, target peer selector (`Local Worker` or fleet peers), and remote shell runner.
   - **GPU Compute**: Hardware telemetry cards (CUDA/DirectML/ROCm), 50 ms Watchdog status, CUDA-to-AMD HIPIFY analyzer/translator (`hipify-clang` + built-in fallback), and pure-Go Simulated ONNX Runner (`simulated: true`).
@@ -1317,7 +1317,7 @@ The GUI organizes Coordinator, Worker, and System controls in a left navigation 
   - **Nodes**: Fleet peer discovery, P2P connect/disconnect controls, and path telemetry.
 - **System**:
   - **Logs**: Real-time WebSocket `/api/events` stream with filtering and clearing.
-  - **Settings**: Coordinator WebSocket URL, `UNICOMPUTE_AUTH_TOKEN`, relay fallback threshold, and join token rotation.
+  - **Settings**: Coordinator WebSocket URL and `UNICOMPUTE_AUTH_TOKEN` configuration.
   - **Architecture**: Objective 1–3 substrate overview.
 
 ### 12.3 Standalone Local Testing on Linux (1 Node)
@@ -1397,11 +1397,8 @@ sudo journalctl -u unicompute-node.service -f
 ### 2. "Connection to peer failed: context deadline exceeded"
 - **Cause**: Windows Defender Firewall or Linux iptables blocked UDP hole-punching packets, or both nodes are behind strict symmetric CGNAT without an accessible TURN relay.
 - **Fix**:
-  1. Configure an external TURN server (e.g. Coturn) or run an embedded TURN coordinator with a public UDP port.
-  2. If using the legacy contributor relay fallback:
-     `./bin/unicompute-relay -listen 0.0.0.0:22067`
-     And launch nodes pointing to the relay:
-     `./bin/unicompute-node -id node-A -relay RELAY_IP:22067 ...`
+  1. Configure an external TURN server (e.g. Coturn) via `-turn` or run an embedded TURN coordinator with a public UDP port (`-turn -public-ip <IP>`).
+  2. For standalone legacy relay testing, `./bin/unicompute-relay -listen 0.0.0.0:22067` remains available via `pkg/relay`.
 
 ### 3. "go: go.mod file indicates go 1.27.1, but maximum supported version is 1.22"
 - **Cause**: The distribution's installed Go version is older than the toolchain in `go.mod`.

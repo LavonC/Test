@@ -1790,3 +1790,193 @@ func TestPeerConnection_InFlightTTLEviction(t *testing.T) {
 		t.Fatalf("expected ErrTimeout notification on evicted entry errCh")
 	}
 }
+
+func TestSendChunk_RejectsOversizedImmediately(t *testing.T) {
+	conn := newPeerConnection("sess-oversized", "local", "remote", nil, nil)
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	oversized := int64(MaxInFlightBytesPerPeer) + 1
+	start := time.Now()
+	err := conn.SendChunk(ctx, "oversized-chunk", bytes.NewReader([]byte("x")), oversized)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected SendChunk to reject totalSize > MaxInFlightBytesPerPeer immediately")
+	}
+	if !strings.Contains(err.Error(), "invalid totalSize") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected immediate rejection, took %v", elapsed)
+	}
+}
+
+func TestHandleChunkMessage_FastErrorOnRejectedFlagStart(t *testing.T) {
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	var mgrAPtr, mgrBPtr atomic.Pointer[Manager]
+	sigA, err := signaling.NewClient(hub.URL(), "fast-err-A", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrAPtr.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("sigA failed: %v", err)
+	}
+	defer sigA.Close()
+
+	sigB, err := signaling.NewClient(hub.URL(), "fast-err-B", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mgrBPtr.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("sigB failed: %v", err)
+	}
+	defer sigB.Close()
+
+	mgrA, _ := NewManager(Config{NodeID: "fast-err-A"}, sigA, nil)
+	defer mgrA.Close()
+	mgrAPtr.Store(mgrA)
+
+	mgrB, _ := NewManager(Config{NodeID: "fast-err-B"}, sigB, nil)
+	defer mgrB.Close()
+	mgrBPtr.Store(mgrB)
+
+	connBCh := make(chan *PeerConnection, 1)
+	mgrB.SetOnNewConnection(func(pc *PeerConnection) {
+		connBCh <- pc
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	connA, err := mgrA.ConnectPeer(ctx, "fast-err-B")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+	defer connA.Close()
+
+	var connB *PeerConnection
+	select {
+	case connB = <-connBCh:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for connB")
+	}
+	defer connB.Close()
+	if err := connB.WaitConnected(ctx); err != nil {
+		t.Fatalf("connB WaitConnected failed: %v", err)
+	}
+	if err := connB.WaitChannelsReady(ctx); err != nil {
+		t.Fatalf("connB WaitChannelsReady failed: %v", err)
+	}
+
+	// 1. Full in-flight chunk count capacity on receiver -> SendChunk must fail fast via DataMsgChunkError
+	now := time.Now()
+	connB.inFlightMu.Lock()
+	for i := 0; i < MaxInFlightChunksPerPeer; i++ {
+		id := fmt.Sprintf("fill-count-%d", i)
+		connB.inFlight[id] = &inFlightChunk{
+			chunkID:      id,
+			totalSize:    1024,
+			doneCh:       make(chan string, 1),
+			errCh:        make(chan error, 1),
+			createdAt:    now,
+			lastActivity: now,
+		}
+		connB.totalInFlightBytes += 1024
+	}
+	connB.inFlightMu.Unlock()
+
+	payload := []byte("should-fail-fast-count")
+	start := time.Now()
+	err = connA.SendChunk(ctx, "reject-count", bytes.NewReader(payload), int64(len(payload)))
+	if err == nil || !strings.Contains(err.Error(), "capacity exceeded") {
+		t.Fatalf("expected fast capacity exceeded error for full chunk count, got: %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("expected fast failure on full chunk count, took %v", time.Since(start))
+	}
+
+	// 2. Full in-flight byte capacity on receiver -> SendChunk must fail fast via DataMsgChunkError
+	connB.cleanupInFlight(ErrConnectionClosed)
+	connB.inFlightMu.Lock()
+	connB.inFlight["fill-bytes"] = &inFlightChunk{
+		chunkID:      "fill-bytes",
+		totalSize:    MaxInFlightBytesPerPeer,
+		doneCh:       make(chan string, 1),
+		errCh:        make(chan error, 1),
+		createdAt:    time.Now(),
+		lastActivity: time.Now(),
+	}
+	connB.totalInFlightBytes = MaxInFlightBytesPerPeer
+	connB.inFlightMu.Unlock()
+
+	start = time.Now()
+	err = connA.SendChunk(ctx, "reject-bytes", bytes.NewReader(payload), int64(len(payload)))
+	if err == nil || !strings.Contains(err.Error(), "capacity exceeded") {
+		t.Fatalf("expected fast capacity exceeded error for full byte cap, got: %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("expected fast failure on full byte cap, took %v", time.Since(start))
+	}
+
+	// 3. Size mismatch against existing waiter on receiver -> SendChunk must fail fast
+	connB.cleanupInFlight(ErrConnectionClosed)
+	connB.inFlightMu.Lock()
+	connB.inFlight["mismatch-id"] = &inFlightChunk{
+		chunkID:      "mismatch-id",
+		totalSize:    100,
+		doneCh:       make(chan string, 1),
+		errCh:        make(chan error, 1),
+		hasWaiter:    true,
+		createdAt:    time.Now(),
+		lastActivity: time.Now(),
+	}
+	connB.totalInFlightBytes = 100
+	connB.inFlightMu.Unlock()
+
+	start = time.Now()
+	err = connA.SendChunk(ctx, "mismatch-id", bytes.NewReader(payload), int64(len(payload)))
+	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("expected fast size mismatch error, got: %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("expected fast failure on size mismatch, took %v", time.Since(start))
+	}
+
+	// 4. Multi-megabyte chunk rejected on FlagStart (insufficient remaining byte headroom) must abort mid-stream
+	connB.cleanupInFlight(ErrConnectionClosed)
+	connB.inFlightMu.Lock()
+	connB.inFlight["partial-fill"] = &inFlightChunk{
+		chunkID:      "partial-fill",
+		totalSize:    MaxInFlightBytesPerPeer - 1024*1024,
+		doneCh:       make(chan string, 1),
+		errCh:        make(chan error, 1),
+		createdAt:    time.Now(),
+		lastActivity: time.Now(),
+	}
+	connB.totalInFlightBytes = MaxInFlightBytesPerPeer - 1024*1024
+	connB.inFlightMu.Unlock()
+
+	largePayload := bytes.Repeat([]byte("Z"), 8*1024*1024)
+	start = time.Now()
+	err = connA.SendChunk(ctx, "reject-large-stream", bytes.NewReader(largePayload), int64(len(largePayload)))
+	if err == nil || !strings.Contains(err.Error(), "capacity exceeded") {
+		t.Fatalf("expected fast capacity exceeded error on 8 MiB rejected chunk, got: %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("expected fast failure on 8 MiB rejected chunk, took %v", time.Since(start))
+	}
+}

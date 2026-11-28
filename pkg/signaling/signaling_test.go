@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -8,10 +9,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -901,4 +905,251 @@ func TestClient_ReconnectStopsOnUnauthorized401(t *testing.T) {
 	if attemptsAfter := attempts.Load(); attemptsAfter != attemptsBefore {
 		t.Fatalf("expected no further reconnect attempts after 401 stop, before=%d after=%d", attemptsBefore, attemptsAfter)
 	}
+}
+
+func TestSignaling_TURNCredentialRefresh(t *testing.T) {
+	const turnSecret = "refresh-turn-secret-123"
+	const turnURL = "turn:198.51.100.20:3478"
+
+	hub, err := NewHubWithConfig(HubConfig{
+		ListenAddr:     "127.0.0.1:0",
+		TURNURL:        turnURL,
+		TURNSecret:     turnSecret,
+		TURNTTLSeconds: 2, // 75% = 1.5s refresh interval
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig failed: %v", err)
+	}
+	defer hub.Close()
+
+	refreshAckCh := make(chan protocol.TURNRefreshAckPayload, 4)
+	regAckCh := make(chan struct{}, 1)
+
+	client, err := NewClient(hub.URL(), "turn-refresh-node", func(env protocol.Envelope) {
+		switch env.Type {
+		case protocol.MsgRegisterAck:
+			select {
+			case regAckCh <- struct{}{}:
+			default:
+			}
+		case protocol.MsgTURNRefreshAck:
+			var pl protocol.TURNRefreshAckPayload
+			if json.Unmarshal(env.Payload, &pl) == nil {
+				refreshAckCh <- pl
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case <-regAckCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for initial RegisterAck")
+	}
+
+	initServers := client.TURNServers()
+	if len(initServers) != 1 {
+		t.Fatalf("expected 1 initial TURN server, got %d", len(initServers))
+	}
+	initUser := initServers[0].Username
+	initExpiryStr := strings.SplitN(initUser, ":", 2)[0]
+	initExpiry, err := strconv.ParseInt(initExpiryStr, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid initial TURN username %q: %v", initUser, err)
+	}
+
+	// Wait for automatic refresh at ~75% of 2s (= 1.5s)
+	var refreshed protocol.TURNRefreshAckPayload
+	select {
+	case refreshed = <-refreshAckCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for automatic MsgTURNRefreshAck")
+	}
+
+	if len(refreshed.TURNServers) != 1 {
+		t.Fatalf("expected 1 refreshed TURN server, got %d", len(refreshed.TURNServers))
+	}
+	ts := refreshed.TURNServers[0]
+	if ts.URL != turnURL {
+		t.Errorf("expected TURN URL %q, got %q", turnURL, ts.URL)
+	}
+	mac := hmac.New(sha1.New, []byte(turnSecret))
+	mac.Write([]byte(ts.Username))
+	expectedCred := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	if ts.Credential != expectedCred {
+		t.Errorf("refreshed TURN credential mismatch: got %q, want %q", ts.Credential, expectedCred)
+	}
+
+	newExpiryStr := strings.SplitN(ts.Username, ":", 2)[0]
+	newExpiry, err := strconv.ParseInt(newExpiryStr, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid refreshed TURN username %q: %v", ts.Username, err)
+	}
+	if newExpiry <= initExpiry {
+		t.Errorf("expected refreshed expiry (%d) > initial expiry (%d)", newExpiry, initExpiry)
+	}
+
+	latest := client.TURNServers()
+	if len(latest) != 1 || latest[0].Username != ts.Username || latest[0].Credential != ts.Credential {
+		t.Errorf("expected Client.TURNServers() to update to refreshed creds %+v, got %+v", ts, latest)
+	}
+}
+
+func TestClient_QueryPeers_RedirectTokenStripping(t *testing.T) {
+	const secretToken = "query-peers-secret-token-xyz"
+
+	// 1. Cross-host redirect must be refused without hitting external host
+	var evilHit atomic.Bool
+	var evilAuth atomic.Value
+	evilSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilHit.Store(true)
+		evilAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"count":0,"nodes":[]}`))
+	}))
+	defer evilSrv.Close()
+
+	crossCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/nodes" {
+			http.Redirect(w, r, evilSrv.URL+"/steal", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer crossCoord.Close()
+
+	c1 := &Client{
+		url:       "ws://" + strings.TrimPrefix(crossCoord.URL, "http://") + "/ws",
+		nodeID:    "query-node-1",
+		authToken: secretToken,
+		sendQueue: make(chan []byte, 4),
+	}
+	_, _ = c1.QueryPeers(context.Background())
+	if evilHit.Load() {
+		t.Fatalf("security violation: cross-host redirect target was hit")
+	}
+	if v, ok := evilAuth.Load().(string); ok && v != "" {
+		t.Fatalf("security violation: Authorization leaked across cross-host redirect: %q", v)
+	}
+
+	// 2. Same-host redirect must strip Authorization header
+	var sameHostAuth atomic.Value
+	var sameHostHit atomic.Bool
+	sameCoord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/nodes":
+			http.Redirect(w, r, "/redirected-nodes", http.StatusFound)
+		case "/redirected-nodes":
+			sameHostHit.Store(true)
+			sameHostAuth.Store(r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"count":1,"nodes":["peer-redir"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer sameCoord.Close()
+
+	c2 := &Client{
+		url:       "ws://" + strings.TrimPrefix(sameCoord.URL, "http://") + "/ws",
+		nodeID:    "query-node-2",
+		authToken: secretToken,
+		sendQueue: make(chan []byte, 4),
+	}
+	nodes, err := c2.QueryPeers(context.Background())
+	if err != nil {
+		t.Fatalf("QueryPeers same-host redirect failed: %v", err)
+	}
+	if !sameHostHit.Load() {
+		t.Fatalf("expected same-host redirect target to be reached")
+	}
+	if v, _ := sameHostAuth.Load().(string); v != "" {
+		t.Fatalf("security violation: Authorization header was not stripped on same-host redirect: %q", v)
+	}
+	if len(nodes) != 1 || nodes[0] != "peer-redir" {
+		t.Fatalf("expected [peer-redir], got %v", nodes)
+	}
+}
+
+func TestHub_BoundedClientAndPinnedKeyCaps(t *testing.T) {
+	hub, err := NewHubWithConfig(HubConfig{
+		ListenAddr:    "127.0.0.1:0",
+		MaxClients:    2,
+		MaxPinnedKeys: 3,
+	})
+	if err != nil {
+		t.Fatalf("NewHubWithConfig failed: %v", err)
+	}
+	defer hub.Close()
+
+	c1, err := NewClient(hub.URL(), "cap-node-1", nil)
+	if err != nil {
+		t.Fatalf("c1 failed: %v", err)
+	}
+	c2, err := NewClient(hub.URL(), "cap-node-2", nil)
+	if err != nil {
+		t.Fatalf("c2 failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// 3rd concurrent client exceeds MaxClients=2
+	c3Ack := make(chan string, 1)
+	c3, err := NewClient(hub.URL(), "cap-node-3", func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			c3Ack <- string(env.Payload)
+		}
+	})
+	if err != nil {
+		t.Fatalf("c3 dial failed: %v", err)
+	}
+	select {
+	case pl := <-c3Ack:
+		if !strings.Contains(pl, "hub client capacity exceeded") {
+			t.Fatalf("expected client capacity exceeded error, got %s", pl)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for client capacity rejection")
+	}
+	_ = c3.Close()
+	_ = c1.Close()
+	_ = c2.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Register 3rd unique node (now pinnedKeys = 3 == MaxPinnedKeys)
+	c3b, err := NewClient(hub.URL(), "cap-node-3", nil)
+	if err != nil {
+		t.Fatalf("c3b failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_ = c3b.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// 4th unique node exceeds MaxPinnedKeys=3
+	c4Ack := make(chan string, 1)
+	c4, err := NewClient(hub.URL(), "cap-node-4", func(env protocol.Envelope) {
+		if env.Type == protocol.MsgRegisterAck {
+			c4Ack <- string(env.Payload)
+		}
+	})
+	if err != nil {
+		t.Fatalf("c4 dial failed: %v", err)
+	}
+	defer c4.Close()
+	select {
+	case pl := <-c4Ack:
+		if !strings.Contains(pl, "hub pinned keys capacity exceeded") {
+			t.Fatalf("expected pinned keys capacity exceeded error, got %s", pl)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for pinned keys capacity rejection")
+	}
+
+	pub4, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := hub.PinPublicKey("cap-node-5", pub4); err == nil {
+		t.Fatalf("expected PinPublicKey to fail when pinned keys cap reached")
+	}
+	_ = fmt.Sprintf("verified")
 }

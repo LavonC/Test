@@ -62,14 +62,15 @@ type Store interface {
 
 // DiskBlobStore implements Store backed by the local filesystem with quota accounting.
 type DiskBlobStore struct {
-	mu         sync.RWMutex
-	rootDir    string
-	tmpDir     string
-	dataDir    string
-	quotaBytes int64
-	usedBytes  int64
-	blobs      map[string]BlobInfo
-	closed     bool
+	mu            sync.RWMutex
+	rootDir       string
+	tmpDir        string
+	dataDir       string
+	quotaBytes    int64
+	usedBytes     int64
+	reservedBytes int64
+	blobs         map[string]BlobInfo
+	closed        bool
 }
 
 var validBlobIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
@@ -104,6 +105,13 @@ func NewDiskBlobStore(cfg Config) (*DiskBlobStore, error) {
 	}
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create tmp dir: %w", err)
+	}
+
+	// Sweep any crash-orphaned staging files left in tmpDir from prior unclean exits.
+	if entries, err := os.ReadDir(tmpDir); err == nil {
+		for _, entry := range entries {
+			_ = os.RemoveAll(filepath.Join(tmpDir, entry.Name()))
+		}
 	}
 
 	s := &DiskBlobStore{
@@ -212,10 +220,6 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 		s.mu.Unlock()
 		return existing.Size, nil
 	}
-	remaining := s.quotaBytes - s.usedBytes
-	if remaining < 0 {
-		remaining = 0
-	}
 	s.mu.Unlock()
 
 	// Write to temporary file first for atomic commit
@@ -224,6 +228,20 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 		return 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+
+	var myReserved int64
+	releaseReservation := func() {
+		if myReserved > 0 {
+			s.mu.Lock()
+			s.reservedBytes -= myReserved
+			if s.reservedBytes < 0 {
+				s.reservedBytes = 0
+			}
+			myReserved = 0
+			s.mu.Unlock()
+		}
+	}
+	defer releaseReservation()
 	defer func() {
 		_ = os.Remove(tmpPath)
 	}()
@@ -231,16 +249,45 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
 
-	// Stream with bounded quota monitoring: read at most remaining + 1 bytes
-	limitR := io.LimitReader(r, remaining+1)
-	written, err := io.Copy(writer, limitR)
-	if err != nil {
-		_ = tmpFile.Close()
-		return 0, fmt.Errorf("failed during write: %w", err)
-	}
-	if written > remaining {
-		_ = tmpFile.Close()
-		return 0, fmt.Errorf("%w: input exceeds available quota headroom (%d bytes)", ErrQuotaExceeded, remaining)
+	// Stream in bounded chunks, reserving staging bytes against quota headroom under s.mu
+	// so concurrent Put calls cannot spike tmp/ past available quota.
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		nr, readErr := r.Read(buf)
+		if nr > 0 {
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				_ = tmpFile.Close()
+				return 0, ErrStoreClosed
+			}
+			avail := s.quotaBytes - s.usedBytes - s.reservedBytes
+			if avail < 0 {
+				avail = 0
+			}
+			if int64(nr) > avail {
+				s.mu.Unlock()
+				_ = tmpFile.Close()
+				return 0, fmt.Errorf("%w: input exceeds available quota headroom (%d bytes)", ErrQuotaExceeded, avail)
+			}
+			s.reservedBytes += int64(nr)
+			myReserved += int64(nr)
+			s.mu.Unlock()
+
+			if _, wErr := writer.Write(buf[:nr]); wErr != nil {
+				_ = tmpFile.Close()
+				return 0, fmt.Errorf("failed during write: %w", wErr)
+			}
+			written += int64(nr)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			_ = tmpFile.Close()
+			return 0, fmt.Errorf("failed during write: %w", readErr)
+		}
 	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
@@ -254,6 +301,14 @@ func (s *DiskBlobStore) Put(id string, r io.Reader) (int64, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if myReserved > 0 {
+		s.reservedBytes -= myReserved
+		if s.reservedBytes < 0 {
+			s.reservedBytes = 0
+		}
+		myReserved = 0
+	}
 
 	if s.closed {
 		return 0, ErrStoreClosed
