@@ -61,32 +61,33 @@ function Record-Result {
 }
 
 Write-Host "`n=======================================================================" -ForegroundColor Cyan
-Write-Host " PHASE 1: SUB-SYSTEM UNIT TESTS (GO TEST SUITE)" -ForegroundColor Cyan
+Write-Host " PHASE 1: GO VET & SUB-SYSTEM UNIT TESTS (GO TEST SUITE)" -ForegroundColor Cyan
 Write-Host "=======================================================================" -ForegroundColor Cyan
 
-$pkgs = @(
-    "blobstore",
-    "codeexec",
-    "gpu",
-    "gpu/hipify",
-    "gpu/onnx",
-    "instrumentation",
-    "nat",
-    "node",
-    "relay",
-    "remoteshell",
-    "signaling",
-    "transport"
-)
+Write-Host "`n--> Running go vet ./..." -ForegroundColor Yellow
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$vetOut = go vet ./... 2>&1
+$vetExit = $LASTEXITCODE
+$sw.Stop()
+$vetDur = "$([math]::Round($sw.Elapsed.TotalSeconds, 2))s"
+if ($vetExit -eq 0) {
+    Record-Result -Category "Static Check" -TestName "go vet ./..." -Passed $true -Duration $vetDur -Details "Zero warnings"
+} else {
+    $vetDetails = ($vetOut | Select-Object -Last 5) -join " "
+    Record-Result -Category "Static Check" -TestName "go vet ./..." -Passed $false -Duration $vetDur -Details $vetDetails
+}
 
-foreach ($pkg in $pkgs) {
-    Write-Host "`n--> Testing pkg/$pkg..." -ForegroundColor Yellow
+$pkgs = @(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./pkg/... ./cmd/... | Where-Object { $_ -ne "" })
+
+foreach ($pkgImport in $pkgs) {
+    $pkg = $pkgImport -replace '^github\.com/unicompute/obj1/', ''
+    Write-Host "`n--> Testing $pkg..." -ForegroundColor Yellow
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $pkgClean = ($pkg -replace '/', '_')
-    $out = go test -v "./pkg/$pkg" 2>&1
+    $out = go test -v "./$pkg" 2>&1
     if ($LASTEXITCODE -ne 0 -and ($out -join " ") -like "*Application Control policy*") {
         $testBin = "bin/${pkgClean}.test.exe"
-        go test -c -o $testBin "./pkg/$pkg" 2>&1 | Out-Null
+        go test -c -o $testBin "./$pkg" 2>&1 | Out-Null
         if (Test-Path $testBin) {
             Sign-Binary $testBin
             try {
@@ -106,12 +107,12 @@ foreach ($pkg in $pkgs) {
     $isBlockedBySAC = ($out -join " ") -like "*Application Control policy*"
     $passed = ($LASTEXITCODE -eq 0) -and ($outText -cnotlike "*FAIL*") -and (-not $isBlockedBySAC)
     if ($isBlockedBySAC) {
-        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
+        Record-Result -Category "Unit Tests" -TestName $pkg -Passed $false -Status "BLOCKED" -Duration $dur -Details "BLOCKED (Windows Smart App Control)"
     } elseif ($passed) {
-        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $true -Duration $dur -Details "Go test passed"
+        Record-Result -Category "Unit Tests" -TestName $pkg -Passed $true -Duration $dur -Details "Go test passed"
     } else {
         $lastLines = ($out | Select-Object -Last 5) -join " "
-        Record-Result -Category "Unit Tests" -TestName "pkg/$pkg" -Passed $false -Duration $dur -Details $lastLines
+        Record-Result -Category "Unit Tests" -TestName $pkg -Passed $false -Duration $dur -Details $lastLines
     }
 }
 
@@ -350,7 +351,7 @@ try {
         $htmlResp = Invoke-WebRequest -Uri "http://127.0.0.1:$testPort/" -UseBasicParsing
         $sw.Stop()
         $passed = ($htmlResp.StatusCode -eq 200) -and ($htmlResp.Content -like "*UniCompute*")
-        Record-Result -Category "GUI API" -TestName "GET / (HTML5/Canvas)" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Control room frontend bundle served (Status 200)"
+        Record-Result -Category "GUI API" -TestName "GET / (Desktop Workstation GUI)" -Passed $passed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "Workstation frontend bundle served (Status 200)"
 
         # 4.8 Unauthenticated Shell Exec Rejection (401)
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -397,13 +398,18 @@ try {
 # 4.11 Frontend JavaScript Syntax Verification
 if (Get-Command node -ErrorAction SilentlyContinue) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $nodeAppOut = node --check cmd/unicompute-gui/web/js/app.js 2>&1
-    $appExit = $LASTEXITCODE
-    $nodeTopoOut = node --check cmd/unicompute-gui/web/js/topology.js 2>&1
-    $topoExit = $LASTEXITCODE
+    $jsFiles = @(Get-ChildItem -Path "cmd/unicompute-gui/web" -Filter "*.js" -Recurse -File)
+    $jsPassed = ($jsFiles.Count -gt 0)
+    $checkedNames = @()
+    foreach ($jf in $jsFiles) {
+        $null = node --check $jf.FullName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $jsPassed = $false
+        }
+        $checkedNames += $jf.Name
+    }
     $sw.Stop()
-    $jsPassed = ($appExit -eq 0) -and ($topoExit -eq 0)
-    Record-Result -Category "GUI API" -TestName "Frontend JS Syntax" -Passed $jsPassed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "node --check on app.js and topology.js"
+    Record-Result -Category "GUI API" -TestName "Frontend JS Syntax" -Passed $jsPassed -Duration "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms" -Details "node --check on $($checkedNames -join ', ')"
 }
 
 } finally {

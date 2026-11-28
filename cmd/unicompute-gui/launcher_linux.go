@@ -10,13 +10,19 @@ import (
 )
 
 // launchDesktopWindow opens a dedicated native desktop window on Linux (Ubuntu 18.04, 20.04, 24.04).
-func launchDesktopWindow(url string) (*exec.Cmd, error) {
+func launchDesktopWindow(url string, userDataDir string) (*exec.Cmd, error) {
 	// If running headless or without X11/Wayland display server, return nil
 	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		return nil, nil
 	}
 
-	userDataDir := filepath.Join(os.TempDir(), "unicompute_gui_profile")
+	if userDataDir == "" {
+		var err error
+		userDataDir, err = createGUIProfileDir()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	browsers := []string{
 		"google-chrome",
@@ -54,4 +60,16 @@ func launchDesktopWindow(url string) (*exec.Cmd, error) {
 	}
 
 	return nil, nil
+}
+
+func createGUIProfileDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		return os.MkdirTemp("", "unicompute-gui-profile-*")
+	}
+	parent := filepath.Join(base, "unicompute")
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return os.MkdirTemp("", "unicompute-gui-profile-*")
+	}
+	return os.MkdirTemp(parent, "gui-profile-*")
 }

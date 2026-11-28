@@ -1,6 +1,9 @@
 package hipify
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,6 +44,9 @@ int main() {
 	}
 	if !strings.Contains(result.TranslatedSource, "hipFree") {
 		t.Errorf("Expected hipFree in translated source")
+	}
+	if exe := FindHipifyClang(); exe != "" && result.Engine != "hipify-clang.exe" && result.Engine != "hipify-clang" {
+		t.Errorf("Expected hipify-clang engine when binary is present (%s), got %q", exe, result.Engine)
 	}
 }
 
@@ -124,6 +130,98 @@ __global__ void parentKernel() {
 	report := AnalyzeCUDASource(source)
 	if !report.HasDynamicLaunch {
 		t.Errorf("Expected HasDynamicLaunch to be true when kernel launched inside parentKernel")
+	}
+}
+
+func TestAnalyzeCUDASource_InlinePTXWithoutVolatile(t *testing.T) {
+	source := `
+__device__ unsigned int getLane() {
+    unsigned int lane;
+    asm("mov.u32 %0, %%laneid;" : "=r"(lane));
+    return lane;
+}
+`
+	report := AnalyzeCUDASource(source)
+	if !report.HasInlinePTX {
+		t.Errorf("Expected HasInlinePTX to be true for asm(...) without volatile")
+	}
+	if report.TargetAMDSupported {
+		t.Errorf("Expected TargetAMDSupported to be false for inline asm(...)")
+	}
+}
+
+func TestAnalyzeCUDASource_MultilineBlockCommentsIgnored(t *testing.T) {
+	source := `
+/*
+   Multi-line comment mentioning non-portable constructs:
+   __shfl_down_sync(0xffffffff, val, 1);
+   asm("mov.u32 %0, %smid;" : "=r"(smid));
+   #include <cudnn.h>
+   threadIdx.x % 32
+*/
+__global__ void cleanKernel(float *x) {
+    /* inline block comment with asm("nop;") */
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    x[idx] *= 2.0f;
+}
+`
+	report := AnalyzeCUDASource(source)
+	if !report.IsPortable {
+		t.Errorf("Expected commented constructs not to trigger issues, got %+v", report.Issues)
+	}
+	if !report.TargetAMDSupported {
+		t.Errorf("Expected TargetAMDSupported to be true")
+	}
+	if report.HasInlinePTX || report.HasWarpAssumptions || report.HasProprietaryLibs {
+		t.Errorf("Expected all blocker flags false, got ptx=%v warp=%v libs=%v",
+			report.HasInlinePTX, report.HasWarpAssumptions, report.HasProprietaryLibs)
+	}
+}
+
+func TestTranslateCUDAToHIP_RecordsWarningWhenHipifyClangFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeExe := filepath.Join(tmpDir, "hipify-clang")
+	content := "#!/bin/sh\necho 'simulated failure' >&2\nexit 1\n"
+	if runtime.GOOS == "windows" {
+		fakeExe = filepath.Join(tmpDir, "hipify-clang.bat")
+		content = "@echo off\r\necho simulated failure 1>&2\r\nexit /b 1\r\n"
+	}
+	if err := os.WriteFile(fakeExe, []byte(content), 0755); err != nil {
+		t.Fatalf("failed to write fake hipify binary: %v", err)
+	}
+	t.Setenv("HIPIFY_CLANG_PATH", fakeExe)
+
+	res := TranslateCUDAToHIP("__global__ void k(float *a) { cudaDeviceSynchronize(); }")
+	if !res.Success {
+		t.Fatalf("expected builtin fallback translation to succeed, got error: %s", res.Error)
+	}
+	if res.Engine != "builtin-fallback" {
+		t.Errorf("expected builtin-fallback engine, got %q", res.Engine)
+	}
+	if res.Warning == "" {
+		t.Errorf("expected non-empty Warning when hipify-clang fails")
+	}
+}
+
+func TestFindHipifyClang_HonorsEnvPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	customExe := filepath.Join(tmpDir, "custom-hipify-clang")
+	if runtime.GOOS == "windows" {
+		customExe += ".exe"
+	}
+	if err := os.WriteFile(customExe, []byte("stub"), 0755); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	t.Setenv("HIPIFY_CLANG_PATH", customExe)
+	if got := FindHipifyClang(); got != customExe {
+		t.Fatalf("FindHipifyClang() = %q, want %q from HIPIFY_CLANG_PATH", got, customExe)
+	}
+
+	// Directory path in HIPIFY_CLANG_PATH must NOT be returned
+	t.Setenv("HIPIFY_CLANG_PATH", tmpDir)
+	if got := FindHipifyClang(); got == tmpDir {
+		t.Fatalf("FindHipifyClang() should ignore directory path %q", tmpDir)
 	}
 }
 

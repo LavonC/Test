@@ -44,6 +44,7 @@ func main() {
 	port := flag.Int("port", 23080, "Port for GUI web server")
 	listenHost := flag.String("listen", "127.0.0.1", "Host interface to bind the GUI server to (use 0.0.0.0 for LAN)")
 	allowRemoteGUI := flag.Bool("allow-remote-gui", false, "Allow binding GUI server to non-loopback interfaces")
+	devWebDir := flag.String("dev-web-dir", "", "Optional directory to serve live web assets from disk instead of embedded assets")
 
 	flag.Parse()
 
@@ -177,26 +178,15 @@ func main() {
 	mux := http.NewServeMux()
 	state.SetupRoutes(mux)
 
-	// Serve web frontend assets: prefer live disk directory if present, fallback to embedded assets
+	// Serve web frontend assets from embedded FS by default; disk serving requires explicit -dev-web-dir
 	var fileHandler http.Handler
-	candidates := []string{
-		"cmd/unicompute-gui/web",
-		"web",
-		filepath.Join(filepath.Dir(os.Args[0]), "web"),
-		filepath.Join(filepath.Dir(os.Args[0]), "cmd", "unicompute-gui", "web"),
-	}
-	var diskDir string
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
-			if _, err := os.Stat(filepath.Join(c, "index.html")); err == nil {
-				diskDir = c
-				break
-			}
+	if dir := strings.TrimSpace(*devWebDir); dir != "" {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			log.Fatalf("[FATAL] -dev-web-dir %q is not a valid directory: %v\n", dir, err)
 		}
-	}
-	if diskDir != "" {
-		log.Printf("[GUI] Serving live web frontend assets from disk: %s\n", diskDir)
-		fileHandler = http.FileServer(http.Dir(diskDir))
+		log.Printf("[GUI] Serving live web frontend assets from -dev-web-dir: %s\n", dir)
+		fileHandler = http.FileServer(http.Dir(dir))
 	} else {
 		subFS, err := fs.Sub(embeddedWebFS, "web")
 		if err != nil {
@@ -243,13 +233,21 @@ func main() {
 	fmt.Println("=========================================================================")
 
 	shutdownCh := make(chan struct{})
+	var profileDir string
 
 	// Launch dedicated native desktop app window unless headless
 	if !*headless {
+		var profErr error
+		profileDir, profErr = createGUIProfileDir()
+		if profErr != nil {
+			log.Printf("[WARN] Could not create isolated browser profile dir: %v\n", profErr)
+		} else {
+			defer os.RemoveAll(profileDir)
+		}
 		go func() {
 			time.Sleep(300 * time.Millisecond)
 			log.Printf("[GUI] Launching native desktop window for %s...\n", desktopURL)
-			cmd, err := launchDesktopWindow(desktopURL)
+			cmd, err := launchDesktopWindow(desktopURL, profileDir)
 			if err != nil {
 				log.Printf("[WARN] Could not spawn desktop window (%v). Access GUI via: %s\n", err, desktopURL)
 			} else if cmd != nil {

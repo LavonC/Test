@@ -10,7 +10,7 @@ import (
 )
 
 // launchDesktopWindow opens a dedicated, borderless native desktop window on Windows.
-func launchDesktopWindow(url string) (*exec.Cmd, error) {
+func launchDesktopWindow(url string, userDataDir string) (*exec.Cmd, error) {
 	var candidates []string
 
 	if pf := os.Getenv("ProgramFiles"); pf != "" {
@@ -41,7 +41,13 @@ func launchDesktopWindow(url string) (*exec.Cmd, error) {
 		`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
 	)
 
-	userDataDir := filepath.Join(os.TempDir(), "unicompute_gui_profile")
+	if userDataDir == "" {
+		var err error
+		userDataDir, err = createGUIProfileDir()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	for _, exe := range candidates {
 		if _, err := os.Stat(exe); err == nil {
@@ -65,4 +71,16 @@ func launchDesktopWindow(url string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	return nil, nil
+}
+
+func createGUIProfileDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		return os.MkdirTemp("", "unicompute-gui-profile-*")
+	}
+	parent := filepath.Join(base, "unicompute")
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return os.MkdirTemp("", "unicompute-gui-profile-*")
+	}
+	return os.MkdirTemp(parent, "gui-profile-*")
 }

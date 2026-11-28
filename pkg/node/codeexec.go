@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -146,7 +147,11 @@ func (n *Node) handleCodeStreamMessage(peerID string, data []byte) bool {
 		case !allowed:
 			resp.Error = "submitting peer is not in this worker's code execution allowlist"
 		default:
-			resp = executor.Execute(context.Background(), req)
+			execCtx := n.ctx
+			if execCtx == nil {
+				execCtx = context.Background()
+			}
+			resp = executor.Execute(execCtx, req)
 			if resp.JobID == "" {
 				resp.JobID = req.JobID
 			}
@@ -165,7 +170,9 @@ func (n *Node) handleCodeStreamMessage(peerID string, data []byte) bool {
 			})
 		}
 		if encodeErr == nil {
-			_ = n.SendStream(peerID, wireResp)
+			if sendErr := n.SendStream(peerID, wireResp); sendErr != nil {
+				log.Printf("[WARN] SendStream code response to %s failed: %v", peerID, sendErr)
+			}
 		}
 	}()
 	return true

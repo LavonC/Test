@@ -49,11 +49,10 @@ type CompatibilityReport struct {
 var (
 	// Warp-level 32-thread intrinsics and patterns
 	reWarpSync = regexp.MustCompile(`\b(__shfl_sync|__shfl_up_sync|__shfl_down_sync|__shfl_xor_sync|__any_sync|__all_sync|__ballot_sync|__activemask)\b`)
-	reWarpSize = regexp.MustCompile(`\b(warpSize|32)\b`)
 	reWarpMod  = regexp.MustCompile(`threadIdx\.[xyz]\s*%\s*32`)
 
 	// Inline PTX assembly
-	reInlinePTX = regexp.MustCompile(`\b(asm\s*volatile|asm\s*\()\b`)
+	reInlinePTX = regexp.MustCompile(`\b(asm\s+volatile\b|asm\s*\()`)
 
 	// Proprietary CUDA libraries
 	reProprietaryLib = regexp.MustCompile(`\b(cudnn\.h|cublas_v2\.h|nvjpeg\.h|tensorrt|nvinfer\.h|curand_kernel\.h)\b`)
@@ -61,6 +60,59 @@ var (
 	// Kernel launch syntax (used to detect dynamic parallelism inside device code)
 	reKernelLaunch = regexp.MustCompile(`<<<\s*[^>]+,\s*[^>]+>>>`)
 )
+
+// stripCommentsForLine removes // line comments and /* ... */ block comments from a line
+// while preserving multi-line block comment state across lines and ignoring comment markers inside string literals.
+func stripCommentsForLine(line string, inBlockComment bool) (string, bool) {
+	var out strings.Builder
+	out.Grow(len(line))
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(line); i++ {
+		if inBlockComment {
+			if i+1 < len(line) && line[i] == '*' && line[i+1] == '/' {
+				inBlockComment = false
+				i++
+				out.WriteByte(' ')
+			}
+			continue
+		}
+
+		ch := line[i]
+		if inString {
+			out.WriteByte(ch)
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		if ch == '"' {
+			inString = true
+			out.WriteByte(ch)
+			continue
+		}
+
+		if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
+			break
+		}
+		if i+1 < len(line) && ch == '/' && line[i+1] == '*' {
+			inBlockComment = true
+			i++
+			out.WriteByte(' ')
+			continue
+		}
+
+		out.WriteByte(ch)
+	}
+
+	return out.String(), inBlockComment
+}
 
 // AnalyzeCUDASource performs static analysis on CUDA C++ code to check portability to AMD GPUs.
 func AnalyzeCUDASource(source string) CompatibilityReport {
@@ -73,17 +125,20 @@ func AnalyzeCUDASource(source string) CompatibilityReport {
 
 	scanner := bufio.NewScanner(strings.NewReader(source))
 	lineNum := 0
+	inBlockComment := false
 	inDeviceFunc := false
 	deviceBraceDepth := 0
 	deviceBraceSeen := false
 
 	for scanner.Scan() {
 		lineNum++
-		line := scanner.Text()
+		rawLine := scanner.Text()
+		line, nextBlockComment := stripCommentsForLine(rawLine, inBlockComment)
+		inBlockComment = nextBlockComment
 		trimmed := strings.TrimSpace(line)
 
-		// Skip comments
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+		// Skip empty/comment-only lines
+		if trimmed == "" {
 			continue
 		}
 

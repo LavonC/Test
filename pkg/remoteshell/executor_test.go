@@ -230,3 +230,68 @@ func TestSystemExecutor_ConcurrencyLimitBusy(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestEncodeResponse_FitsWithinSCTPLimit(t *testing.T) {
+	huge := strings.Repeat("Z", 150*1024)
+	wire, err := EncodeResponse(ShellResponse{
+		ExecID:   "exec-huge",
+		ExitCode: 0,
+		Stdout:   huge,
+		Stderr:   huge,
+	})
+	if err != nil {
+		t.Fatalf("EncodeResponse failed: %v", err)
+	}
+	if len(wire) > MaxWireShellPayloadBytes {
+		t.Fatalf("encoded ShellResponse exceeded %d bytes: got %d", MaxWireShellPayloadBytes, len(wire))
+	}
+	decoded, err := DecodeResponse(wire)
+	if err != nil {
+		t.Fatalf("DecodeResponse failed on truncated response: %v", err)
+	}
+	if decoded.ExecID != "exec-huge" || !strings.Contains(decoded.Stdout, "[output truncated]") {
+		t.Fatalf("unexpected decoded truncated response: %+v", decoded)
+	}
+}
+
+func TestEncodeResponse_FitsSCTPFrameLimit(t *testing.T) {
+	exec := NewSystemExecutor()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var cmdStr string
+	if runtime.GOOS == "windows" {
+		cmdStr = "[Console]::Out.Write('A' * 220000); [Console]::Error.Write('B' * 220000)"
+	} else {
+		cmdStr = "python3 -c \"import sys; sys.stdout.write('A'*220000); sys.stderr.write('B'*220000)\" || sh -c 'i=0; while [ $i -lt 2200 ]; do printf \"%0100d\" 0; printf \"%0100d\" 0 >&2; i=$((i+1)); done'"
+	}
+
+	resp := exec.Execute(ctx, ShellRequest{
+		ExecID:    "exec-sctp-limit",
+		Command:   cmdStr,
+		ShellType: ShellAuto,
+		TimeoutMs: 10000,
+	})
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected command exit code 0, got %d (err=%q, stderr=%q)", resp.ExitCode, resp.Error, resp.Stderr)
+	}
+
+	encoded, err := EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse failed: %v", err)
+	}
+	if len(encoded) >= 60*1024 {
+		t.Fatalf("expected encoded ShellResponse < %d bytes (60 KiB), got %d", 60*1024, len(encoded))
+	}
+
+	decoded, err := DecodeResponse(encoded)
+	if err != nil {
+		t.Fatalf("DecodeResponse failed: %v", err)
+	}
+	if decoded.ExecID != "exec-sctp-limit" {
+		t.Fatalf("expected ExecID exec-sctp-limit, got %q", decoded.ExecID)
+	}
+	if !strings.Contains(decoded.Stdout, "[output truncated]") || !strings.Contains(decoded.Stderr, "[output truncated]") {
+		t.Fatalf("expected both stdout and stderr to be capped with truncation notice")
+	}
+}

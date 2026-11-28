@@ -947,6 +947,9 @@ func (c *Client) reconnect() {
 
 		if err := c.connect(); err == nil {
 			return
+		} else if errors.Is(err, ErrUnauthorized) {
+			_ = c.Close()
+			return
 		}
 
 		backoff *= 2

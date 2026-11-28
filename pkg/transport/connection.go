@@ -92,10 +92,9 @@ type PeerConnection struct {
 	onInternalStateChange func(state webrtc.PeerConnectionState)
 
 	// Instrumentation
-	metrics   *instrumentation.PathMetrics
-	tracker   *instrumentation.Tracker
-	stopKeep  chan struct{}
-	keepAlive *time.Ticker
+	metrics  *instrumentation.PathMetrics
+	tracker  *instrumentation.Tracker
+	stopKeep chan struct{}
 
 	// Bounded per-peer chunk request workers (4 concurrent slots)
 	chunkReqOnce  sync.Once
@@ -863,6 +862,10 @@ func (c *PeerConnection) SendChunk(ctx context.Context, chunkID string, r io.Rea
 
 	ackCh := make(chan error, 1)
 	c.ackMu.Lock()
+	if _, exists := c.ackWaiters[chunkID]; exists {
+		c.ackMu.Unlock()
+		return fmt.Errorf("concurrent SendChunk already active for chunk %s", chunkID)
+	}
 	c.ackWaiters[chunkID] = ackCh
 	c.ackMu.Unlock()
 	defer func() {

@@ -1,11 +1,13 @@
 /**
- * UniCompute Desktop Application Core Controller
- * Design System: Decentralized Compute Workstation
- * Integrates Objectives 1, 2, and 3 with real Go backend APIs
+ * UniCompute Light Control Room Controller
+ * Reconciled 1:1 with cmd/unicompute-gui/api.go, pkg/gpu/types.go, pkg/gpu/watchdog/watchdog.go.
+ * Zero inline HTML event handlers; all dynamic strings escaped; all HTTP responses checked with resp.ok.
  */
 
-// Parse session token from URL hash or existing session storage
-(function() {
+// =========================================================================
+// AUTH TOKEN & API INTERCEPTOR
+// =========================================================================
+(function () {
   const hash = window.location.hash || '';
   const match = hash.match(/token=([a-fA-F0-9]+)/);
   if (match && match[1]) {
@@ -17,9 +19,8 @@ function getAuthToken() {
   return sessionStorage.getItem('unicompute_gui_token') || '';
 }
 
-// Intercept fetch to enforce Authorization and Content-Type on API calls
 const _originalFetch = window.fetch;
-window.fetch = function(url, options = {}) {
+window.fetch = function (url, options = {}) {
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
   if (token && !headers.has('Authorization')) {
@@ -33,1685 +34,2300 @@ window.fetch = function(url, options = {}) {
   return _originalFetch(url, options);
 };
 
-function fetchWithAuth(url, options = {}) {
-  return window.fetch(url, options);
-}
-
-let topology = null;
-let currentLocalId = '';
-let currentFleet = [];
-let connectedPeers = [];
-let selectedPeer = null;
-let isLogPaused = false;
-let currentLogFilter = 'all';
-let lastStatusData = null;
-let currentWorkerAllowlist = [];
-
-document.addEventListener('DOMContentLoaded', () => {
-  topology = new TopologyRenderer('topologyCanvas', 'canvasContainer');
-
-  initUI();
-  initWebSocket();
-  pollFleetAndPeers();
-  loadSamples();
-  loadBlobs();
-  loadCoordinatorStatus();
-  loadWorkerSettings();
-  loadTasks();
-
-  // Periodic polling every 5 seconds to keep fleet and metrics synchronized without spamming Render
-  setInterval(() => {
-    pollFleetAndPeers();
-    loadCoordinatorStatus();
-    loadTasks();
-  }, 5000);
-});
-
-function initUI() {
-  // 1. Navigation Tab Switching
-  document.querySelectorAll('.nav-tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      switchTab(btn.dataset.tab);
-    });
-  });
-
-  // 2. Titlebar Controls
-  initTitlebar();
-
-  // 3. Topology Toolbar & Inspector Controls
-  initTopologyControls();
-
-  // 4. Coordinator Hub Controls
-  initCoordinatorHub();
-
-  // 5. Objective 2 (CPU Container Sandbox)
-  initCodeSandbox();
-
-  // 6. Objective 3 (GPU & HIPIFY)
-  initGPUSubsystem();
-
-  // 7. Storage & Reed-Solomon Shard Matrix (O1)
-  initShardMatrix();
-  initStorageVault();
-
-  // 8. Cluster Task Queue & Matchmaking
-  initTaskQueue();
-
-  // 9. Wire Logs & Filter Controls
-  initWireLogs();
-}
-
-function switchTab(tabId) {
-  document.querySelectorAll('.nav-tab-btn').forEach(b => {
-    if (b.dataset.tab === tabId) {
-      b.classList.add('active');
-    } else {
-      b.classList.remove('active');
-    }
-  });
-
-  document.querySelectorAll('.viewport-pane').forEach(p => {
-    if (p.id === tabId) {
-      p.classList.remove('hidden');
-      p.classList.add('active');
-    } else {
-      p.classList.add('hidden');
-      p.classList.remove('active');
-    }
-  });
-
-  // Dual context pill synchronization
-  const pillHealth = document.getElementById('pillHealthConn');
-  const pillCode = document.getElementById('pillCodeData');
-  if (tabId === 'tab-coordinator') {
-    pillHealth?.classList.add('active');
-    pillCode?.classList.remove('active');
-    loadCoordinatorStatus();
-    loadWorkerSettings();
-  } else {
-    pillCode?.classList.add('active');
-    pillHealth?.classList.remove('active');
+async function apiFetchJson(url, options = {}) {
+  const resp = await fetch(url, options);
+  const raw = await resp.text();
+  let data = null;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    data = { raw };
   }
-
-  if (tabId === 'tab-topology' && topology) {
-    topology.initCanvasSize();
+  if (!resp.ok) {
+    const msg = (data && data.error) ? data.error : (raw || `HTTP ${resp.status}`);
+    throw new Error(msg);
   }
+  return data;
 }
 
-function initTitlebar() {
-  const coordSelect = document.getElementById('coordinatorSelect');
-  const customInput = document.getElementById('customCoordinatorInput');
-  const btnConnectCoord = document.getElementById('btnConnectCoordinator');
+// =========================================================================
+// STATE & CONSTANTS
+// =========================================================================
+const defaultCudaSample = `#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
 
-  // Titlebar Dual Context Pills
-  const pillHealth = document.getElementById('pillHealthConn');
-  const pillCode = document.getElementById('pillCodeData');
-  if (pillHealth) {
-    pillHealth.addEventListener('click', () => switchTab('tab-coordinator'));
-  }
-  if (pillCode) {
-    pillCode.addEventListener('click', () => switchTab('tab-code'));
-  }
-
-  coordSelect.addEventListener('change', () => {
-    if (coordSelect.value === 'custom') {
-      customInput.classList.remove('hidden');
-      customInput.focus();
-    } else {
-      customInput.classList.add('hidden');
+__global__ void vectorAdd(const float *A, const float *B, float *C, int N) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < N) {
+        C[i] = A[i] + B[i];
     }
-  });
-
-  btnConnectCoord.addEventListener('click', () => {
-    let url = coordSelect.value;
-    if (url === 'custom') {
-      url = customInput.value.trim();
-    }
-    if (!url) return;
-
-    fetch('/api/coordinator/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    })
-    .then(async r => {
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        throw new Error(data.error || `HTTP ${r.status}`);
-      }
-      return data;
-    })
-    .then(data => {
-      if (data && data.reconnect_error) {
-        appendLog('COORDINATOR', `Failed to switch signaling hub to ${url}: ${data.reconnect_error}`);
-      } else {
-        appendLog('COORDINATOR', `Switching signaling hub to: ${url}`);
-      }
-      setTimeout(() => {
-        pollFleetAndPeers();
-        loadCoordinatorStatus();
-      }, 600);
-    })
-    .catch(err => {
-      appendLog('COORDINATOR', `Coordinator switch failed: ${err.message}`);
-    });
-  });
-
-  document.getElementById('btnQuickWire').addEventListener('click', () => switchTab('tab-logs'));
-  document.getElementById('btnQuickRefresh').addEventListener('click', () => {
-    pollFleetAndPeers();
-    loadBlobs();
-    loadCoordinatorStatus();
-    loadTasks();
-  });
-
-  // Window Mock Controls
-  document.getElementById('winCloseBtn').addEventListener('click', () => {
-    if (confirm('Close UniCompute Desktop Workstation window?')) {
-      window.close();
-    }
-  });
-  document.getElementById('winMinBtn').addEventListener('click', () => {
-    appendLog('WINDOW', 'Workstation minimized to system tray.');
-  });
-  document.getElementById('winMaxBtn').addEventListener('click', () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
-    } else {
-      document.exitFullscreen().catch(() => {});
-    }
-  });
 }
 
-function initTopologyControls() {
-  document.getElementById('btnCenterCanvas').addEventListener('click', () => topology.center());
-  document.getElementById('btnZoomIn').addEventListener('click', () => {
-    topology.zoom = Math.min(2.5, topology.zoom * 1.15);
-  });
-  document.getElementById('btnZoomOut').addEventListener('click', () => {
-    topology.zoom = Math.max(0.5, topology.zoom * 0.85);
-  });
-  document.getElementById('btnRefreshFleet').addEventListener('click', pollFleetAndPeers);
+int main() {
+    int N = 1024;
+    size_t size = N * sizeof(float);
+    float *d_A = NULL, *d_B = NULL, *d_C = NULL;
+    cudaMalloc((void **)&d_A, size);
+    cudaMalloc((void **)&d_B, size);
+    cudaMalloc((void **)&d_C, size);
+    vectorAdd<<<4, 256>>>(d_A, d_B, d_C, N);
+    cudaDeviceSynchronize();
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    return 0;
+}`;
 
-  // Inspector Close Button
-  document.getElementById('btnCloseInspector').addEventListener('click', () => {
-    document.getElementById('inspectorCard').classList.add('hidden');
-    topology.selectedNode = null;
-  });
+const defaultPythonSample = `import math, sys
+data = sys.stdin.read().strip()
+print("UniCompute Tier 2 Python container ok")
+print("2^16 =", 2 ** 16)
+if data:
+    print("stdin:", data)
+`;
 
-  // Topology Callbacks
-  topology.onNodeClick = (node) => {
-    selectedPeer = node;
-    openPCInspector(node);
-  };
+const state = {
+  currentPage: 'overview',
+  backendConnected: false,
+  localNodeId: 'local-node',
+  poolId: 'default-pool',
+  hostMeta: {
+    os: '-',
+    arch: '-',
+    cpus: 0,
+    goVersion: '-',
+    dockerAvailable: false,
+    natType: 'Unknown',
+    isBehindCGNAT: false,
+    storageUsedBytes: 0,
+    storageQuotaBytes: 0,
+    blobCount: 0,
+  },
+  coordStatus: {
+    status: 'DISCONNECTED',
+    authRequired: false,
+    authTokenSet: false,
+    coordinatorURL: '',
+    coordinatorHost: '',
+    uptime: '0h 00m 00s',
+    fleetCount: 0,
+    directPeersCount: 0,
+    relayedPeersCount: 0,
+    avgRttMs: 0,
+    relayThreshold: 2.0,
+    joinToken: 'UC-LOCAL',
+    transport: 'WebRTC DataChannel (ICE/DTLS/SCTP)',
+  },
+  localGpuProfile: null,
+  localWatchdog: null,
+  gpuEnabled: false,
 
-  topology.onCoordinatorClick = () => {
-    switchTab('tab-coordinator');
-  };
+  selectedTopoNodeId: 'local-node',
+  topoViewMode: 'mesh',
+  peerPingResults: {},
 
-  topology.onNodeHover = (node, mouseX, mouseY) => {
-    const hud = document.getElementById('hudTooltip');
-    if (!node || node.id === 'COORDINATOR') {
-      hud.classList.add('hidden');
-      return;
-    }
+  gpuSelectedFile: 'vector_add.cu',
+  cudaSamples: [],
+  allSamples: [],
+  cudaSource: defaultCudaSample,
+  hipSource: '',
+  hipifyResult: null,
+  hipifyRunning: false,
 
-    document.getElementById('hudNodeId').textContent = node.id + (node.isLocal ? ' (This PC)' : '');
-    document.getElementById('hudNatType').textContent = node.natType || (lastStatusData?.nat?.nat_type || 'Unknown');
-    document.getElementById('hudCgnat').textContent = node.isCGNAT ? 'true (RFC 6598)' : 'false';
-    document.getElementById('hudP2PStatus').textContent = node.isLocal ? 'Local Loopback' : (node.connectedP2P ? 'Active WebRTC P2P' : 'Disconnected');
-    document.getElementById('hudGPU').textContent = node.gpuActive ? 'DirectML / CUDA Tier 3' : 'Tier 2 Docker';
+  sandbox: {
+    language: 'python',
+    targetPeer: 'local',
+    source: defaultPythonSample,
+    stdin: '',
+    timeout: 10,
+    selectedSample: '',
+    running: false,
+    result: null,
+    shellPeer: 'local',
+    shellCommand: '',
+    shellRunning: false,
+    shellResult: null,
+  },
 
-    hud.style.left = `${Math.min(window.innerWidth - 260, mouseX + 16)}px`;
-    hud.style.top = `${Math.min(window.innerHeight - 180, mouseY + 16)}px`;
-    hud.classList.remove('hidden');
-  };
+  workerSettings: {
+    codeAllowlist: [],
+    dockerActive: false,
+    wildcardAllowed: false,
+    newPeerInput: '',
+  },
 
-  // Inspector Connection Actions
-  document.getElementById('btnInspectorConnect').addEventListener('click', () => {
-    if (!selectedPeer || selectedPeer.isLocal) return;
-    const btn = document.getElementById('btnInspectorConnect');
-    btn.innerHTML = '<span class="material-symbols-outlined text-sm">sync</span><span>Connecting...</span>';
-    btn.disabled = true;
+  taskFilterTab: 'All',
+  taskSearch: '',
+  selectedTaskId: '',
 
-    fetch('/api/peer/connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ peer_id: selectedPeer.id })
-    })
-    .then(r => r.json())
-    .then(res => {
-      btn.disabled = false;
-      if (res.error) {
-        alert('P2P Connection failed: ' + res.error);
-        btn.innerHTML = '<span class="material-symbols-outlined text-sm">link</span><span>Connect P2P</span>';
-      } else {
-        pollFleetAndPeers();
-        openPCInspector(selectedPeer);
-      }
-    });
-  });
+  createForm: {
+    title: '',
+    tier: 'Tier 3 GPU',
+    targetNode: 'Auto',
+    language: 'python',
+    source: defaultPythonSample,
+    stdin: '',
+    timeout: 10,
+    gpuTaskType: 'inference',
+    batches: 10,
+    gpuSourceCode: '',
+  },
 
-  document.getElementById('btnInspectorDisconnect').addEventListener('click', () => {
-    if (!selectedPeer || selectedPeer.isLocal) return;
-    fetch('/api/peer/disconnect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ peer_id: selectedPeer.id })
-    }).then(() => {
-      pollFleetAndPeers();
-      openPCInspector(selectedPeer);
-    });
-  });
+  vaultDatasets: [],
+  nodeSearch: '',
+  logTab: 'All',
+  logSeverity: 'All',
+  logSearch: '',
 
-  document.getElementById('btnInspectorPing').addEventListener('click', () => {
-    if (!selectedPeer || selectedPeer.isLocal) return;
-    const out = document.getElementById('inspectorPingOutput');
-    out.textContent = 'Pinging peer over SCTP DataChannel...';
-    out.classList.remove('hidden');
+  settingsDraft: {
+    coordinatorURL: '',
+    authToken: '',
+    relayThreshold: 2.0,
+    joinToken: '',
+  },
 
-    fetch('/api/peer/ping', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ peer_id: selectedPeer.id })
-    })
-    .then(r => r.json())
-    .then(res => {
-      if (res.error) {
-        out.textContent = 'Ping failed: ' + res.error;
-        out.style.color = '#f43f5e';
-      } else if (res.status === 'ping_timeout') {
-        out.textContent = `Ping timed out after ${res.duration_ms || 5000} ms`;
-        out.style.color = '#f43f5e';
-      } else {
-        out.textContent = `SCTP ACK: RTT ${res.duration_ms} ms (Direct P2P Link Valid)`;
-        out.style.color = '#10b981';
-      }
-    });
-  });
-
-  document.getElementById('btnSelectPeerForCode').addEventListener('click', () => {
-    if (!selectedPeer) return;
-    switchTab('tab-code');
-    const sel = document.getElementById('codeTargetPeer');
-    sel.value = selectedPeer.isLocal ? 'local' : selectedPeer.id;
-  });
-
-  document.getElementById('btnSelectPeerForShell').addEventListener('click', () => {
-    if (!selectedPeer) return;
-    switchTab('tab-code');
-    const sel = document.getElementById('codeTargetPeer');
-    sel.value = selectedPeer.isLocal ? 'local' : selectedPeer.id;
-    document.getElementById('codeStdinInput').value = 'whoami';
-  });
-}
-
-function openPCInspector(node) {
-  const card = document.getElementById('inspectorCard');
-  const isConn = node.connectedP2P;
-  const isLocal = node.isLocal;
-
-  const btnConn = document.getElementById('btnInspectorConnect');
-  const btnDisc = document.getElementById('btnInspectorDisconnect');
-  const btnPing = document.getElementById('btnInspectorPing');
-
-  if (isLocal) {
-    document.getElementById('inspectorNodeName').textContent = `${node.id} (This PC)`;
-    document.getElementById('inspectorSubtext').textContent = 'Host Native Engine • Docker Sandbox Ready';
-    btnConn.classList.add('hidden');
-    btnDisc.classList.add('hidden');
-    btnPing.classList.add('hidden');
-
-    document.getElementById('inspectorPathType').textContent = 'Loopback (Host)';
-    document.getElementById('inspectorLatency').textContent = '< 1 ms';
-    document.getElementById('inspectorChannelStatus').textContent = 'Active (Local)';
-    document.getElementById('inspectorTierBadge').textContent = (lastStatusData && lastStatusData.gpu_profile && lastStatusData.gpu_profile.directml_supported) ? 'Tier 3 DirectML' : 'Tier 2 Docker';
-
-    const cpus = lastStatusData ? lastStatusData.cpus : 8;
-    const os = lastStatusData ? lastStatusData.os : 'host';
-    const arch = lastStatusData ? lastStatusData.arch : 'amd64';
-    document.getElementById('inspectorCpu').textContent = `${cpus} vCPUs • ${os}/${arch}`;
-
-    const gpuName = (lastStatusData && lastStatusData.gpu_profile) ? (lastStatusData.gpu_profile.device_name || 'DirectML Accelerated') : 'DirectML Accelerated';
-    document.getElementById('inspectorGpu').textContent = gpuName;
-
-    const natName = (lastStatusData && lastStatusData.nat) ? lastStatusData.nat.nat_type : 'Unknown';
-    document.getElementById('inspectorNat').textContent = `${natName} (Local)`;
-
-    const storedMB = (lastStatusData && lastStatusData.storage) ? (lastStatusData.storage.used_bytes / (1024 * 1024)).toFixed(1) : '0';
-    const blobCount = (lastStatusData && lastStatusData.storage) ? lastStatusData.storage.blob_count : 0;
-    document.getElementById('inspectorDataIO').textContent = `${storedMB} MB Stored (${blobCount} Blobs)`;
-  } else {
-    document.getElementById('inspectorNodeName').textContent = node.id;
-    btnPing.classList.remove('hidden');
-
-    const peerObj = connectedPeers.find(p => (p.peer_id || p) === node.id);
-
-    if (isConn) {
-      document.getElementById('inspectorSubtext').textContent = 'WebRTC SCTP DataChannel Active • Direct P2P';
-      btnConn.classList.add('hidden');
-      btnDisc.classList.remove('hidden');
-
-      if (peerObj && peerObj.metrics) {
-        document.getElementById('inspectorPathType').textContent = peerObj.metrics.pair_type || 'host-host';
-        document.getElementById('inspectorLatency').textContent = `${peerObj.metrics.rtt_ms ?? 0} ms`;
-        document.getElementById('inspectorChannelStatus').textContent = peerObj.metrics.is_direct ? 'Direct (No Relay)' : 'Relayed';
-        document.getElementById('inspectorDataIO').textContent = `${formatBytes(peerObj.metrics.bytes_sent || 0)} Out / ${formatBytes(peerObj.metrics.bytes_received || 0)} In`;
-      } else {
-        document.getElementById('inspectorPathType').textContent = 'host-host';
-        document.getElementById('inspectorLatency').textContent = '-- ms';
-        document.getElementById('inspectorChannelStatus').textContent = 'Direct (No Relay)';
-        document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
-      }
-
-      document.getElementById('inspectorTierBadge').textContent = node.gpuActive ? 'Tier 3 GPU' : 'Tier 2 Docker';
-      document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
-      document.getElementById('inspectorGpu').textContent = node.gpuActive ? 'Hardware Accelerated' : 'CPU Container';
-      document.getElementById('inspectorNat').textContent = node.natType || 'Unknown';
-    } else {
-      document.getElementById('inspectorSubtext').textContent = 'Signaling via Coordinator Hub • Unlinked';
-      btnConn.classList.remove('hidden');
-      btnConn.innerHTML = '<span class="material-symbols-outlined text-sm">link</span><span>Connect P2P</span>';
-      btnDisc.classList.add('hidden');
-
-      document.getElementById('inspectorPathType').textContent = 'Coordinator Hub';
-      document.getElementById('inspectorLatency').textContent = '-- ms';
-      document.getElementById('inspectorChannelStatus').textContent = 'Offline';
-      document.getElementById('inspectorTierBadge').textContent = 'Tier 2 Docker';
-      document.getElementById('inspectorCpu').textContent = 'Remote Peer Rig';
-      document.getElementById('inspectorGpu').textContent = 'Detection Pending Link';
-      document.getElementById('inspectorNat').textContent = node.natType || 'Unknown';
-      document.getElementById('inspectorDataIO').textContent = '0 B Out / 0 B In';
-    }
-  }
-
-  card.classList.remove('hidden');
-}
-
-function initCodeSandbox() {
-  document.getElementById('codeTimeoutRange').addEventListener('input', (e) => {
-    document.getElementById('codeTimeoutLabel').textContent = `${e.target.value}s`;
-  });
-
-  document.getElementById('btnRunCode').addEventListener('click', executeCodeSandbox);
-  document.getElementById('btnExecShell').addEventListener('click', executeHostShell);
-
-  const codeSelect = document.getElementById('codeSampleSelect');
-  codeSelect.addEventListener('change', () => {
-    const opt = codeSelect.selectedOptions[0];
-    if (opt && opt.dataset.content) {
-      document.getElementById('codeSourceEditor').value = opt.dataset.content;
-      if (opt.dataset.lang) {
-        document.getElementById('codeLanguage').value = opt.dataset.lang;
-      }
-    }
-  });
-}
-
-function executeCodeSandbox() {
-  const peerID = document.getElementById('codeTargetPeer').value;
-  const language = document.getElementById('codeLanguage').value;
-  const source = document.getElementById('codeSourceEditor').value;
-  const stdin = document.getElementById('codeStdinInput').value;
-  const timeout = parseInt(document.getElementById('codeTimeoutRange').value) || 10;
-
-  if (!peerID) {
-    alert('Please select a target peer or Local Worker.');
-    return;
-  }
-  if (!source.trim()) {
-    alert('Please write or load code first.');
-    return;
-  }
-
-  const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
-  const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.textContent = '';
-  const dispatchRow = document.createElement('div');
-  dispatchRow.className = 'term-row term-info';
-  dispatchRow.textContent = `[DISPATCH] Executing ${language} job on ${targetLabel}...`;
-  consoleEl.appendChild(dispatchRow);
-  document.getElementById('codeMetricsBadge').textContent = 'EXECUTING...';
-
-  const startTime = Date.now();
-  fetch('/api/code/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ peer_id: peerID, language, source, stdin, timeout })
-  })
-  .then(r => r.json())
-  .then(res => {
-    const elapsed = Date.now() - startTime;
-    document.getElementById('lastExecDuration').textContent = `${res.duration_ms || elapsed} ms`;
-    document.getElementById('codeMetricsBadge').textContent = res.exit_code === 0 ? 'EXIT 0' : `EXIT ${res.exit_code}`;
-
-    consoleEl.textContent = '';
-    const hdr = document.createElement('div');
-    hdr.className = 'term-row term-success';
-    hdr.textContent = `=== Job ${res.job_id || 'code-task'} Finished in ${res.duration_ms || elapsed} ms ===`;
-    consoleEl.appendChild(hdr);
-    if (res.stdout) {
-      const rOut = document.createElement('div');
-      rOut.className = 'term-row';
-      rOut.textContent = res.stdout;
-      consoleEl.appendChild(rOut);
-    }
-    if (res.stderr) {
-      const rErr = document.createElement('div');
-      rErr.className = 'term-row term-err';
-      rErr.textContent = res.stderr;
-      consoleEl.appendChild(rErr);
-    }
-    if (res.error) {
-      const rMsg = document.createElement('div');
-      rMsg.className = 'term-row term-err';
-      rMsg.textContent = `Execution Error: ${res.error}`;
-      consoleEl.appendChild(rMsg);
-    }
-
-    appendLog('CODEEXEC', `Task ${res.job_id || 'task'} on ${targetLabel}: exit ${res.exit_code} (${res.duration_ms || elapsed} ms)`);
-    loadTasks();
-  })
-  .catch(err => {
-    const rNet = document.createElement('div');
-    rNet.className = 'term-row term-err';
-    rNet.textContent = `Network error: ${err.message}`;
-    consoleEl.appendChild(rNet);
-  });
-}
-
-function executeHostShell() {
-  const peerID = document.getElementById('codeTargetPeer').value;
-  const cmd = document.getElementById('codeStdinInput').value || 'whoami';
-
-  const targetLabel = peerID === 'local' ? 'Local Worker (This Machine)' : peerID;
-  const consoleEl = document.getElementById('codeOutputConsole');
-  consoleEl.textContent = '';
-  const execRow = document.createElement('div');
-  execRow.className = 'term-row term-info';
-  execRow.textContent = `[EXEC] Running host shell '${cmd}' on ${targetLabel}...`;
-  consoleEl.appendChild(execRow);
-
-  fetch('/api/shell/exec', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ peer_id: peerID, command: cmd })
-  })
-  .then(r => r.json())
-  .then(res => {
-    consoleEl.textContent = '';
-    const hdr = document.createElement('div');
-    hdr.className = 'term-row term-success';
-    hdr.textContent = `=== Shell Exit: ${res.exit_code} (${res.duration_ms} ms) ===`;
-    consoleEl.appendChild(hdr);
-    if (res.stdout) {
-      const rOut = document.createElement('div');
-      rOut.className = 'term-row';
-      rOut.textContent = res.stdout;
-      consoleEl.appendChild(rOut);
-    }
-    if (res.stderr) {
-      const rErr = document.createElement('div');
-      rErr.className = 'term-row term-err';
-      rErr.textContent = res.stderr;
-      consoleEl.appendChild(rErr);
-    }
-    if (res.error) {
-      const rMsg = document.createElement('div');
-      rMsg.className = 'term-row term-err';
-      rMsg.textContent = `Error: ${res.error}`;
-      consoleEl.appendChild(rMsg);
-    }
-  })
-  .catch(err => {
-    consoleEl.textContent = '';
-    const rErr = document.createElement('div');
-    rErr.className = 'term-row term-err';
-    rErr.textContent = `Shell execution failed: ${err.message}`;
-    consoleEl.appendChild(rErr);
-  });
-}
-
-function initGPUSubsystem() {
-  document.getElementById('btnRefreshGPU').addEventListener('click', loadStatus);
-  document.getElementById('btnAnalyzeHIP').addEventListener('click', runHipifyAnalysis);
-  document.getElementById('btnRunGPU').addEventListener('click', runGPUSandboxTask);
-
-  const hipSelect = document.getElementById('hipifySampleSelect');
-  hipSelect.addEventListener('change', () => {
-    const opt = hipSelect.selectedOptions[0];
-    if (opt && opt.dataset.content) {
-      document.getElementById('cudaInputEditor').value = opt.dataset.content;
-    }
-  });
-}
-
-function runHipifyAnalysis() {
-  const source = document.getElementById('cudaInputEditor').value;
-  if (!source.trim()) {
-    alert('Please enter CUDA kernel source.');
-    return;
-  }
-
-  fetch('/api/gpu/hipify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source })
-  })
-  .then(r => r.json())
-  .then(res => {
-    document.getElementById('hipOutputEditor').value = res.translated_source || '// Translation blocked.';
-
-    const panel = document.getElementById('hipifyIssuesPanel');
-    const badge = document.getElementById('hipifyVerdictBadge');
-    const count = document.getElementById('hipifyIssueCount');
-    const list = document.getElementById('hipifyIssueList');
-
-    panel.classList.remove('hidden');
-    list.textContent = '';
-    if (res.report && res.report.target_amd_supported) {
-      badge.textContent = 'PORTABLE TO AMD';
-      badge.className = 'badge-emerald font-mono text-[10px]';
-      count.textContent = `${res.replacements_made || 0} replacements made`;
-      const okDiv = document.createElement('div');
-      okDiv.className = 'text-secondary font-mono text-xs';
-      okDiv.textContent = 'Ready for execution on AMD RDNA / ROCm hardware.';
-      list.appendChild(okDiv);
-    } else if (res.report) {
-      badge.textContent = 'BLOCKED ON AMD';
-      badge.className = 'badge-rose font-mono text-[10px]';
-      const issues = res.report.issues || [];
-      count.textContent = `${issues.length} fatal blocker(s) detected`;
-      issues.forEach(iss => {
-        const issDiv = document.createElement('div');
-        issDiv.className = 'text-rose font-mono text-xs';
-        issDiv.textContent = `Line ${iss.line_number}: [${iss.construct}] ${iss.reason}`;
-        list.appendChild(issDiv);
-      });
-    }
-  });
-}
-
-function runGPUSandboxTask() {
-  const batches = parseInt(document.getElementById('gpuBatchCount').value) || 20;
-  const out = document.getElementById('gpuExecOutput');
-  out.textContent = `Running task under Win32 JobObject memory limit for ${batches} batches...`;
-  out.classList.remove('hidden');
-
-  fetch('/api/gpu/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task_type: 'training', batches })
-  })
-  .then(r => r.json())
-  .then(res => {
-    let outputText = `Job ${res.job_id} ${res.status.toUpperCase()} in ${res.execution_ms} ms. Checkpoint: ${res.checkpoint_blob || 'saved'}`;
-    if (res.simulated) {
-      outputText += ' [SIMULATED MOCK RUNNER]';
-    }
-    out.textContent = outputText;
-    appendLog('GPU', `Task ${res.job_id} completed (${res.execution_ms} ms, ${batches} batches)${res.simulated ? ' [SIMULATED]' : ''}`);
-    loadTasks();
-  });
-}
-
-function initStorageVault() {
-  document.getElementById('btnPutBlob').addEventListener('click', putStorageBlob);
-  document.getElementById('btnScrubVault').addEventListener('click', scrubStorageVault);
-  document.getElementById('btnRefreshBlobs').addEventListener('click', loadBlobs);
-
-  // Wire Modal Close and Copy Buttons
-  document.getElementById('btnCloseBlobModal').addEventListener('click', () => {
-    document.getElementById('blobViewModal').classList.add('hidden');
-  });
-  document.getElementById('btnCloseBlobModalBtn').addEventListener('click', () => {
-    document.getElementById('blobViewModal').classList.add('hidden');
-  });
-  document.getElementById('btnCopyBlobContent').addEventListener('click', () => {
-    const text = document.getElementById('viewModalContent').value;
-    navigator.clipboard.writeText(text).then(() => {
-      const btn = document.getElementById('btnCopyBlobContent');
-      const orig = btn.innerHTML;
-      btn.innerHTML = '<span class="material-symbols-outlined text-xs text-secondary">check</span><span>Copied</span>';
-      setTimeout(() => { btn.innerHTML = orig; }, 1500);
-    });
-  });
-}
-
-function loadBlobs() {
-  fetch('/api/storage/blobs')
-    .then(r => r.json())
-    .then(data => {
-      const tbody = document.getElementById('blobsTableBody');
-      const badge = document.getElementById('blobCountBadge');
-      const blobs = data.blobs || [];
-      if (badge) badge.textContent = `${blobs.length} Total Blobs`;
-
-      // Update SHA-256 local CAS dataset metrics
-      let totalBytes = 0;
-      blobs.forEach(b => { totalBytes += (b.size_bytes !== undefined ? b.size_bytes : (b.size || 0)); });
-      const casSize = document.getElementById('rsCasTotalSize');
-      if (casSize) casSize.textContent = formatBytes(totalBytes);
-      const casHash = document.getElementById('rsCasRootHash');
-      if (casHash && blobs.length > 0) {
-        const topId = blobs[0].id;
-        casHash.textContent = topId.length > 14 ? topId.substring(0, 8) + '...' + topId.substring(topId.length - 4) : topId;
-      }
-
-      tbody.textContent = '';
-      if (!blobs || blobs.length === 0) {
-        const emptyTr = document.createElement('tr');
-        const emptyTd = document.createElement('td');
-        emptyTd.colSpan = 4;
-        emptyTd.className = 'empty-cell';
-        emptyTd.textContent = 'No blobs stored in local vault.';
-        emptyTr.appendChild(emptyTd);
-        tbody.appendChild(emptyTr);
-        return;
-      }
-
-      blobs.forEach(b => {
-        const bSize = b.size_bytes !== undefined ? b.size_bytes : (b.size || 0);
-        const bDate = b.created_at || b.mod_time || new Date().toISOString();
-
-        const tr = document.createElement('tr');
-
-        const tdId = document.createElement('td');
-        const codeEl = document.createElement('code');
-        codeEl.className = 'text-primary font-mono text-xs';
-        codeEl.textContent = b.id;
-        tdId.appendChild(codeEl);
-
-        const tdSize = document.createElement('td');
-        tdSize.textContent = `${(bSize / 1024).toFixed(1)} KiB`;
-
-        const tdTime = document.createElement('td');
-        tdTime.textContent = new Date(bDate).toLocaleTimeString();
-
-        const tdActions = document.createElement('td');
-        tdActions.className = 'text-right space-x-2';
-
-        const viewBtn = document.createElement('button');
-        viewBtn.type = 'button';
-        viewBtn.className = 'btn-tool-text text-secondary hover:text-white';
-        viewBtn.textContent = 'View';
-        viewBtn.addEventListener('click', () => viewBlob(b.id));
-
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'btn-tool-text text-rose hover:text-white';
-        delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteBlob(b.id));
-
-        tdActions.append(viewBtn, delBtn);
-        tr.append(tdId, tdSize, tdTime, tdActions);
-        tbody.appendChild(tr);
-      });
-    });
-}
-
-window.viewBlob = function(blobId) {
-  fetch(`/api/storage/get?id=${encodeURIComponent(blobId)}`)
-    .then(r => r.json())
-    .then(data => {
-      if (data.error) {
-        alert('Failed to retrieve blob: ' + data.error);
-        return;
-      }
-      document.getElementById('viewModalBlobId').textContent = data.blob_id;
-      const bSize = data.size_bytes !== undefined ? data.size_bytes : (data.size || 0);
-      const sizeKiB = (bSize / 1024).toFixed(2);
-      const isValid = data.valid !== undefined ? data.valid : (data.verified !== undefined ? data.verified : false);
-      document.getElementById('viewModalSize').textContent = `${sizeKiB} KiB • SHA-256 Valid: ${isValid ? 'YES' : 'CORRUPTED'}`;
-      document.getElementById('viewModalContent').value = data.content || '(empty)';
-      document.getElementById('blobViewModal').classList.remove('hidden');
-    })
-    .catch(err => {
-      alert('Network error retrieving blob: ' + err.message);
-    });
+  nodes: [],
+  connectedPeers: [],
+  tasks: [],
+  logs: [],
+  telemetryHistory: [],
 };
 
-function putStorageBlob() {
-  const content = document.getElementById('storageContentInput').value;
-  if (!content.trim()) return;
+let activeCharts = [];
+let wsInstance = null;
+let wsReconnectAttempts = 0;
+let wsReconnectTimer = null;
 
-  fetch('/api/storage/put', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content })
-  }).then(() => {
-    document.getElementById('storageContentInput').value = '';
-    loadBlobs();
-    loadStatus();
-    appendLog('STORAGE', `Stored new content-addressed blob into local disk vault.`);
-  });
-}
-
-window.deleteBlob = function(blobId) {
-  fetch('/api/storage/del', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ blob_id: blobId })
-  }).then(() => {
-    loadBlobs();
-    loadStatus();
-    appendLog('STORAGE', `Deleted blob ${blobId} from vault.`);
-  });
-};
-
-function scrubStorageVault() {
-  const out = document.getElementById('scrubResult');
-  out.textContent = 'Scrubbing storage vault with SHA-256 cryptographic audits...';
-  out.classList.remove('hidden');
-
-  fetch('/api/storage/scrub', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}'
-  })
-    .then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    })
-    .then(res => {
-      out.textContent = '';
-      const span = document.createElement('span');
-      if (!res.corrupted || res.corrupted.length === 0) {
-        span.className = 'text-secondary';
-        span.textContent = '✓ Cryptographic Audit Complete: 100% of stored blobs passed SHA-256 verification with zero bit-rot.';
-      } else {
-        span.className = 'text-rose';
-        span.textContent = `⚠ Warning: detected ${res.corrupted.length} corrupted blob(s)!`;
-      }
-      out.appendChild(span);
-    })
-    .catch(err => {
-      out.textContent = '';
-      const span = document.createElement('span');
-      span.className = 'text-rose';
-      span.textContent = `⚠ Cryptographic scrub error: ${err.message}`;
-      out.appendChild(span);
-    });
-}
-
-function initWireLogs() {
-  document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentLogFilter = btn.dataset.filter;
-      applyLogFilter();
-    });
-  });
-
-  const btnPause = document.getElementById('btnPauseLogs');
-  btnPause.addEventListener('click', () => {
-    isLogPaused = !isLogPaused;
-    document.getElementById('pauseLogLabel').textContent = isLogPaused ? 'Resume' : 'Pause';
-    btnPause.style.color = isLogPaused ? '#f59e0b' : '';
-  });
-
-  document.getElementById('btnClearLogs').addEventListener('click', () => {
-    document.getElementById('wireLogContainer').innerHTML = '';
-  });
-}
-
-function applyLogFilter() {
-  const rows = document.querySelectorAll('#wireLogContainer .log-row');
-  rows.forEach(r => {
-    if (currentLogFilter === 'all') {
-      r.classList.remove('hidden');
-    } else {
-      const cat = r.dataset.category || 'all';
-      if (cat === currentLogFilter) {
-        r.classList.remove('hidden');
-      } else {
-        r.classList.add('hidden');
-      }
-    }
-  });
-}
-
-function initWebSocket() {
-  const loc = window.location;
-  const token = getAuthToken();
-  const tokenParam = token ? '?token=' + encodeURIComponent(token) : '';
-  const wsURL = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/api/events' + tokenParam;
-  const ws = new WebSocket(wsURL);
-
-  ws.onopen = () => {
-    appendLog('DAEMON', 'Connected to UniCompute desktop daemon WebSocket event bus.');
-    document.getElementById('footerSocketStatus').innerHTML = '<span class="text-secondary">● WebSocket Event Bus Connected</span>';
-  };
-
-  ws.onmessage = (e) => {
-    try {
-      const evt = JSON.parse(e.data);
-      handleLiveEvent(evt);
-    } catch (_) {}
-  };
-
-  ws.onclose = () => {
-    document.getElementById('footerSocketStatus').innerHTML = '<span class="text-amber">○ Reconnecting WebSocket...</span>';
-    setTimeout(initWebSocket, 2000);
-  };
-}
-
-function handleLiveEvent(evt) {
-  let category = 'coordinator';
-  const t = (evt.type || '').toLowerCase();
-  if (t.includes('peer') || t.includes('stream') || t.includes('chunk')) category = 'p2p';
-  if (t.includes('code') || t.includes('shell')) category = 'code';
-  if (t.includes('gpu')) category = 'gpu';
-  if (t.includes('storage') || t.includes('blob')) category = 'storage';
-
-  appendLog(evt.type.toUpperCase(), evt.message, category);
-
-  // Spawn visual particle on real chunk and stream data events
-  if (topology) {
-    if (t === 'chunk_received' && evt.peer_id) {
-      topology.spawnEventPacket(evt.peer_id, currentLocalId, '#10b981');
-    } else if (t === 'stream_message' && evt.peer_id) {
-      topology.spawnEventPacket(evt.peer_id, currentLocalId, '#38bdf8');
-    }
-  }
-
-  if (t.includes('peer') || t.includes('coordinator')) {
-    pollFleetAndPeers();
-    loadCoordinatorStatus();
-  }
-
-  if (t === 'worker_settings_updated') {
-    loadWorkerSettings();
-  }
-
-  if (t.includes('task')) {
-    loadTasks();
-  }
-
-  // Preemption Alert (Objective 3 Watchdog)
-  if (evt.type === 'gpu_preempt_alert') {
-    const banner = document.getElementById('wdAlertBanner');
-    document.getElementById('wdAlertMessage').textContent = evt.message;
-    banner.classList.remove('hidden');
-    setTimeout(() => banner.classList.add('hidden'), 8000);
-  }
-}
-
-function applyStatusData(data) {
-  if (!data || !data.node_id) return;
-  lastStatusData = data;
-  currentLocalId = data.node_id;
-  document.getElementById('localNodeIdLabel').textContent = data.node_id;
-
-  if (data.nat) {
-    document.getElementById('localNatLabel').textContent = `NAT: ${data.nat.nat_type || 'Unknown'}`;
-  }
-
-  // Update GPU Card (Objective 3)
-  if (data.gpu_profile) {
-    if (!data.gpu_profile.total_vram_bytes || data.gpu_profile.total_vram_bytes === 0) {
-      document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'CPU Fallback (No Dedicated GPU)';
-      document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'System'} • DirectML: ${data.gpu_profile.directml_supported}`;
-      document.getElementById('gpuVramLabel').textContent = '0 / 0 MB';
-      document.getElementById('gpuVramAlloc').textContent = '0 MB';
-      document.getElementById('gpuVramBar').style.width = '0%';
-    } else {
-      document.getElementById('gpuDeviceName').textContent = data.gpu_profile.device_name || 'Dedicated GPU';
-      document.getElementById('gpuVendor').textContent = `${data.gpu_profile.vendor || 'Hardware'} • DirectML: ${data.gpu_profile.directml_supported}`;
-      const totalMB = (data.gpu_profile.total_vram_bytes / (1024*1024)).toFixed(0);
-      const availMB = data.gpu_profile.available_vram_bytes ? (data.gpu_profile.available_vram_bytes / (1024*1024)).toFixed(0) : totalMB;
-      document.getElementById('gpuVramLabel').textContent = `${availMB} / ${totalMB} MB`;
-      document.getElementById('gpuVramAlloc').textContent = `${Math.max(0, totalMB - availMB)} MB`;
-      document.getElementById('gpuVramBar').style.width = `${totalMB > 0 ? ((totalMB - availMB) / totalMB) * 100 : 0}%`;
-    }
-
-    if (data.gpu_profile.temperature_c > 0) {
-      document.getElementById('gpuTempPowerLabel').textContent = `${data.gpu_profile.temperature_c.toFixed(1)} °C • ${data.gpu_profile.power_usage_w.toFixed(1)} W`;
-    }
-  }
-
-  // Update Watchdog Radar
-  if (data.watchdog) {
-    document.getElementById('wdPowerLabel').textContent = data.watchdog.on_battery ? 'Battery: UNPLUGGED' : 'AC Power: ONLINE';
-    document.getElementById('wdActivityLabel').textContent = data.watchdog.user_active ? 'User: ACTIVE' : 'User: IDLE';
-    document.getElementById('wdStateLabel').textContent = `State: ${data.watchdog.state.toUpperCase()}`;
-    document.getElementById('navWatchdogBadge').textContent = `${data.watchdog.state.toUpperCase()} (50ms)`;
-  }
-
-  // Storage
-  if (data.storage) {
-    const usedMB = (data.storage.used_bytes / (1024*1024)).toFixed(0);
-    const quotaMB = (data.storage.quota_bytes / (1024*1024)).toFixed(0);
-    document.getElementById('storageUsedText').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-    document.getElementById('navStorageBadge').textContent = `${usedMB} MB / ${(quotaMB/1024).toFixed(0)} GB`;
-    const pct = data.storage.quota_bytes > 0 ? Math.min(100, (data.storage.used_bytes / data.storage.quota_bytes) * 100) : 0;
-    document.getElementById('storageUsageBar').style.width = pct.toFixed(1) + '%';
-    document.getElementById('storageBlobCount').textContent = `${data.storage.blob_count} Blobs`;
-    document.getElementById('storageAvailText').textContent = `${((data.storage.quota_bytes - data.storage.used_bytes)/(1024*1024*1024)).toFixed(1)} GB`;
-  }
-}
-
-function loadStatus() {
-  fetch('/api/status')
-    .then(r => r.json())
-    .then(data => {
-      applyStatusData(data);
-      // Immediately synchronize local node on topology canvas
-      if (topology) {
-        topology.updateFleet(currentFleet, connectedPeers, currentLocalId, data);
-      }
-    });
-}
-
-function pollFleetAndPeers() {
-  Promise.all([
-    fetch('/api/fleet').then(r => r.json()).catch(() => ({ nodes: [] })),
-    fetch('/api/peers').then(r => r.json()).catch(() => ({ peers: [] })),
-    fetch('/api/status').then(r => r.json()).catch(() => lastStatusData || {})
-  ]).then(([fleetData, peersData, statusData]) => {
-    applyStatusData(statusData);
-    currentFleet = (fleetData && fleetData.nodes) || [];
-    connectedPeers = (peersData && peersData.peers) || [];
-
-    document.getElementById('fleetCountBadge').textContent = `${currentFleet.length} Nodes`;
-    document.getElementById('peerCountBadge').textContent = `${connectedPeers.length} Active`;
-    document.getElementById('footerP2PCount').textContent = `${connectedPeers.length} P2P Links Active`;
-
-    // Populate Target Peer Dropdown in Code Tab
-    const peerSelect = document.getElementById('codeTargetPeer');
-    if (peerSelect) {
-      const existingVal = peerSelect.value;
-      peerSelect.innerHTML = '';
-
-      const localOpt = document.createElement('option');
-      localOpt.value = 'local';
-      localOpt.textContent = 'Local Worker (This Machine)';
-      peerSelect.appendChild(localOpt);
-
-      currentFleet.forEach(nodeId => {
-        if (nodeId !== currentLocalId) {
-          const opt = document.createElement('option');
-          opt.value = nodeId;
-          const isConn = connectedPeers.some(p => (p.peer_id || p) === nodeId);
-          opt.textContent = `${nodeId} ${isConn ? '★ [P2P Direct]' : '[Coordinator]'}`;
-          peerSelect.appendChild(opt);
-        }
-      });
-
-      if (existingVal && (existingVal === 'local' || currentFleet.includes(existingVal))) {
-        peerSelect.value = existingVal;
-      } else {
-        peerSelect.value = 'local';
-      }
-    }
-
-    // Refresh Canvas with real status including operator local node
-    if (topology) {
-      topology.updateFleet(currentFleet, connectedPeers, currentLocalId, lastStatusData);
-    }
-    updateFleetSuggestions();
-  }).catch(() => {});
-}
-
-function loadSamples() {
-  fetch('/api/samples')
-    .then(r => r.json())
-    .then(data => {
-      if (!data.samples) return;
-      const codeSelect = document.getElementById('codeSampleSelect');
-      const hipSelect = document.getElementById('hipifySampleSelect');
-
-      while (codeSelect.options.length > 1) codeSelect.remove(1);
-      while (hipSelect.options.length > 1) hipSelect.remove(1);
-
-      data.samples.forEach(s => {
-        const opt = document.createElement('option');
-        opt.value = s.name;
-        opt.textContent = `${s.name} (${s.category})`;
-        opt.dataset.content = s.content;
-        opt.dataset.lang = s.language;
-
-        if (s.language === 'cuda') {
-          hipSelect.appendChild(opt);
-        } else {
-          codeSelect.appendChild(opt);
-        }
-      });
-    });
+// =========================================================================
+// UTILITIES
+// =========================================================================
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, s => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[s]));
 }
 
 function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function appendLog(type, msg, category = 'all') {
-  if (isLogPaused) return;
+function destroyCharts() {
+  activeCharts.forEach(c => { try { c.destroy(); } catch (e) {} });
+  activeCharts = [];
+}
 
-  const container = document.getElementById('wireLogContainer');
-  if (!container) return;
+function showToast(message, tone = 'success') {
+  const stack = document.getElementById('toastStack');
+  const el = document.createElement('div');
+  const iconName = tone === 'warning' || tone === 'error' ? 'alert-triangle' : tone === 'info' ? 'info' : 'check-circle-2';
+  const iconColor = tone === 'error' ? 'text-rose-400' : tone === 'warning' ? 'text-amber-400' : tone === 'info' ? 'text-sky-400' : 'text-emerald-400';
+  el.className = 'pointer-events-auto flex items-center gap-2.5 bg-slate-900 text-white text-xs font-medium px-4 py-3 rounded-xl shadow-lg border border-slate-700 max-w-sm';
+  el.innerHTML = `<i data-lucide="${iconName}" class="w-4 h-4 shrink-0 ${iconColor}"></i><span>${escapeHtml(message)}</span>`;
+  stack.appendChild(el);
+  if (window.lucide) lucide.createIcons({ nodes: [el] });
+  setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transition = 'opacity 0.25s ease';
+    setTimeout(() => el.remove(), 260);
+  }, 3200);
+}
 
-  const div = document.createElement('div');
-  div.className = 'log-row';
-  div.dataset.category = category;
-
-  if (currentLogFilter !== 'all' && currentLogFilter !== category) {
-    div.classList.add('hidden');
-  }
-
-  let typeColor = 'text-primary';
-  if (type.includes('P2P') || type.includes('CHUNK')) typeColor = 'text-secondary';
-  if (type.includes('CODE') || type.includes('SHELL')) typeColor = 'text-tertiary';
-  if (type.includes('STORAGE') || type.includes('BLOB')) typeColor = 'text-primary';
-
-  const timeSpan = document.createElement('span');
-  timeSpan.className = 'text-outline';
-  timeSpan.textContent = `[${new Date().toLocaleTimeString()}] `;
-
-  const typeSpan = document.createElement('span');
-  typeSpan.className = `${typeColor} font-semibold font-mono`;
-  typeSpan.textContent = `[${type}] `;
-
-  const msgSpan = document.createElement('span');
-  msgSpan.className = 'text-on-surface';
-  msgSpan.textContent = msg == null ? '' : String(msg);
-
-  div.append(timeSpan, typeSpan, msgSpan);
-  container.appendChild(div);
-
-  if (document.getElementById('chkAutoScroll').checked) {
-    container.scrollTop = container.scrollHeight;
+function copyText(text, label = 'Copied to clipboard') {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showToast(label)).catch(() => fallbackCopy(text, label));
+  } else {
+    fallbackCopy(text, label);
   }
 }
 
-function escapeHTML(str) {
-  if (str === null || str === undefined) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+function fallbackCopy(text, label) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); showToast(label); } catch (e) {}
+  ta.remove();
 }
 
-/* =========================================================================
-   COORDINATOR HUB, REED-SOLOMON SHARD MATRIX & CLUSTER TASK QUEUE LOGIC
-   ========================================================================= */
+function toggleMobileNav(open) {
+  const sb = document.getElementById('sidebar');
+  const bd = document.getElementById('mobileBackdrop');
+  if (open) {
+    sb.classList.remove('-translate-x-full');
+    bd.classList.remove('hidden');
+  } else {
+    sb.classList.add('-translate-x-full');
+    bd.classList.add('hidden');
+  }
+}
 
-function initCoordinatorHub() {
-  const syncBtn = document.getElementById('btnSyncCoordinatorConfig');
-  if (syncBtn) {
-    syncBtn.addEventListener('click', () => {
-      loadCoordinatorStatus();
-      appendLog('COORDINATOR', 'Syncing coordinator configuration and topology health...');
-    });
+function openModal(title, bodyHtml) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHtml;
+  const bd = document.getElementById('modalBackdrop');
+  bd.classList.remove('hidden');
+  bd.classList.add('flex');
+  if (window.lucide) lucide.createIcons({ nodes: [bd] });
+}
+
+function closeModal() {
+  const bd = document.getElementById('modalBackdrop');
+  bd.classList.add('hidden');
+  bd.classList.remove('flex');
+}
+
+function mapTaskStatus(rawStatus) {
+  const s = String(rawStatus || '').toUpperCase();
+  if (s === 'QUEUED' || s === 'PENDING') return 'Pending';
+  if (s === 'RUNNING' || s === 'DISPATCHED') return 'Running';
+  if (s === 'COMPLETED') return 'Completed';
+  if (s.startsWith('FAILED') || s === 'REJECTED' || s === 'PREEMPTED') return 'Failed';
+  return 'Running';
+}
+
+function classifyEvent(evt) {
+  const t = String(evt.type || '').toLowerCase();
+  const m = String(evt.message || '').toLowerCase();
+
+  let sev = 'Info';
+  if (t.includes('fail') || t.includes('error') || t.includes('reject') || m.includes('failed')) {
+    sev = 'Error';
+  } else if (t.includes('warn') || t.includes('preempt') || t.includes('disconnect') || t.includes('left') || t.includes('timeout')) {
+    sev = 'Warning';
   }
 
-  const restartBtn = document.getElementById('btnRestartDaemon');
-  if (restartBtn) {
-    restartBtn.addEventListener('click', () => {
-      const orig = restartBtn.innerHTML;
-      restartBtn.innerHTML = '<span class="material-symbols-outlined text-base animate-spin">refresh</span><span>Reconnecting...</span>';
-      fetch('/api/coordinator/status')
-        .then(r => r.json())
-        .then(st => {
-          const url = (st && st.coordinator_url) ? st.coordinator_url : (document.getElementById('coordinatorSelect')?.value || 'wss://unicompute-coordinator.onrender.com/ws');
-          return fetch('/api/coordinator/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
-          });
-        })
-        .then(async r => {
-          const data = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            throw new Error(data.error || `HTTP ${r.status}`);
-          }
-          return data;
-        })
-        .then(data => {
-          if (data && data.reconnect_error) {
-            appendLog('DAEMON', `Coordinator reconnect failed: ${data.reconnect_error}`);
-          } else {
-            appendLog('DAEMON', 'Reconnecting to signaling coordinator...');
-          }
-          setTimeout(() => {
-            restartBtn.innerHTML = orig;
-            loadCoordinatorStatus();
-          }, 1000);
-        })
-        .catch(err => {
-          restartBtn.innerHTML = orig;
-          appendLog('DAEMON', `Coordinator reconnect error: ${err.message}`);
-        });
-    });
-  }
+  let cat = 'Coordinator';
+  if (t.includes('peer') || t.includes('p2p') || t.includes('connection')) cat = 'Network';
+  else if (t.includes('storage') || t.includes('chunk')) cat = 'Storage';
+  else if (t.includes('task')) cat = 'Tasks';
+  else if (t.includes('worker')) cat = 'Worker';
 
-  // Cluster Auth Token Controls
-  const inputToken = document.getElementById('inputCoordAuthToken');
-  const btnToggleVis = document.getElementById('btnToggleAuthTokenVis');
-  if (btnToggleVis && inputToken) {
-    btnToggleVis.addEventListener('click', () => {
-      const isPass = inputToken.type === 'password';
-      inputToken.type = isPass ? 'text' : 'password';
-      const icon = btnToggleVis.querySelector('.material-symbols-outlined');
-      if (icon) {
-        icon.textContent = isPass ? 'visibility_off' : 'visibility';
+  const tsRaw = evt.timestamp ? new Date(evt.timestamp) : new Date();
+  const ts = isNaN(tsRaw.getTime()) ? new Date().toTimeString().slice(0, 8) : tsRaw.toTimeString().slice(0, 8);
+
+  return {
+    ts,
+    sev,
+    cat,
+    src: evt.peer_id || state.localNodeId,
+    type: evt.type || 'event',
+    msg: evt.message || (evt.payload ? JSON.stringify(evt.payload) : ''),
+  };
+}
+
+// =========================================================================
+// BACKEND SYNC & WEBSOCKET
+// =========================================================================
+async function syncBackend() {
+  try {
+    const [statusRes, coordRes, gpuRes, fleetRes, peersRes, tasksRes, blobsRes, workerRes] = await Promise.allSettled([
+      apiFetchJson('/api/status'),
+      apiFetchJson('/api/coordinator/status'),
+      apiFetchJson('/api/gpu'),
+      apiFetchJson('/api/fleet'),
+      apiFetchJson('/api/peers'),
+      apiFetchJson('/api/tasks'),
+      apiFetchJson('/api/storage/blobs'),
+      apiFetchJson('/api/worker/settings'),
+    ]);
+
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+    const coord = coordRes.status === 'fulfilled' ? coordRes.value : null;
+    const gpuData = gpuRes.status === 'fulfilled' ? gpuRes.value : null;
+    const fleetData = fleetRes.status === 'fulfilled' ? fleetRes.value : null;
+    const peersData = peersRes.status === 'fulfilled' ? peersRes.value : null;
+    const tasksData = tasksRes.status === 'fulfilled' ? tasksRes.value : null;
+    const blobsData = blobsRes.status === 'fulfilled' ? blobsRes.value : null;
+    const workerData = workerRes.status === 'fulfilled' ? workerRes.value : null;
+
+    if (status) {
+      state.backendConnected = true;
+      state.localNodeId = status.node_id || state.localNodeId;
+      state.poolId = status.pool_id || state.poolId;
+      state.gpuEnabled = Boolean(status.gpu_enabled);
+      state.hostMeta = {
+        os: status.os || '-',
+        arch: status.arch || '-',
+        cpus: status.cpus || 0,
+        goVersion: status.go_version || '-',
+        dockerAvailable: Boolean(status.docker_available),
+        natType: status.nat?.nat_type || 'Unknown',
+        isBehindCGNAT: Boolean(status.nat?.is_behind_cgnat),
+        storageUsedBytes: status.storage?.used_bytes || 0,
+        storageQuotaBytes: status.storage?.quota_bytes || 0,
+        blobCount: status.storage?.blob_count || 0,
+      };
+      if (!state.settingsDraft.coordinatorURL && status.coordinator_url) {
+        state.settingsDraft.coordinatorURL = status.coordinator_url;
+      }
+      if (!state.settingsDraft.joinToken && status.join_token) {
+        state.settingsDraft.joinToken = status.join_token;
+      }
+    }
+
+    if (coord) {
+      state.coordStatus = {
+        status: coord.status || 'DISCONNECTED',
+        authRequired: Boolean(coord.auth_required),
+        authTokenSet: Boolean(coord.auth_token_set),
+        coordinatorURL: coord.coordinator_url || '',
+        coordinatorHost: coord.coordinator_host || '',
+        uptime: coord.uptime || '0h 00m 00s',
+        fleetCount: Number(coord.fleet_count || 0),
+        directPeersCount: Number(coord.direct_peers_count || 0),
+        relayedPeersCount: Number(coord.relayed_peers_count || 0),
+        avgRttMs: Number(coord.avg_rtt_ms || 0),
+        relayThreshold: Number(coord.relay_threshold || 2.0),
+        joinToken: coord.join_token || 'UC-LOCAL',
+        transport: coord.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)',
+      };
+      if (state.currentPage !== 'settings') {
+        state.settingsDraft.coordinatorURL = state.coordStatus.coordinatorURL;
+        state.settingsDraft.relayThreshold = state.coordStatus.relayThreshold;
+        state.settingsDraft.joinToken = state.coordStatus.joinToken;
+      }
+    }
+
+    if (gpuData) {
+      state.gpuEnabled = Boolean(gpuData.enabled);
+      state.localGpuProfile = gpuData.profile || null;
+      state.localWatchdog = gpuData.watchdog || null;
+    }
+
+    if (workerData) {
+      state.workerSettings.codeAllowlist = Array.isArray(workerData.code_allowlist) ? workerData.code_allowlist : [];
+      state.workerSettings.dockerActive = Boolean(workerData.docker_active);
+      state.workerSettings.wildcardAllowed = Boolean(workerData.wildcard_allowed);
+    }
+
+    // Merge local host + /api/peers + /api/fleet (note: /api/fleet returns { nodes: ["id1", "id2"] })
+    const peerMap = new Map();
+    const peersArr = (peersData && Array.isArray(peersData.peers)) ? peersData.peers : [];
+    state.connectedPeers = peersArr;
+    peersArr.forEach(p => {
+      if (p && p.peer_id) {
+        peerMap.set(p.peer_id, p);
       }
     });
-  }
 
-  const btnSaveToken = document.getElementById('btnSaveAuthToken');
-  if (btnSaveToken && inputToken) {
-    btnSaveToken.addEventListener('click', () => {
-      const tok = inputToken.value.trim();
-      if (!tok) {
-        appendLog('COORDINATOR', 'Enter a cluster auth token before saving (use Clear to remove)');
-        inputToken.focus();
-        return;
+    const fleetStrings = (fleetData && Array.isArray(fleetData.nodes)) ? fleetData.nodes : [];
+    const uniquePeerIds = new Set();
+    fleetStrings.forEach(id => {
+      if (typeof id === 'string' && id && id !== state.localNodeId) {
+        uniquePeerIds.add(id);
       }
-      fetchWithAuth('/api/coordinator/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ auth_token: tok })
-      })
-      .then(async r => {
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          throw new Error(data.error || `HTTP ${r.status}`);
-        }
-        return data;
-      })
-      .then(data => {
-        inputToken.value = '';
-        if (data && data.reconnect_error) {
-          appendLog('COORDINATOR', `Cluster auth token saved, but signaling reconnect failed: ${data.reconnect_error}`);
-        } else {
-          appendLog('COORDINATOR', 'Cluster auth token updated & signaling reconnected');
-        }
-        loadCoordinatorStatus();
-        loadWorkerSettings();
-      })
-      .catch(err => {
-        appendLog('COORDINATOR', `Failed to update auth token: ${err.message}`);
+    });
+    peerMap.forEach((_, id) => {
+      if (id !== state.localNodeId) {
+        uniquePeerIds.add(id);
+      }
+    });
+
+    const prof = state.localGpuProfile || (status && status.gpu_profile) || {};
+    const totalVramGB = prof.total_vram_bytes ? Number((prof.total_vram_bytes / (1024 * 1024 * 1024)).toFixed(2)) : 0;
+    const availVramGB = prof.available_vram_bytes ? Number((prof.available_vram_bytes / (1024 * 1024 * 1024)).toFixed(2)) : 0;
+    const usedVramGB = totalVramGB > 0 ? Number(Math.max(0, totalVramGB - availVramGB).toFixed(2)) : 0;
+    const gpuBackends = Array.isArray(prof.supported_backends) && prof.supported_backends.length
+      ? prof.supported_backends
+      : (() => {
+          const r = [];
+          if (prof.cuda_supported) r.push('CUDA');
+          if (prof.directml_supported) r.push('DirectML');
+          if (prof.vulkan_supported) r.push('Vulkan');
+          if (!r.length) r.push('CPU');
+          return r;
+        })();
+
+    const nodeList = [{
+      id: state.localNodeId,
+      isLocal: true,
+      connectedP2P: true,
+      lab: state.poolId || 'Local Pool',
+      tier: totalVramGB > 0 ? 'Tier 3 GPU' : (state.hostMeta.dockerAvailable ? 'Tier 2 Container' : 'Tier 1/Host'),
+      os: `${state.hostMeta.os}/${state.hostMeta.arch}`,
+      cpus: state.hostMeta.cpus,
+      gpuModel: prof.device_name || 'CPU / Integrated',
+      gpuVendor: prof.vendor || 'Unknown',
+      vramUsed: usedVramGB,
+      vramTotal: totalVramGB,
+      tempC: Number(prof.temperature_c || 0),
+      powerW: Number(prof.power_usage_w || 0),
+      rttMs: 0,
+      pairType: 'local',
+      transport: 'Local Host',
+      status: 'Online',
+      blobs: state.hostMeta.blobCount,
+      runtimes: gpuBackends,
+      bytesSent: 0,
+      bytesReceived: 0,
+      color: '#0284C7',
+      pos: [50, 22],
+    }];
+
+    const remoteIds = Array.from(uniquePeerIds).sort();
+    remoteIds.forEach((peerId, idx) => {
+      const pInfo = peerMap.get(peerId);
+      const isConnected = Boolean(pInfo);
+      const metrics = pInfo?.metrics || {};
+      const angle = ((idx + 1) / (remoteIds.length + 1)) * Math.PI * 2;
+      const px = Math.round(50 + 32 * Math.cos(angle));
+      const py = Math.round(50 + 34 * Math.sin(angle));
+      const transportLabel = isConnected
+        ? (metrics.is_direct || pInfo.is_direct ? `Direct WebRTC (${metrics.pair_type || 'p2p'})` : `Relayed (${metrics.pair_type || 'relay'})`)
+        : 'Signaling Only';
+      nodeList.push({
+        id: peerId,
+        isLocal: false,
+        connectedP2P: isConnected,
+        lab: state.poolId || 'Fleet Peer',
+        tier: 'Fleet Peer',
+        os: 'Remote Peer',
+        cpus: 0,
+        gpuModel: 'Remote Capability',
+        gpuVendor: 'Unknown',
+        vramUsed: 0,
+        vramTotal: 0,
+        tempC: 0,
+        powerW: 0,
+        rttMs: isConnected ? Number((metrics.rtt_ms || 0).toFixed(2)) : 0,
+        pairType: metrics.pair_type || '',
+        transport: transportLabel,
+        status: isConnected ? 'Online' : 'Discovered',
+        blobs: 0,
+        runtimes: ['WebRTC DataChannel'],
+        bytesSent: metrics.bytes_sent || 0,
+        bytesReceived: metrics.bytes_received || 0,
+        color: isConnected ? '#059669' : '#64748B',
+        pos: [px, py],
       });
     });
-  }
 
-  const btnClearToken = document.getElementById('btnClearAuthToken');
-  if (btnClearToken && inputToken) {
-    btnClearToken.addEventListener('click', () => {
-      inputToken.value = '';
-      fetchWithAuth('/api/coordinator/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clear_auth_token: true })
-      })
-      .then(async r => {
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          throw new Error(data.error || `HTTP ${r.status}`);
-        }
-        return data;
-      })
-      .then(data => {
-        if (data && data.reconnect_error) {
-          appendLog('COORDINATOR', `Cleared cluster auth token, but signaling reconnect failed: ${data.reconnect_error}`);
-        } else {
-          appendLog('COORDINATOR', 'Cleared cluster auth token & reconnecting');
-        }
-        loadCoordinatorStatus();
-        loadWorkerSettings();
-      })
-      .catch(err => {
-        appendLog('COORDINATOR', `Failed to clear auth token: ${err.message}`);
+    state.nodes = nodeList;
+    if (!state.nodes.find(n => n.id === state.selectedTopoNodeId)) {
+      state.selectedTopoNodeId = state.localNodeId;
+    }
+
+    if (tasksData && Array.isArray(tasksData.tasks)) {
+      state.tasks = tasksData.tasks.map(t => {
+        const mappedStatus = mapTaskStatus(t.status);
+        return {
+          id: t.job_id,
+          title: t.class_ad || t.stage_dag || t.job_id,
+          kind: t.stage_dag || 'Cluster Task',
+          tier: (t.target_match || '').includes('Tier 3') ? 'Tier 3 GPU' : 'Tier 2 Container',
+          specs: t.target_match || 'Matched',
+          worker: t.target_match || state.localNodeId,
+          priority: t.priority || 'P1',
+          durationMs: t.duration_ms ?? null,
+          timestamp: t.timestamp || '',
+          rawStatus: t.status || '',
+          status: mappedStatus,
+          progress: mappedStatus === 'Completed' ? 100 : (mappedStatus === 'Failed' ? 0 : 50),
+        };
       });
-    });
-  }
-
-  const btnJump = document.getElementById('btnJumpToAuthToken');
-  if (btnJump && inputToken) {
-    btnJump.addEventListener('click', () => {
-      inputToken.focus();
-    });
-  }
-
-  // Worker Code Allowlist Controls
-  const inputAllowPeer = document.getElementById('inputAddAllowPeer');
-  const btnAddAllow = document.getElementById('btnAddAllowPeer');
-  if (btnAddAllow && inputAllowPeer) {
-    const handleAdd = () => {
-      const peer = inputAllowPeer.value.trim();
-      if (!peer) return;
-      if (!currentWorkerAllowlist.includes(peer)) {
-        saveWorkerAllowlist([...currentWorkerAllowlist, peer]);
+      if (!state.selectedTaskId && state.tasks.length) {
+        state.selectedTaskId = state.tasks[0].id;
       }
-      inputAllowPeer.value = '';
+    }
+
+    if (blobsData && Array.isArray(blobsData.blobs)) {
+      state.vaultDatasets = blobsData.blobs.map(b => ({
+        id: b.id,
+        sizeBytes: b.size_bytes ?? b.size ?? 0,
+        sizeLabel: formatBytes(b.size_bytes ?? b.size ?? 0),
+        createdAt: b.created_at ?? b.mod_time ?? '',
+      }));
+    }
+
+    // Record real telemetry sample for Overview live chart
+    const storagePct = state.hostMeta.storageQuotaBytes > 0
+      ? Math.min(100, Math.round((state.hostMeta.storageUsedBytes / state.hostMeta.storageQuotaBytes) * 100))
+      : 0;
+    const vramPct = totalVramGB > 0 ? Math.min(100, Math.round((usedVramGB / totalVramGB) * 100)) : 0;
+    state.telemetryHistory.push({
+      label: new Date().toTimeString().slice(0, 8),
+      vramPct,
+      storagePct,
+      avgRttMs: Number((state.coordStatus.avgRttMs || 0).toFixed(1)),
+    });
+    if (state.telemetryHistory.length > 15) {
+      state.telemetryHistory.shift();
+    }
+
+    updateChrome();
+
+    // Never re-render while typing in inputs/textareas/selects, and never wipe active search pages
+    const activeTag = document.activeElement ? document.activeElement.tagName : '';
+    if (activeTag !== 'TEXTAREA' && activeTag !== 'INPUT' && activeTag !== 'SELECT') {
+      renderCurrentPageOnly();
+    }
+  } catch (err) {
+    console.warn('Backend sync warning:', err);
+  }
+}
+
+async function loadSamplesFromBackend() {
+  try {
+    const data = await apiFetchJson('/api/samples');
+    const items = Array.isArray(data) ? data : (data.samples || []);
+    state.allSamples = items;
+    state.cudaSamples = items.filter(s => s.language === 'cuda' || (s.name && s.name.endsWith('.cu')));
+    if (state.cudaSamples.length > 0 && state.cudaSource === defaultCudaSample) {
+      state.gpuSelectedFile = state.cudaSamples[0].name;
+      state.cudaSource = state.cudaSamples[0].content;
+    }
+    if (state.currentPage === 'gpu' || state.currentPage === 'sandbox') {
+      renderCurrentPageOnly();
+    }
+  } catch (e) {
+    console.warn('Samples fetch failed:', e);
+  }
+}
+
+function initWebSocket() {
+  if (wsInstance && (wsInstance.readyState === WebSocket.OPEN || wsInstance.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  try {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const token = getAuthToken();
+    const wsUrl = `${proto}//${window.location.host}/api/events${token ? '?token=' + encodeURIComponent(token) : ''}`;
+    const ws = new WebSocket(wsUrl);
+    wsInstance = ws;
+
+    ws.onopen = () => {
+      wsReconnectAttempts = 0;
     };
-    btnAddAllow.addEventListener('click', handleAdd);
-    inputAllowPeer.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleAdd();
-      }
-    });
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        state.logs.unshift(classifyEvent(msg));
+        if (state.logs.length > 150) state.logs.pop();
+        if (state.currentPage === 'logs') {
+          updateLogsTableOnly();
+        } else if (state.currentPage === 'overview') {
+          const activeTag = document.activeElement ? document.activeElement.tagName : '';
+          if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
+            renderCurrentPageOnly();
+          }
+        }
+      } catch (e) {}
+    };
+
+    ws.onclose = () => {
+      wsInstance = null;
+      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      const delay = Math.min(16000, 1000 * Math.pow(2, wsReconnectAttempts));
+      wsReconnectAttempts += 1;
+      wsReconnectTimer = setTimeout(initWebSocket, delay);
+    };
+  } catch (e) {}
+}
+
+function updateChrome() {
+  const connectedP2PCount = state.nodes.filter(n => !n.isLocal && n.connectedP2P).length;
+  const totalPeers = Math.max(0, state.nodes.length - 1);
+  document.getElementById('sidebarCoordinatorName').textContent = state.localNodeId;
+  document.getElementById('sidebarNodeSummary').textContent = `${connectedP2PCount}/${totalPeers} P2P · ${state.coordStatus.status}`;
+  document.getElementById('navTaskBadge').textContent = state.tasks.length;
+  document.getElementById('topbarJoinCode').textContent = state.coordStatus.joinToken || 'UC-LOCAL';
+
+  const dot = document.getElementById('sidebarStatusDot');
+  const pill = document.getElementById('topbarPill');
+  const coordSt = state.coordStatus.status;
+  let pillCls = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  let dotCls = 'bg-emerald-500';
+  if (!state.backendConnected || coordSt === 'DISCONNECTED') {
+    pillCls = 'bg-amber-50 text-amber-700 border-amber-200';
+    dotCls = 'bg-amber-500';
+  } else if (coordSt === 'AUTH_REQUIRED') {
+    pillCls = 'bg-rose-50 text-rose-700 border-rose-200';
+    dotCls = 'bg-rose-500';
   }
+  dot.className = `w-2 h-2 rounded-full shrink-0 ${dotCls}`;
+  pill.className = `hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border ${pillCls}`;
+  pill.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${dotCls}"></span><span>${escapeHtml(coordSt)} · ${connectedP2PCount}/${totalPeers} P2P</span>`;
 
-  const btnAllowAll = document.getElementById('btnAllowAllCode');
-  if (btnAllowAll) {
-    btnAllowAll.addEventListener('click', () => {
-      saveWorkerAllowlist(['*']);
-    });
-  }
-
-  const btnDenyAll = document.getElementById('btnDenyAllCode');
-  if (btnDenyAll) {
-    btnDenyAll.addEventListener('click', () => {
-      saveWorkerAllowlist([]);
-    });
+  const banner = document.getElementById('coordAuthBanner');
+  if (banner) {
+    if (state.coordStatus.authRequired) {
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+    }
   }
 }
 
-function loadCoordinatorStatus() {
-  fetch('/api/coordinator/status')
-    .then(r => r.json())
-    .then(data => {
-      if (!data) return;
-      const uptimeElem = document.getElementById('coordUptime');
-      if (uptimeElem) uptimeElem.textContent = data.uptime || '0m 00s';
+// =========================================================================
+// NAVIGATION ROUTER
+// =========================================================================
+const pageTitles = {
+  overview: 'Overview',
+  topology: 'Network Topology',
+  sandbox: 'CPU Sandbox & Remote Shell',
+  gpu: 'GPU Compute & HIPIFY',
+  worker: 'Worker Allowlist & Sandbox',
+  tasks: 'Task Queue',
+  'create-task': 'Create Task',
+  'task-detail': 'Task Execution & Details',
+  storage: 'Storage & CAS Blobs',
+  nodes: 'Fleet Nodes',
+  logs: 'Live Event Logs',
+  settings: 'Coordinator & Node Settings',
+  attribution: 'Architecture Notes',
+};
 
-      const socketElem = document.getElementById('coordListenSocket');
-      if (socketElem) socketElem.textContent = data.transport || 'WebRTC DataChannel (ICE/DTLS/SCTP)';
-
-      const mtlsElem = document.getElementById('coordMtls');
-      if (mtlsElem) mtlsElem.textContent = 'DTLS 1.2 / SCTP (Pion WebRTC)';
-
-      const daemonStat = document.getElementById('coordDaemonStatus');
-      const authBadge = document.getElementById('coordAuthBadge');
-      const bannerAuth = document.getElementById('bannerAuthRequired');
-      const pillAuthToken = document.getElementById('pillAuthTokenStatus');
-
-      if (data.status === 'AUTH_REQUIRED' || data.auth_required) {
-        if (daemonStat) {
-          daemonStat.textContent = 'AUTH_REQUIRED';
-          daemonStat.className = 'text-amber-400 font-mono text-[11px] font-semibold';
-        }
-        if (authBadge) {
-          authBadge.textContent = 'Auth Required (401)';
-          authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40';
-          authBadge.classList.remove('hidden');
-        }
-        if (bannerAuth) {
-          bannerAuth.classList.remove('hidden');
-        }
-        if (pillAuthToken) {
-          pillAuthToken.textContent = data.auth_token_set === true ? 'Invalid Token' : 'Not Set';
-          pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
-        }
-      } else {
-        if (daemonStat) {
-          daemonStat.textContent = data.status || 'RUNNING';
-          daemonStat.className = 'text-secondary font-mono text-[11px] font-semibold';
-        }
-        if (bannerAuth) {
-          bannerAuth.classList.add('hidden');
-        }
-        if (data.auth_token_set) {
-          if (pillAuthToken) {
-            pillAuthToken.textContent = 'Token Configured';
-            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
-          }
-          if (authBadge) {
-            authBadge.textContent = 'Authenticated';
-            authBadge.className = 'px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-secondary border border-secondary/30';
-            authBadge.classList.remove('hidden');
-          }
-        } else {
-          if (pillAuthToken) {
-            pillAuthToken.textContent = 'Not Set';
-            pillAuthToken.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-surface-lowest border border-outline-variant/40 text-outline';
-          }
-          if (authBadge) {
-            authBadge.classList.add('hidden');
-          }
-        }
-      }
-
-      if (topology) {
-        if (topology.coordinator) {
-          topology.coordinator.status = (data.status === 'RUNNING' || data.status === 'ONLINE') ? 'ONLINE' : 'OFFLINE';
-        }
-        if (data.coordinator_host) {
-          topology.coordinatorHost = data.coordinator_host;
-        } else if (data.coordinator_url) {
-          try {
-            const u = new URL(data.coordinator_url);
-            topology.coordinatorHost = u.host;
-          } catch (_) {
-            topology.coordinatorHost = data.coordinator_url.replace(/^wss?:\/\//, '').replace(/\/.*$/, '');
-          }
-        }
-      }
-
-      const directCount = data.direct_peers_count ?? 0;
-      const relayedCount = data.relayed_peers_count ?? 0;
-      const avgRttVal = data.avg_rtt_ms ?? 0;
-      const blobCount = data.blob_count ?? 0;
-
-      const directPeers = document.getElementById('coordDirectPeers');
-      if (directPeers) directPeers.textContent = `${directCount} Nodes`;
-
-      const avgRtt = document.getElementById('coordAvgRtt');
-      if (avgRtt) avgRtt.textContent = `Avg RTT: ${avgRttVal.toFixed(1)}ms`;
-
-      const relayedPeers = document.getElementById('coordRelayedPeers');
-      if (relayedPeers) relayedPeers.textContent = `${relayedCount} Nodes`;
-
-      const relayFallback = document.getElementById('coordRelayFallback');
-      if (relayFallback) relayFallback.textContent = 'TURN ICE Candidate';
-
-      const throttled = document.getElementById('coordThrottledPeers');
-      if (throttled) throttled.textContent = `${data.throttled_count ?? 0} Nodes`;
-
-      const merkleVerif = document.getElementById('coordMerkleVerif');
-      if (merkleVerif) {
-        merkleVerif.textContent = blobCount > 0 ? '100.0%' : '0.0%';
-      }
-
-      const hashCount = document.getElementById('coordHashCount');
-      if (hashCount) {
-        hashCount.textContent = `${blobCount.toLocaleString()} Blobs`;
-      }
-
-      // Saturation bar
-      const maxCap = data.mesh_capacity_max ?? 32;
-      const totalNodes = directCount + relayedCount;
-      const satLabel = document.getElementById('coordMeshSaturationLabel');
-      if (satLabel) satLabel.textContent = `Mesh Link Saturation: ${totalNodes}/${maxCap} Cap`;
-
-      const pct = maxCap > 0 ? Math.min(100, Math.round((totalNodes / maxCap) * 100)) : 0;
-      const satPct = document.getElementById('coordMeshPercent');
-      if (satPct) satPct.textContent = `${pct}% Capacity`;
-
-      const directPct = maxCap > 0 ? (directCount / maxCap) * 100 : 0;
-      const relayPct = maxCap > 0 ? (relayedCount / maxCap) * 100 : 0;
-      const sparePct = Math.max(0, 100 - directPct - relayPct);
-
-      const barDirect = document.getElementById('coordBarDirect');
-      const barRelay = document.getElementById('coordBarRelay');
-      const barSpare = document.getElementById('coordBarSpare');
-      if (barDirect) barDirect.style.width = `${directPct}%`;
-      if (barRelay) barRelay.style.width = `${relayPct}%`;
-      if (barSpare) barSpare.style.width = `${sparePct}%`;
-    }).catch(() => {});
+function renderCurrentPageOnly() {
+  const page = state.currentPage;
+  const container = document.getElementById('pageContainer');
+  destroyCharts();
+  if (page === 'overview') renderOverview(container);
+  else if (page === 'topology') renderTopology(container);
+  else if (page === 'sandbox') renderSandbox(container);
+  else if (page === 'gpu') renderGpuCompute(container);
+  else if (page === 'worker') renderWorkerSandbox(container);
+  else if (page === 'tasks') renderTaskQueue(container);
+  else if (page === 'create-task') renderCreateTask(container);
+  else if (page === 'task-detail') renderTaskDetail(container);
+  else if (page === 'storage') renderStorage(container);
+  else if (page === 'nodes') renderFleetNodes(container);
+  else if (page === 'logs') renderLogs(container);
+  else if (page === 'settings') renderSettings(container);
+  else if (page === 'attribution') renderAttribution(container);
+  if (window.lucide) lucide.createIcons();
 }
 
-function saveWorkerAllowlist(newList) {
-  fetchWithAuth('/api/worker/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code_allowlist: newList })
-  })
-  .then(r => r.json())
-  .then(data => {
-    appendLog('WORKER', `Updated code execution allowlist: [${(data.code_allowlist || []).join(', ')}]`);
-    loadWorkerSettings();
-  })
-  .catch(err => {
-    appendLog('WORKER', `Failed to update code allowlist: ${err.message}`);
-  });
-}
+function navigate(page) {
+  state.currentPage = page;
+  toggleMobileNav(false);
+  updateChrome();
 
-function loadWorkerSettings() {
-  fetchWithAuth('/api/worker/settings')
-    .then(r => r.json())
-    .then(data => {
-      if (!data) return;
-      currentWorkerAllowlist = data.code_allowlist || [];
-
-      // Runtime Status Badge
-      const badge = document.getElementById('badgeDockerStatus');
-      if (badge) {
-        if (data.docker_active) {
-          badge.textContent = 'Docker Sandbox Active';
-          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-secondary/30 text-secondary';
-        } else {
-          badge.textContent = 'Docker Unavailable (Forwarding Only)';
-          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-300';
-        }
-      }
-
-      // Render interactive chip list
-      const container = document.getElementById('codeAllowlistChips');
-      if (container) {
-        container.textContent = '';
-        if (currentWorkerAllowlist.length === 0) {
-          const emptySpan = document.createElement('span');
-          emptySpan.className = 'text-xs text-outline italic p-1';
-          emptySpan.textContent = 'Default Deny — no remote peers can execute code on this machine.';
-          container.appendChild(emptySpan);
-        } else {
-          currentWorkerAllowlist.forEach(p => {
-            const span = document.createElement('span');
-            if (p === '*') {
-              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5';
-              const warnIcon = document.createElement('span');
-              warnIcon.className = 'material-symbols-outlined text-sm';
-              warnIcon.textContent = 'warning';
-              const label = document.createElement('span');
-              label.textContent = 'Wildcard (*) active — any authenticated cluster peer can submit Docker code jobs.';
-              const rmBtn = document.createElement('button');
-              rmBtn.type = 'button';
-              rmBtn.className = 'btn-remove-chip ml-1 text-amber-300 hover:text-white font-bold leading-none cursor-pointer';
-              rmBtn.title = 'Remove wildcard';
-              rmBtn.textContent = '\u00d7';
-              rmBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const nextList = currentWorkerAllowlist.filter(item => item !== '*');
-                saveWorkerAllowlist(nextList);
-              });
-              span.append(warnIcon, label, rmBtn);
-            } else {
-              span.className = 'px-2.5 py-1 rounded-md text-xs font-mono bg-surface-high text-on-surface border border-outline-variant/50 flex items-center gap-1.5';
-              const label = document.createElement('span');
-              label.textContent = p;
-              const rmBtn = document.createElement('button');
-              rmBtn.type = 'button';
-              rmBtn.className = 'btn-remove-chip ml-1 text-outline hover:text-error font-bold leading-none cursor-pointer';
-              rmBtn.title = 'Remove peer';
-              rmBtn.textContent = '\u00d7';
-              rmBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const nextList = currentWorkerAllowlist.filter(item => item !== p);
-                saveWorkerAllowlist(nextList);
-              });
-              span.append(label, rmBtn);
-            }
-            container.appendChild(span);
-          });
-        }
-      }
-
-      // Update fleet peer suggestions
-      updateFleetSuggestions();
-    })
-    .catch(() => {});
-}
-
-function updateFleetSuggestions() {
-  const wrap = document.getElementById('fleetSuggestionsWrap');
-  const list = document.getElementById('fleetSuggestionsList');
-  if (!wrap || !list) return;
-
-  const candidatePeers = (currentFleet || []).filter(p => {
-    return p && p !== currentLocalId && !currentWorkerAllowlist.includes(p) && !currentWorkerAllowlist.includes('*');
+  const activeNavKey = (page === 'create-task' || page === 'task-detail') ? 'tasks' : page;
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    if (btn.dataset.nav === activeNavKey) {
+      btn.classList.add('nav-active');
+      btn.classList.remove('nav-idle');
+    } else {
+      btn.classList.remove('nav-active');
+      btn.classList.add('nav-idle');
+    }
   });
 
-  if (candidatePeers.length === 0) {
-    wrap.classList.add('hidden');
-    list.innerHTML = '';
+  document.getElementById('topbarTitle').textContent = pageTitles[page] || 'Overview';
+  renderCurrentPageOnly();
+}
+
+function openCreateTask(preselectedNode = 'Auto') {
+  state.createForm.targetNode = preselectedNode;
+  navigate('create-task');
+}
+
+function openTaskDetail(taskId) {
+  state.selectedTaskId = taskId;
+  navigate('task-detail');
+}
+
+// =========================================================================
+// PAGE 1: OVERVIEW
+// =========================================================================
+function renderOverview(container) {
+  const local = state.nodes.find(n => n.isLocal) || {};
+  const remoteNodes = state.nodes.filter(n => !n.isLocal);
+  const connectedCount = remoteNodes.filter(n => n.connectedP2P).length;
+  const runningTasks = state.tasks.filter(t => t.status === 'Running').length;
+  const pendingTasks = state.tasks.filter(t => t.status === 'Pending').length;
+  const failedTasks = state.tasks.filter(t => t.status === 'Failed').length;
+  const completedTasks = state.tasks.filter(t => t.status === 'Completed').length;
+  const vramTotal = Number(local.vramTotal || 0);
+  const vramUsed = Number(local.vramUsed || 0);
+  const vramPct = vramTotal > 0 ? Math.min(100, Math.round((vramUsed / vramTotal) * 100)) : 0;
+  const storagePct = state.hostMeta.storageQuotaBytes > 0
+    ? Math.min(100, Math.round((state.hostMeta.storageUsedBytes / state.hostMeta.storageQuotaBytes) * 100))
+    : 0;
+
+  container.innerHTML = `
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+            <span>Coordinator &amp; Fleet</span>
+            <i data-lucide="server" class="w-4 h-4 text-slate-400"></i>
+          </div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-bold text-slate-900">${connectedCount} / ${remoteNodes.length}</span>
+            <span class="text-xs font-medium ${state.coordStatus.status === 'RUNNING' || state.coordStatus.status === 'CONNECTED' ? 'text-emerald-600' : 'text-amber-600'}">${escapeHtml(state.coordStatus.status)}</span>
+          </div>
+          <div class="mt-2 text-xs text-slate-500 truncate">Host: ${escapeHtml(state.localNodeId)} (${escapeHtml(state.hostMeta.os)}/${escapeHtml(state.hostMeta.arch)}, ${state.hostMeta.cpus} CPU)</div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+            <span>Cluster Tasks</span>
+            <i data-lucide="activity" class="w-4 h-4 text-slate-400"></i>
+          </div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-bold text-slate-900">${state.tasks.length}</span>
+            <span class="text-xs text-slate-500">${runningTasks} running · ${pendingTasks} pending</span>
+          </div>
+          <div class="mt-2 text-xs text-slate-500">${completedTasks} completed · ${failedTasks} failed</div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+            <span>Local GPU VRAM</span>
+            <i data-lucide="cpu" class="w-4 h-4 text-slate-400"></i>
+          </div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-bold text-slate-900">${vramTotal.toFixed(1)} GB</span>
+            <span class="text-xs text-slate-500">${Math.max(0, vramTotal - vramUsed).toFixed(1)} GB free</span>
+          </div>
+          <div class="mt-3 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div class="h-full bg-slate-900 rounded-full" style="width:${vramPct}%"></div>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+            <span>CAS Blob Store</span>
+            <i data-lucide="database" class="w-4 h-4 text-slate-400"></i>
+          </div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-bold text-slate-900">${state.vaultDatasets.length} Blobs</span>
+            <span class="text-xs text-slate-500">${formatBytes(state.hostMeta.storageUsedBytes)}</span>
+          </div>
+          <div class="mt-2 text-xs text-slate-500">${storagePct}% of ${formatBytes(state.hostMeta.storageQuotaBytes)} quota · NAT: ${escapeHtml(state.hostMeta.natType)}</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div class="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-sm font-bold text-slate-900">Live Telemetry Samples (From Backend Polls)</h2>
+            <div class="flex items-center gap-4 text-xs text-slate-500">
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-violet-500"></span>VRAM %</span>
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>Storage %</span>
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Avg P2P RTT (ms)</span>
+            </div>
+          </div>
+          <div class="relative h-64">
+            <canvas id="overviewUtilChart"></canvas>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-bold text-slate-900">Node &amp; Transport Diagnostics</h2>
+            <span class="text-xs font-medium ${state.hostMeta.dockerAvailable ? 'text-emerald-600' : 'text-amber-600'}">${state.hostMeta.dockerAvailable ? 'Docker Ready' : 'No Docker'}</span>
+          </div>
+          <div class="space-y-2.5 text-xs">
+            <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+              <span class="text-slate-500">Coordinator</span>
+              <strong class="text-slate-900 font-mono-code truncate max-w-[170px]">${escapeHtml(state.coordStatus.coordinatorHost || 'Not set')}</strong>
+            </div>
+            <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+              <span class="text-slate-500">NAT / CGNAT</span>
+              <strong class="text-slate-900">${escapeHtml(state.hostMeta.natType)}${state.hostMeta.isBehindCGNAT ? ' (CGNAT)' : ''}</strong>
+            </div>
+            <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+              <span class="text-slate-500">P2P Direct / Relayed</span>
+              <strong class="text-emerald-700">${state.coordStatus.directPeersCount} Direct · ${state.coordStatus.relayedPeersCount} Relayed</strong>
+            </div>
+            <div class="p-2.5 rounded-lg bg-slate-50 flex items-center justify-between">
+              <span class="text-slate-500">Watchdog</span>
+              <strong class="text-slate-900">${escapeHtml(state.localWatchdog?.state || 'stopped')}${state.localWatchdog?.on_battery ? ` (${state.localWatchdog.battery_percent}% bat)` : ''}</strong>
+            </div>
+          </div>
+          <div class="text-[11px] text-slate-500 font-mono-code">Uptime: ${escapeHtml(state.coordStatus.uptime)} · ${escapeHtml(state.hostMeta.goVersion)}</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-5 gap-5">
+        <div class="lg:col-span-3 bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-bold text-slate-900">Recent Workloads</h2>
+            <button type="button" data-action="nav" data-page="tasks" class="text-xs font-semibold text-sky-600 hover:text-sky-700">View all</button>
+          </div>
+          <div class="divide-y divide-slate-100">
+            ${state.tasks.length ? state.tasks.slice(0, 4).map(t => `
+              <button type="button" data-action="open-task" data-id="${escapeHtml(t.id)}" class="w-full text-left py-3 flex items-center gap-3 hover:bg-slate-50/80 px-2 -mx-2 rounded-lg transition-colors">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs font-semibold text-slate-900 truncate">${escapeHtml(t.title)}</span>
+                    <span class="text-xs font-mono-code text-slate-600 shrink-0">${escapeHtml(t.status)}${t.durationMs != null ? ` · ${t.durationMs}ms` : ''}</span>
+                  </div>
+                  <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(t.worker)} · ${escapeHtml(t.tier)}</div>
+                </div>
+              </button>
+            `).join('') : '<div class="py-6 text-center text-xs text-slate-500">No tasks recorded yet. Click "+ New Task" or run a sandbox / GPU job.</div>'}
+          </div>
+        </div>
+
+        <div class="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-bold text-slate-900">Recent Events</h2>
+            <button type="button" data-action="nav" data-page="logs" class="text-xs font-semibold text-sky-600 hover:text-sky-700">View logs</button>
+          </div>
+          <div class="space-y-3.5">
+            ${state.logs.length ? state.logs.slice(0, 4).map(l => `
+              <div class="flex items-start gap-2.5 text-xs">
+                <span class="mt-1.5 w-2 h-2 rounded-full shrink-0 ${l.sev === 'Error' ? 'bg-rose-500' : l.sev === 'Warning' ? 'bg-amber-500' : 'bg-sky-500'}"></span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-semibold text-slate-800">${escapeHtml(l.type)}</span>
+                    <span class="text-[11px] font-mono-code text-slate-400">${escapeHtml(l.ts)}</span>
+                  </div>
+                  <p class="text-xs text-slate-500 mt-0.5 leading-relaxed break-words">${escapeHtml(l.msg)}</p>
+                </div>
+              </div>
+            `).join('') : '<div class="py-6 text-center text-xs text-slate-500">Listening for live node events via /api/events...</div>'}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const ctx = document.getElementById('overviewUtilChart');
+  if (ctx && window.Chart) {
+    const samples = state.telemetryHistory.length
+      ? state.telemetryHistory
+      : [{ label: 'Now', vramPct, storagePct, avgRttMs: Number((state.coordStatus.avgRttMs || 0).toFixed(1)) }];
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: samples.map(s => s.label),
+        datasets: [
+          { label: 'VRAM %', data: samples.map(s => s.vramPct), borderColor: '#8B5CF6', backgroundColor: 'rgba(139,92,246,0.08)', fill: true, tension: 0.3, borderWidth: 2, pointRadius: 2.5 },
+          { label: 'Storage %', data: samples.map(s => s.storagePct), borderColor: '#0EA5E9', backgroundColor: 'transparent', fill: false, tension: 0.3, borderWidth: 2, pointRadius: 2.5 },
+          { label: 'Avg RTT (ms)', data: samples.map(s => s.avgRttMs), borderColor: '#10B981', backgroundColor: 'transparent', fill: false, tension: 0.3, borderWidth: 2, borderDash: [4, 4], pointRadius: 2 },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: '#64748B', font: { size: 11 } } },
+          y: { min: 0, grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', font: { size: 11 } } },
+        },
+      },
+    });
+    activeCharts.push(chart);
+  }
+}
+
+// =========================================================================
+// PAGE 2: NETWORK TOPOLOGY & LIVE P2P CONTROLS
+// =========================================================================
+function renderTopology(container) {
+  const selected = state.nodes.find(n => n.id === state.selectedTopoNodeId) || state.nodes[0];
+  if (!selected) {
+    container.innerHTML = '<div class="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-500">No nodes discovered yet.</div>';
     return;
   }
 
-  wrap.classList.remove('hidden');
-  list.innerHTML = '';
-  candidatePeers.forEach(p => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'px-2 py-0.5 rounded bg-surface-high hover:bg-surface-highest border border-outline-variant/30 text-[11px] text-primary font-mono cursor-pointer transition-colors';
-    btn.textContent = `+ ${p}`;
-    btn.title = `Authorize ${p}`;
-    btn.addEventListener('click', () => {
-      saveWorkerAllowlist([...currentWorkerAllowlist, p]);
+  const localNode = state.nodes.find(n => n.isLocal) || state.nodes[0];
+  const lx = localNode.pos[0] * 6;
+  const ly = localNode.pos[1] * 4.2;
+  const lastPing = state.peerPingResults[selected.id];
+
+  container.innerHTML = `
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+      <div class="xl:col-span-2 bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between min-h-[540px]" style="background-image: radial-gradient(#E2E8F0 1px, transparent 1px); background-size: 24px 24px;">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="inline-flex rounded-lg bg-slate-100 p-1 border border-slate-200 text-xs">
+            <button type="button" data-action="set-topo-view" data-mode="mesh" class="px-3 py-1 rounded-md font-medium ${state.topoViewMode === 'mesh' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">P2P Mesh</button>
+            <button type="button" data-action="set-topo-view" data-mode="signaling" class="px-3 py-1 rounded-md font-medium ${state.topoViewMode === 'signaling' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'}">Signaling Hub</button>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-slate-600 bg-white/90 px-3 py-1.5 rounded-lg border border-slate-200">
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-sky-500"></span>Local Node</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>P2P Connected</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>Fleet Discovered</span>
+          </div>
+        </div>
+
+        <div class="relative w-full h-[420px] my-auto">
+          <svg viewBox="0 0 600 420" class="w-full h-full">
+            <circle cx="300" cy="210" r="88" fill="none" stroke="#E2E8F0" stroke-dasharray="4 4" />
+            <circle cx="300" cy="210" r="165" fill="none" stroke="#CBD5E1" stroke-dasharray="5 5" />
+
+            <!-- Signaling hub lines -->
+            ${state.nodes.map(n => {
+              const x = n.pos[0] * 6;
+              const y = n.pos[1] * 4.2;
+              return `<line x1="300" y1="210" x2="${x}" y2="${y}" stroke="#E2E8F0" stroke-width="1.2" stroke-dasharray="3 4" />`;
+            }).join('')}
+
+            <!-- Direct/Relayed WebRTC P2P DataChannel links from local node to connected peers -->
+            ${state.nodes.filter(n => !n.isLocal && n.connectedP2P).map(n => {
+              const x = n.pos[0] * 6;
+              const y = n.pos[1] * 4.2;
+              const isRelayed = n.transport.toLowerCase().includes('relayed');
+              const strokeColor = isRelayed ? '#D97706' : '#059669';
+              return `<line x1="${lx}" y1="${ly}" x2="${x}" y2="${y}" stroke="${strokeColor}" stroke-width="2.5" class="flow-line" />`;
+            }).join('')}
+
+            <g>
+              <circle cx="300" cy="210" r="38" fill="#E0F2FE" fill-opacity="0.6" />
+              <circle cx="300" cy="210" r="28" fill="#FFFFFF" stroke="#0284C7" stroke-width="2.5" />
+              <text x="300" y="213" text-anchor="middle" font-size="10" font-weight="700" fill="#0F172A">HUB</text>
+            </g>
+
+            ${state.nodes.map(n => {
+              const x = n.pos[0] * 6;
+              const y = n.pos[1] * 4.2;
+              const isSel = n.id === selected.id;
+              return `
+                <g class="cursor-pointer" data-action="select-topo-node" data-id="${escapeHtml(n.id)}">
+                  ${isSel ? `<circle cx="${x}" cy="${y}" r="26" fill="${n.color}" fill-opacity="0.14" stroke="${n.color}" stroke-width="1.5" stroke-dasharray="3 3" />` : ''}
+                  <circle cx="${x}" cy="${y}" r="18" fill="#FFFFFF" stroke="${n.color}" stroke-width="${isSel ? 3 : 2}" />
+                  <circle cx="${x}" cy="${y}" r="5" fill="${n.color}" />
+                  <text x="${x}" y="${y - 24}" text-anchor="middle" font-size="11" font-weight="700" fill="#0F172A">${escapeHtml(n.id)}</text>
+                  <text x="${x}" y="${y + 32}" text-anchor="middle" font-size="10" fill="#64748B">${escapeHtml(n.isLocal ? 'Local Host' : n.transport)}</text>
+                </g>
+              `;
+            }).join('')}
+          </svg>
+        </div>
+
+        <div class="text-xs text-slate-500 text-center">Solid/animated emerald links represent active WebRTC DataChannels (${state.coordStatus.directPeersCount} direct, ${state.coordStatus.relayedPeersCount} relayed).</div>
+      </div>
+
+      <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between">
+        <div>
+          <div class="flex items-start justify-between gap-2 pb-4 border-b border-slate-100">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full ${selected.status === 'Online' ? 'bg-emerald-500' : 'bg-slate-400'}"></span>
+                <h2 class="text-base font-bold text-slate-900 truncate">${escapeHtml(selected.id)}</h2>
+              </div>
+              <p class="text-xs text-slate-500 mt-1">${escapeHtml(selected.lab)} · ${escapeHtml(selected.os)}</p>
+            </div>
+            <span class="text-xs font-medium px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 shrink-0">${escapeHtml(selected.status)}</span>
+          </div>
+
+          <div class="py-4 border-b border-slate-100 space-y-2 text-xs">
+            <div class="flex justify-between"><span class="text-slate-500">Transport Path</span><span class="font-semibold text-slate-900">${escapeHtml(selected.transport)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Hardware / GPU</span><span class="font-semibold text-slate-900 truncate max-w-[180px]">${escapeHtml(selected.gpuModel)}</span></div>
+            ${selected.vramTotal > 0 ? `<div class="flex justify-between"><span class="text-slate-500">VRAM</span><span class="font-mono-code text-slate-900">${selected.vramUsed} / ${selected.vramTotal} GB</span></div>` : ''}
+            ${selected.isLocal ? `<div class="flex justify-between"><span class="text-slate-500">Host CPUs</span><span class="font-mono-code text-slate-900">${selected.cpus}</span></div>` : ''}
+          </div>
+
+          <div class="grid grid-cols-2 gap-3 my-4 text-xs">
+            <div class="p-3 rounded-lg bg-slate-50">
+              <div class="text-slate-500">RTT</div>
+              <div class="font-semibold text-slate-900 mt-0.5">${selected.isLocal ? 'Local (0 ms)' : (selected.connectedP2P ? `${selected.rttMs} ms` : 'Disconnected')}</div>
+            </div>
+            <div class="p-3 rounded-lg bg-slate-50">
+              <div class="text-slate-500">Data Transfer</div>
+              <div class="font-semibold text-slate-900 mt-0.5">${selected.isLocal ? `${selected.blobs} blobs` : `${formatBytes(selected.bytesSent)} / ${formatBytes(selected.bytesReceived)}`}</div>
+            </div>
+          </div>
+
+          ${lastPing ? `
+            <div class="p-3 rounded-lg border text-xs mb-4 ${lastPing.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-rose-50 border-rose-200 text-rose-900'}">
+              <strong>Last Ping:</strong> ${escapeHtml(lastPing.message)}
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          ${selected.isLocal ? `
+            <button type="button" data-action="view-node-logs" data-id="${escapeHtml(selected.id)}" class="col-span-2 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">View Local Logs</button>
+          ` : `
+            ${selected.connectedP2P ? `
+              <button type="button" data-action="peer-disconnect" data-id="${escapeHtml(selected.id)}" class="py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700">Disconnect</button>
+              <button type="button" data-action="peer-ping" data-id="${escapeHtml(selected.id)}" class="py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Ping Peer</button>
+            ` : `
+              <button type="button" data-action="peer-connect" data-id="${escapeHtml(selected.id)}" class="col-span-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold">Connect P2P</button>
+            `}
+            <button type="button" data-action="view-node-logs" data-id="${escapeHtml(selected.id)}" class="col-span-2 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">View Node Logs</button>
+          `}
+          <button type="button" data-action="assign-workload" data-id="${escapeHtml(selected.isLocal ? 'Auto' : selected.id)}" class="col-span-2 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Assign Workload</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function connectPeerAction(peerId) {
+  try {
+    showToast(`Connecting WebRTC P2P to ${peerId}...`, 'info');
+    await apiFetchJson('/api/peer/connect', { method: 'POST', body: JSON.stringify({ peer_id: peerId }) });
+    showToast(`Connected P2P link with ${peerId}`);
+    await syncBackend();
+  } catch (err) {
+    showToast(`P2P connect failed: ${err.message}`, 'error');
+  }
+}
+
+async function disconnectPeerAction(peerId) {
+  try {
+    await apiFetchJson('/api/peer/disconnect', { method: 'POST', body: JSON.stringify({ peer_id: peerId }) });
+    delete state.peerPingResults[peerId];
+    showToast(`Disconnected P2P link with ${peerId}`, 'info');
+    await syncBackend();
+  } catch (err) {
+    showToast(`P2P disconnect failed: ${err.message}`, 'error');
+  }
+}
+
+async function pingPeerAction(peerId) {
+  try {
+    const res = await apiFetchJson('/api/peer/ping', { method: 'POST', body: JSON.stringify({ peer_id: peerId }) });
+    if (res.status === 'ping_timeout') {
+      state.peerPingResults[peerId] = { ok: false, message: 'Ping timed out (> 5000 ms)' };
+      showToast(`Ping to ${peerId} timed out`, 'warning');
+    } else {
+      const rtt = Number(res.rtt_ms ?? res.duration_ms ?? 0).toFixed(2);
+      state.peerPingResults[peerId] = { ok: true, message: `Pong received in ${rtt} ms` };
+      showToast(`Ping ${peerId}: ${rtt} ms`);
+    }
+    await syncBackend();
+  } catch (err) {
+    state.peerPingResults[peerId] = { ok: false, message: err.message };
+    showToast(`Ping failed: ${err.message}`, 'error');
+    if (state.currentPage === 'topology') renderCurrentPageOnly();
+  }
+}
+
+// =========================================================================
+// PAGE 3: CPU SANDBOX & REMOTE SHELL (OBJECTIVE 2)
+// =========================================================================
+function renderSandbox(container) {
+  const sb = state.sandbox;
+  const codeSamples = state.allSamples.filter(s => s.language === 'python' || s.language === 'c' || s.language === 'cpp');
+  const peerOptions = ['local', ...state.nodes.filter(n => !n.isLocal).map(n => n.id)];
+
+  container.innerHTML = `
+    <div class="space-y-6">
+      <!-- Objective 2 Docker Sandbox -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div>
+            <h2 class="text-sm font-bold text-slate-900">Objective 2 · Isolated Container Code Runner</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Execute Python, C, or C++ jobs locally or over P2P WebRTC DataChannels via <code class="font-mono-code">POST /api/code/run</code>.</p>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <span class="px-2.5 py-1 rounded-full font-medium ${state.hostMeta.dockerAvailable ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">
+              Local Docker: ${state.hostMeta.dockerAvailable ? 'Active' : 'Unavailable'}
+            </span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Sample Template</label>
+            <select id="sbSampleSelect" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
+              <option value="">Custom code...</option>
+              ${codeSamples.map((s, idx) => `<option value="${idx}" ${sb.selectedSample === s.name ? 'selected' : ''}>${escapeHtml(s.name)} (${escapeHtml(s.language)})</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Language</label>
+            <select id="sbLanguage" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+              <option value="python" ${sb.language === 'python' ? 'selected' : ''}>Python</option>
+              <option value="c" ${sb.language === 'c' ? 'selected' : ''}>C (gcc)</option>
+              <option value="cpp" ${sb.language === 'cpp' ? 'selected' : ''}>C++ (g++)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Target Peer</label>
+            <select id="sbTargetPeer" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
+              ${peerOptions.map(id => `<option value="${escapeHtml(id)}" ${sb.targetPeer === id ? 'selected' : ''}>${escapeHtml(id === 'local' ? 'local (This Node)' : id)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Timeout: <span id="sbTimeoutLabel" class="font-mono-code">${sb.timeout}s</span></label>
+            <input id="sbTimeoutSlider" type="range" min="1" max="30" value="${sb.timeout}" class="w-full mt-2" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+          <div class="lg:col-span-2">
+            <label class="block font-semibold text-slate-700 mb-1.5">Source Code</label>
+            <textarea id="sbSourceEditor" rows="11" spellcheck="false" class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none focus:border-slate-400">${escapeHtml(sb.source)}</textarea>
+          </div>
+          <div class="space-y-3">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Standard Input (stdin)</label>
+              <textarea id="sbStdinEditor" rows="6" spellcheck="false" placeholder="Optional stdin lines..." class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none focus:border-slate-400">${escapeHtml(sb.stdin)}</textarea>
+            </div>
+            <button type="button" data-action="run-sandbox-code" ${sb.running ? 'disabled' : ''} class="w-full py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-semibold">
+              ${sb.running ? 'Executing Container...' : 'Run Container Job'}
+            </button>
+          </div>
+        </div>
+
+        ${sb.result ? `
+          <div class="rounded-xl border ${sb.result.exit_code === 0 && !sb.result.error ? 'border-emerald-200 bg-emerald-50/40' : 'border-rose-200 bg-rose-50/40'} p-4 space-y-2 text-xs">
+            <div class="flex flex-wrap items-center justify-between gap-2 font-mono-code">
+              <span class="font-semibold text-slate-900">Exit Code: ${escapeHtml(sb.result.exit_code)} · Duration: ${escapeHtml(sb.result.duration_ms || 0)} ms</span>
+              ${sb.result.job_id ? `<span class="text-slate-500">Job: ${escapeHtml(sb.result.job_id)}</span>` : ''}
+            </div>
+            ${sb.result.error ? `<div class="text-rose-700 font-mono-code">${escapeHtml(sb.result.error)}</div>` : ''}
+            ${sb.result.stdout ? `<div><div class="text-[11px] font-semibold text-slate-500 mb-1">STDOUT</div><pre class="p-3 rounded-lg bg-white border border-slate-200 font-mono-code overflow-x-auto text-slate-800">${escapeHtml(sb.result.stdout)}</pre></div>` : ''}
+            ${sb.result.stderr ? `<div><div class="text-[11px] font-semibold text-rose-600 mb-1">STDERR</div><pre class="p-3 rounded-lg bg-white border border-rose-200 font-mono-code overflow-x-auto text-rose-800">${escapeHtml(sb.result.stderr)}</pre></div>` : ''}
+          </div>
+        ` : ''}
+      </div>
+
+      <!-- Remote Shell Execution -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+        <div class="border-b border-slate-100 pb-3">
+          <h2 class="text-sm font-bold text-slate-900">Remote Shell Execution</h2>
+          <p class="text-xs text-slate-500 mt-0.5">Opt-in authenticated command execution via <code class="font-mono-code">POST /api/shell/exec</code> (requires <code class="font-mono-code">-enable-remote-shell</code> on target).</p>
+        </div>
+        <form id="shellExecForm" class="flex flex-wrap items-center gap-2.5 text-xs">
+          <select id="shellTargetPeer" class="px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
+            <option value="local" ${sb.shellPeer === 'local' ? 'selected' : ''}>local</option>
+            <option value="all" ${sb.shellPeer === 'all' ? 'selected' : ''}>all (Connected Peers)</option>
+            ${state.nodes.filter(n => !n.isLocal).map(n => `<option value="${escapeHtml(n.id)}" ${sb.shellPeer === n.id ? 'selected' : ''}>${escapeHtml(n.id)}</option>`).join('')}
+          </select>
+          <input id="shellCmdInput" value="${escapeHtml(sb.shellCommand)}" placeholder="e.g., uname -a or hostname" class="flex-1 min-w-[220px] px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+          <button type="submit" ${sb.shellRunning ? 'disabled' : ''} class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-semibold">
+            ${sb.shellRunning ? 'Running...' : 'Execute Shell'}
+          </button>
+        </form>
+        ${sb.shellResult ? `
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2 text-xs font-mono-code">
+            ${sb.shellResult.results ? `<pre class="overflow-x-auto text-slate-800">${escapeHtml(JSON.stringify(sb.shellResult.results, null, 2))}</pre>` : `
+              <div class="font-semibold text-slate-900">Exit Code: ${escapeHtml(sb.shellResult.exit_code)} · ${escapeHtml(sb.shellResult.duration_ms || 0)} ms</div>
+              ${sb.shellResult.error ? `<div class="text-rose-700">${escapeHtml(sb.shellResult.error)}</div>` : ''}
+              ${sb.shellResult.stdout ? `<pre class="p-2.5 rounded bg-white border border-slate-200 overflow-x-auto text-slate-800">${escapeHtml(sb.shellResult.stdout)}</pre>` : ''}
+              ${sb.shellResult.stderr ? `<pre class="p-2.5 rounded bg-white border border-rose-200 overflow-x-auto text-rose-800">${escapeHtml(sb.shellResult.stderr)}</pre>` : ''}
+            `}
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+async function runSandboxCode() {
+  const sb = state.sandbox;
+  if (!sb.source.trim()) {
+    showToast('Enter source code to run', 'warning');
+    return;
+  }
+  sb.running = true;
+  renderCurrentPageOnly();
+  try {
+    const res = await apiFetchJson('/api/code/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        peer_id: sb.targetPeer,
+        language: sb.language,
+        source: sb.source,
+        stdin: sb.stdin,
+        timeout: Number(sb.timeout) || 10,
+      }),
     });
-    list.appendChild(btn);
+    sb.result = res;
+    if (res.error) {
+      showToast(res.error, 'warning');
+    } else if (res.exit_code !== 0) {
+      showToast(`Container exited with code ${res.exit_code}`, 'warning');
+    } else {
+      showToast(`Container job ${res.job_id || ''} completed in ${res.duration_ms}ms`);
+    }
+    await syncBackend();
+  } catch (err) {
+    sb.result = { exit_code: -1, error: err.message };
+    showToast(`Container execution failed: ${err.message}`, 'error');
+  } finally {
+    sb.running = false;
+    if (state.currentPage === 'sandbox') renderCurrentPageOnly();
+  }
+}
+
+async function runShellExec() {
+  const sb = state.sandbox;
+  if (!sb.shellCommand.trim()) {
+    showToast('Enter a shell command', 'warning');
+    return;
+  }
+  sb.shellRunning = true;
+  renderCurrentPageOnly();
+  try {
+    const res = await apiFetchJson('/api/shell/exec', {
+      method: 'POST',
+      body: JSON.stringify({
+        peer_id: sb.shellPeer,
+        command: sb.shellCommand,
+      }),
+    });
+    sb.shellResult = res;
+    if (res.error) {
+      showToast(res.error, 'warning');
+    } else {
+      showToast('Shell command completed');
+    }
+  } catch (err) {
+    sb.shellResult = { exit_code: -1, error: err.message };
+    showToast(`Shell exec failed: ${err.message}`, 'error');
+  } finally {
+    sb.shellRunning = false;
+    if (state.currentPage === 'sandbox') renderCurrentPageOnly();
+  }
+}
+
+// =========================================================================
+// PAGE 4: GPU COMPUTE & HIPIFY TRANSLATOR
+// =========================================================================
+function renderGpuCompute(container) {
+  const prof = state.localGpuProfile || {};
+  const wd = state.localWatchdog || {};
+  const vramTotalGB = prof.total_vram_bytes ? Number((prof.total_vram_bytes / (1024 * 1024 * 1024)).toFixed(2)) : 0;
+  const vramAvailGB = prof.available_vram_bytes ? Number((prof.available_vram_bytes / (1024 * 1024 * 1024)).toFixed(2)) : 0;
+  const vramUsedGB = vramTotalGB > 0 ? Number(Math.max(0, vramTotalGB - vramAvailGB).toFixed(2)) : 0;
+  const vramPct = vramTotalGB > 0 ? Math.min(100, Math.round((vramUsedGB / vramTotalGB) * 100)) : 0;
+  const backends = Array.isArray(prof.supported_backends) ? prof.supported_backends : [];
+  const res = state.hipifyResult;
+
+  container.innerHTML = `
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500 mb-2">GPU Subsystem</div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-xl font-bold text-slate-900 truncate">${escapeHtml(prof.device_name || 'Probing...')}</span>
+          </div>
+          <div class="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px] font-medium">
+            <span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700">${escapeHtml(prof.vendor || 'Unknown')}</span>
+            ${prof.cuda_supported ? '<span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">CUDA</span>' : ''}
+            ${prof.directml_supported ? '<span class="px-2 py-0.5 rounded bg-sky-50 text-sky-700">DirectML</span>' : ''}
+            ${backends.map(b => `<span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">${escapeHtml(b)}</span>`).join('')}
+          </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500 mb-2">VRAM Capacity</div>
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-bold text-slate-900">${vramTotalGB.toFixed(1)} GB</span>
+            <span class="text-xs text-slate-500">${vramAvailGB.toFixed(1)} GB Free</span>
+          </div>
+          <div class="mt-3 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div class="h-full bg-slate-900 rounded-full" style="width:${vramPct}%"></div>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500 mb-2">Thermal &amp; Power</div>
+          <div class="text-2xl font-bold text-slate-900">${prof.temperature_c ? `${prof.temperature_c.toFixed(0)}°C` : 'N/A'}</div>
+          <div class="mt-2 text-xs text-slate-500">${prof.power_usage_w ? `${prof.power_usage_w.toFixed(1)} W draw` : 'Power telemetry N/A'}</div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500 mb-2">Activity Watchdog</div>
+          <div class="text-lg font-bold ${wd.state === 'running' ? 'text-emerald-700' : 'text-amber-600'}">${escapeHtml(wd.state || 'stopped')}</div>
+          <div class="mt-2 text-xs text-slate-500">
+            ${wd.on_battery ? `Battery (${wd.battery_percent}%)` : 'AC Power'} · ${wd.user_active ? 'User Active' : 'Idle'}
+            ${wd.last_pause_reason ? ` · ${escapeHtml(wd.last_pause_reason)}` : ''}
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        <div class="xl:col-span-2 bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="text-sm font-bold text-slate-900">CUDA &rarr; AMD HIPIFY Translator</h2>
+                <span class="text-[11px] font-mono-code px-2 py-0.5 rounded bg-slate-100 text-slate-700">POST /api/gpu/hipify</span>
+              </div>
+              <div class="text-xs font-mono-code text-slate-500 mt-0.5">Selected file: ${escapeHtml(state.gpuSelectedFile)}</div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <input type="file" id="cudaFileInput" accept=".cu,.cuh,.cpp,.h,.c" class="hidden" />
+              <button type="button" data-action="pick-cuda-file" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold">
+                <i data-lucide="file-up" class="w-3.5 h-3.5"></i>
+                <span>Select CUDA File</span>
+              </button>
+              <select id="cudaSampleSelect" class="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-mono-code text-slate-700">
+                <option value="">Samples (${state.cudaSamples.length})...</option>
+                ${state.cudaSamples.map((s, idx) => `<option value="${idx}" ${state.gpuSelectedFile === s.name ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+              </select>
+              <button type="button" data-action="run-hipify" ${state.hipifyRunning ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold">
+                ${state.hipifyRunning ? 'Converting...' : 'Convert to HIP'}
+              </button>
+              ${state.hipSource ? `
+                <button type="button" data-action="download-hip" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold">
+                  <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                  <span>.hip</span>
+                </button>
+              ` : ''}
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] font-mono-code font-semibold text-slate-500 mb-1.5">Original CUDA C++ Source</label>
+              <textarea id="cudaEditor" rows="12" spellcheck="false" class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none focus:border-slate-400">${escapeHtml(state.cudaSource)}</textarea>
+            </div>
+            <div>
+              <label class="block text-[11px] font-mono-code font-semibold text-sky-700 mb-1.5">Translated AMD HIP C++ Output</label>
+              <textarea id="hipEditor" readonly rows="12" spellcheck="false" class="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-xs text-slate-800 focus:outline-none" placeholder="// Click 'Convert to HIP'...">${escapeHtml(state.hipSource)}</textarea>
+            </div>
+          </div>
+
+          ${res ? (res.success ? `
+            <div class="px-3.5 py-2.5 rounded-lg ${res.warning ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-emerald-50 border-emerald-200 text-emerald-900'} border space-y-1 text-xs">
+              <div class="flex items-center gap-2">
+                <i data-lucide="${res.warning ? 'alert-triangle' : 'check-circle-2'}" class="w-4 h-4 shrink-0"></i>
+                <span><strong>Converted</strong> (${res.replacements_made || 0} refs via <code class="font-mono-code">${escapeHtml(res.engine || 'builtin')}</code>).</span>
+              </div>
+              ${res.warning ? `<div class="font-mono-code text-[11px]">Warning: ${escapeHtml(res.warning)}</div>` : ''}
+            </div>
+          ` : `
+            <div class="p-3.5 rounded-lg bg-rose-50 border border-rose-200 space-y-1.5 text-xs text-rose-900">
+              <div class="flex items-center gap-2 font-semibold">
+                <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-600 shrink-0"></i>
+                <span>${escapeHtml(res.error || 'Compatibility issue detected')}</span>
+              </div>
+              ${res.report && Array.isArray(res.report.issues) ? res.report.issues.map(iss => `
+                <div class="font-mono-code text-[11px] text-rose-800 pl-6">Line ${iss.line_number}: [${escapeHtml(iss.construct)}] ${escapeHtml(iss.reason)}</div>
+              `).join('') : ''}
+            </div>
+          `) : `
+            <div class="rounded-lg bg-slate-50 border border-slate-200 p-3 font-mono-code text-xs text-slate-500">
+              Select a CUDA sample or paste code above, then click "Convert to HIP".
+            </div>
+          `}
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between space-y-4">
+          <div class="space-y-3 text-xs">
+            <h2 class="text-sm font-bold text-slate-900">GPU Task Runner (POST /api/gpu/run)</h2>
+            <p class="text-slate-500">Runs an ONNX/CUDA pre-flight &amp; training/inference capsule on the local node GPU manager.</p>
+            <div class="p-3 rounded-lg bg-slate-50 space-y-1.5">
+              <div class="flex justify-between"><span class="text-slate-500">Driver</span><span class="font-mono-code text-slate-900">${escapeHtml(prof.driver_version || 'N/A')}</span></div>
+              <div class="flex justify-between"><span class="text-slate-500">GPU Enabled</span><span class="font-semibold text-slate-900">${state.gpuEnabled ? 'Yes' : 'No'}</span></div>
+              <div class="flex justify-between"><span class="text-slate-500">User Idle</span><span class="font-mono-code text-slate-900">${wd.user_active ? 'Active' : 'Idle'}</span></div>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <button type="button" data-action="dispatch-gpu-task" data-task-type="training" class="w-full py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Run Training Capsule (20 Batches)</button>
+            <button type="button" data-action="dispatch-gpu-task" data-task-type="inference" class="w-full py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-800 text-xs font-semibold">Run Inference Capsule</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function runHipify() {
+  if (!state.cudaSource.trim()) {
+    showToast('Please select or paste CUDA C++ source code', 'warning');
+    return;
+  }
+  state.hipifyRunning = true;
+  renderCurrentPageOnly();
+  try {
+    const res = await apiFetchJson('/api/gpu/hipify', {
+      method: 'POST',
+      body: JSON.stringify({ source: state.cudaSource }),
+    });
+    state.hipifyResult = res;
+    state.hipSource = res.translated_source || '// Translation blocked due to compatibility issues.';
+    if (res.success) {
+      showToast(`Translated ${res.replacements_made || 0} references via ${res.engine || 'hipify'}`, res.warning ? 'warning' : 'success');
+    } else {
+      showToast(res.error || 'HIPIFY reported compatibility issues', 'warning');
+    }
+  } catch (err) {
+    showToast('HIPIFY API request failed: ' + err.message, 'error');
+  } finally {
+    state.hipifyRunning = false;
+    if (state.currentPage === 'gpu') renderCurrentPageOnly();
+  }
+}
+
+function downloadHipFile() {
+  if (!state.hipSource) return;
+  const outName = state.gpuSelectedFile.replace(/\.(cu|cuh|cpp|h|c)$/i, '') + '.hip';
+  const blob = new Blob([state.hipSource], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = outName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 500);
+  showToast(`Downloaded ${outName}`);
+}
+
+async function dispatchGpuBatch(taskType = 'training') {
+  try {
+    const res = await apiFetchJson('/api/gpu/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        task_type: taskType,
+        source_code: state.cudaSource,
+        batches: 20,
+      }),
+    });
+    if (res.status === 'rejected') {
+      showToast(res.diagnostic_message || res.error || 'GPU task rejected', 'warning');
+    } else {
+      showToast(`GPU task ${res.job_id || ''} (${res.status || 'completed'})`);
+    }
+    await syncBackend();
+    if (res.job_id) openTaskDetail(res.job_id);
+  } catch (err) {
+    showToast('GPU run failed: ' + err.message, 'error');
+  }
+}
+
+// =========================================================================
+// PAGE 5: WORKER SANDBOX ALLOWLIST (/api/worker/settings)
+// =========================================================================
+function renderWorkerSandbox(container) {
+  const ws = state.workerSettings;
+  const prof = state.localGpuProfile || {};
+  const wd = state.localWatchdog || {};
+  const allowlist = ws.codeAllowlist || [];
+
+  container.innerHTML = `
+    <div class="space-y-6 max-w-4xl">
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-4">
+          <div>
+            <div class="flex items-center gap-2.5">
+              <h2 class="text-sm font-bold text-slate-900">Tier 2 Docker Code Execution Allowlist</h2>
+              <span class="text-xs font-medium px-2.5 py-0.5 rounded-full ${ws.dockerActive ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">
+                docker_active: ${ws.dockerActive ? 'true' : 'false'}
+              </span>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">Controls which peers may submit remote container jobs via <code class="font-mono-code">GET/POST /api/worker/settings</code> (<code class="font-mono-code">code_allowlist</code>).</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" data-action="allowlist-wildcard" class="px-3 py-1.5 rounded-lg border ${ws.wildcardAllowed ? 'bg-amber-50 border-amber-300 text-amber-800' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'} text-xs font-semibold">
+              Allow All (*)
+            </button>
+            <button type="button" data-action="allowlist-deny-all" class="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold">
+              Deny All ([])
+            </button>
+          </div>
+        </div>
+
+        <form id="allowlistAddForm" class="flex flex-wrap items-center gap-2.5 text-xs">
+          <input id="allowlistPeerInput" value="${escapeHtml(ws.newPeerInput)}" placeholder="Enter peer ID (or * for wildcard)..." class="flex-1 min-w-[220px] px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+          <button type="submit" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Add Peer ID</button>
+        </form>
+
+        <div class="space-y-2 text-xs">
+          <div class="font-semibold text-slate-700">Authorized Peers (${allowlist.length})</div>
+          ${allowlist.length ? `
+            <div class="flex flex-wrap gap-2">
+              ${allowlist.map(peerId => `
+                <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 font-mono-code text-slate-800">
+                  <span>${escapeHtml(peerId)}</span>
+                  <button type="button" data-action="allowlist-remove" data-id="${escapeHtml(peerId)}" class="text-slate-400 hover:text-rose-600" aria-label="Remove ${escapeHtml(peerId)}">&times;</button>
+                </span>
+              `).join('')}
+            </div>
+          ` : '<div class="p-4 rounded-lg bg-slate-50 border border-slate-200 text-slate-500">Allowlist is empty (`[]`) — all remote container submissions are denied.</div>'}
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
+        <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-2.5">
+          <h3 class="text-sm font-bold text-slate-900">Tier 3 GPU Profile</h3>
+          <div class="flex justify-between"><span class="text-slate-500">Device</span><span class="font-semibold text-slate-900">${escapeHtml(prof.device_name || 'Unavailable')}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">Vendor</span><span class="font-semibold text-slate-900">${escapeHtml(prof.vendor || 'Unknown')}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">CUDA / DirectML</span><span class="font-mono-code text-slate-900">${Boolean(prof.cuda_supported)} / ${Boolean(prof.directml_supported)}</span></div>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-2.5">
+          <h3 class="text-sm font-bold text-slate-900">Watchdog Governance</h3>
+          <div class="flex justify-between"><span class="text-slate-500">State</span><span class="font-semibold text-slate-900">${escapeHtml(wd.state || 'stopped')}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">On Battery</span><span class="font-mono-code text-slate-900">${wd.on_battery ? `true (${wd.battery_percent}%)` : 'false'}</span></div>
+          <div class="flex justify-between"><span class="text-slate-500">User Active</span><span class="font-mono-code text-slate-900">${Boolean(wd.user_active)}</span></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function updateWorkerAllowlist(nextList) {
+  try {
+    const res = await apiFetchJson('/api/worker/settings', {
+      method: 'POST',
+      body: JSON.stringify({ code_allowlist: nextList }),
+    });
+    state.workerSettings.codeAllowlist = Array.isArray(res.code_allowlist) ? res.code_allowlist : [];
+    state.workerSettings.dockerActive = Boolean(res.docker_active);
+    state.workerSettings.wildcardAllowed = Boolean(res.wildcard_allowed);
+    state.workerSettings.newPeerInput = '';
+    showToast(`Worker allowlist updated (${state.workerSettings.codeAllowlist.length} entries)`);
+    renderCurrentPageOnly();
+  } catch (err) {
+    showToast(`Failed to update allowlist: ${err.message}`, 'error');
+  }
+}
+
+// =========================================================================
+// PAGE 6: TASK QUEUE, CREATE TASK, TASK DETAIL
+// =========================================================================
+function getFilteredTasksHtml() {
+  const filtered = state.tasks.filter(t => {
+    const matchTab = state.taskFilterTab === 'All' || t.status === state.taskFilterTab;
+    const matchQ = (t.id + ' ' + t.title + ' ' + t.worker).toLowerCase().includes(state.taskSearch.toLowerCase());
+    return matchTab && matchQ;
   });
+  if (!filtered.length) {
+    return '<div class="py-10 text-center text-xs text-slate-500">No tasks found.</div>';
+  }
+  return filtered.map(t => `
+    <div class="p-4 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+      <div class="lg:col-span-5 cursor-pointer" data-action="open-task" data-id="${escapeHtml(t.id)}">
+        <div class="flex items-center gap-2">
+          <span class="font-mono-code text-xs text-slate-500">${escapeHtml(t.id)}</span>
+          <span class="text-[11px] font-medium px-2 py-0.5 rounded-full ${t.status === 'Running' ? 'bg-sky-50 text-sky-700' : t.status === 'Completed' ? 'bg-emerald-50 text-emerald-700' : t.status === 'Failed' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700'}">${escapeHtml(t.status)}</span>
+        </div>
+        <div class="text-sm font-semibold text-slate-900 mt-1 hover:text-sky-700">${escapeHtml(t.title)}</div>
+      </div>
+      <div class="lg:col-span-2 text-xs text-slate-600">${escapeHtml(t.tier)}</div>
+      <div class="lg:col-span-2 text-xs font-medium text-slate-800 truncate">${escapeHtml(t.worker)}</div>
+      <div class="lg:col-span-2 text-xs font-mono-code text-slate-500">${escapeHtml(t.timestamp || '-')}${t.durationMs != null ? ` · ${t.durationMs}ms` : ''}</div>
+      <div class="lg:col-span-1 flex items-center justify-end">
+        <button type="button" data-action="open-task" data-id="${escapeHtml(t.id)}" class="px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Details</button>
+      </div>
+    </div>
+  `).join('');
 }
 
-function initShardMatrix() {
-  const verifyBtn = document.getElementById('btnVerifyAllMerkle');
-  if (verifyBtn) {
-    verifyBtn.addEventListener('click', () => {
-      const badgeCas = document.getElementById('merkleBadgeCas');
+function renderTaskQueue(container) {
+  const tabs = ['All', 'Pending', 'Running', 'Completed', 'Failed'];
+  container.innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap gap-1.5">
+          ${tabs.map(tab => {
+            const cnt = tab === 'All' ? state.tasks.length : state.tasks.filter(t => t.status === tab).length;
+            return `<button type="button" data-action="set-task-tab" data-tab="${tab}" class="px-3 py-1.5 rounded-lg text-xs font-semibold ${state.taskFilterTab === tab ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${tab} (${cnt})</button>`;
+          }).join('')}
+        </div>
+        <div class="flex items-center gap-2.5 w-full sm:w-auto">
+          <div class="relative flex-1 sm:w-56">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input id="taskSearchInput" type="text" value="${escapeHtml(state.taskSearch)}" placeholder="Search tasks..." class="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-slate-400" />
+          </div>
+          <button type="button" data-action="open-create-task" class="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold shrink-0">+ New Task</button>
+        </div>
+      </div>
 
-      const setVerifying = (el) => {
-        if (!el) return;
-        el.className = 'merkle-badge-verifying px-2.5 py-1 rounded font-mono text-xs flex items-center gap-1.5';
-        el.innerHTML = '<span class="material-symbols-outlined text-sm">sync</span><span>Verifying SHA-256 Hashes...</span>';
-      };
-      setVerifying(badgeCas);
+      <div id="taskListContainer" class="space-y-2.5">
+        ${getFilteredTasksHtml()}
+      </div>
+    </div>
+  `;
+}
 
-      fetch('/api/storage/scrub', {
+function renderCreateTask(container) {
+  const f = state.createForm;
+  const isContainer = f.tier === 'Tier 2 Container';
+
+  container.innerHTML = `
+    <div class="space-y-5 max-w-3xl">
+      <button type="button" data-action="nav" data-page="tasks" class="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900">
+        <i data-lucide="arrow-left" class="w-4 h-4"></i>Back to Task Queue
+      </button>
+
+      <form id="createTaskForm" class="bg-white rounded-xl border border-slate-200 p-5 space-y-4 text-xs">
+        <h2 class="text-sm font-bold text-slate-900">Dispatch New Compute Task</h2>
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1.5">Task Label</label>
+          <input id="ctTitle" value="${escapeHtml(f.title)}" placeholder="e.g., Matrix Multiply / Data Transform" class="w-full px-3 py-2 rounded-lg border border-slate-200" />
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Execution Tier</label>
+            <select id="ctTier" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+              <option ${f.tier === 'Tier 3 GPU' ? 'selected' : ''}>Tier 3 GPU</option>
+              <option ${f.tier === 'Tier 2 Container' ? 'selected' : ''}>Tier 2 Container</option>
+            </select>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Target Node</label>
+            <select id="ctTargetNode" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white font-mono-code">
+              <option value="Auto" ${f.targetNode === 'Auto' ? 'selected' : ''}>Auto (local)</option>
+              ${state.nodes.map(n => `<option value="${escapeHtml(n.id)}" ${f.targetNode === n.id ? 'selected' : ''}>${escapeHtml(n.id)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+
+        ${isContainer ? `
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Language</label>
+              <select id="ctLang" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+                <option value="python" ${f.language === 'python' ? 'selected' : ''}>python</option>
+                <option value="c" ${f.language === 'c' ? 'selected' : ''}>c</option>
+                <option value="cpp" ${f.language === 'cpp' ? 'selected' : ''}>cpp</option>
+              </select>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Timeout (seconds)</label>
+              <input id="ctTimeout" type="number" min="1" max="30" value="${f.timeout}" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+            </div>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Container Source Code</label>
+            <textarea id="ctSource" rows="7" required spellcheck="false" class="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 font-mono-code">${escapeHtml(f.source)}</textarea>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Stdin (optional)</label>
+            <textarea id="ctStdin" rows="2" spellcheck="false" class="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 font-mono-code">${escapeHtml(f.stdin)}</textarea>
+          </div>
+        ` : `
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">GPU Task Type</label>
+              <select id="ctGpuType" class="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white">
+                <option value="inference" ${f.gpuTaskType === 'inference' ? 'selected' : ''}>inference</option>
+                <option value="training" ${f.gpuTaskType === 'training' ? 'selected' : ''}>training</option>
+              </select>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1.5">Batches</label>
+              <input id="ctBatches" type="number" min="1" max="500" value="${f.batches}" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+            </div>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Optional CUDA/HIP Source for Pre-flight Check</label>
+            <textarea id="ctGpuSource" rows="5" spellcheck="false" placeholder="Optional .cu source..." class="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 font-mono-code">${escapeHtml(f.gpuSourceCode)}</textarea>
+          </div>
+        `}
+
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" data-action="nav" data-page="tasks" class="px-4 py-2 rounded-lg border border-slate-200 font-semibold text-slate-700">Cancel</button>
+          <button type="submit" class="px-5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Dispatch Task</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+async function submitCreatedTask() {
+  const f = state.createForm;
+  try {
+    if (f.tier === 'Tier 2 Container') {
+      const peerId = (!f.targetNode || f.targetNode === 'Auto') ? 'local' : f.targetNode;
+      const res = await apiFetchJson('/api/code/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}'
-      })
-        .then(r => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
-        .then(res => {
-          setTimeout(() => {
-            if (!badgeCas) return;
-            const corruptCount = res.corrupted ? res.corrupted.length : 0;
-            if (corruptCount === 0) {
-              badgeCas.className = 'merkle-badge-valid px-2.5 py-1 rounded bg-secondary/15 border border-secondary/40 text-secondary font-mono text-xs flex items-center gap-1.5';
-              badgeCas.innerHTML = '<span class="material-symbols-outlined text-sm">check_circle</span><span>CAS Root: Valid / Matched</span>';
-              appendLog('STORAGE', `Cryptographic audit complete: 100% stored blobs verified with zero corruption.`);
-            } else {
-              badgeCas.className = 'merkle-badge-error px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 font-mono text-xs flex items-center gap-1.5';
-              badgeCas.innerHTML = `<span class="material-symbols-outlined text-sm">warning</span><span>Detected ${corruptCount} Corrupted</span>`;
-              appendLog('STORAGE', `Warning: detected ${corruptCount} corrupted blob(s)!`);
-            }
-          }, 800);
-        })
-        .catch(err => {
-          if (badgeCas) {
-            badgeCas.className = 'merkle-badge-error px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 font-mono text-xs flex items-center gap-1.5';
-            badgeCas.innerHTML = '<span class="material-symbols-outlined text-sm">error</span><span>Audit Failed</span>';
-          }
-          appendLog('STORAGE', `Storage scrub error: ${err.message}`);
-        });
-    });
-  }
-
-  const shardBtn = document.getElementById('btnShardNewDataset');
-  if (shardBtn) {
-    shardBtn.addEventListener('click', () => {
-      const input = document.getElementById('storageContentInput');
-      if (input) {
-        input.value = `// Dataset partition payload\n// SHA-256 content-addressed chunk storage\nconst DATASET_SIGNATURE = "ds_partition_${Date.now()}";`;
-        input.focus();
-        input.scrollIntoView({ behavior: 'smooth' });
-      }
-    });
-  }
-}
-
-function initTaskQueue() {
-  const refreshBtn = document.getElementById('btnRefreshTasks');
-  if (refreshBtn) {
-    refreshBtn.addEventListener('click', loadTasks);
-  }
-
-  loadTasks();
-}
-
-function loadTasks() {
-  fetch('/api/tasks')
-    .then(r => r.json())
-    .then(data => {
-      if (!data || !data.tasks) return;
-      const tbody = document.getElementById('taskQueueTableBody');
-      const countBadge = document.getElementById('taskQueueCount');
-      if (!tbody) return;
-
-      if (countBadge) {
-        countBadge.textContent = `Showing ${data.tasks.length} Active Tasks`;
-      }
-
-      tbody.textContent = '';
-      if (data.tasks.length === 0) {
-        const emptyTr = document.createElement('tr');
-        const emptyTd = document.createElement('td');
-        emptyTd.colSpan = 6;
-        emptyTd.className = 'empty-cell';
-        emptyTd.textContent = 'No active tasks in cluster queue.';
-        emptyTr.appendChild(emptyTd);
-        tbody.appendChild(emptyTr);
-        return;
-      }
-
-      data.tasks.forEach(task => {
-        const tr = document.createElement('tr');
-        tr.className = 'hover:bg-surface-high/60 transition-colors';
-
-        const priority = String(task.priority || '');
-        let priClass = 'priority-p2';
-        if (priority.includes('P0') || priority.includes('CRITICAL')) priClass = 'priority-p0';
-        else if (priority.includes('P1') || priority.includes('HIGH')) priClass = 'priority-p1';
-        else if (priority.includes('P3') || priority.includes('LOW')) priClass = 'priority-p3';
-
-        const status = String(task.status || '');
-        let statusClass = 'task-status-running';
-        if (status.includes('COMPLETED')) statusClass = 'task-status-completed';
-        else if (status.includes('DISPATCHED')) statusClass = 'task-status-dispatched';
-        else if (status.includes('QUEUED')) statusClass = 'task-status-queued';
-        else if (status.includes('FAILED')) statusClass = 'task-status-failed';
-
-        const tdJob = document.createElement('td');
-        tdJob.className = 'font-bold text-primary font-mono';
-        tdJob.textContent = task.job_id || '';
-
-        const tdClassAd = document.createElement('td');
-        tdClassAd.className = 'text-on-surface font-mono';
-        tdClassAd.textContent = task.class_ad || '';
-
-        const tdMatch = document.createElement('td');
-        tdMatch.className = 'text-secondary font-mono';
-        tdMatch.textContent = task.target_match || '';
-
-        const tdStage = document.createElement('td');
-        tdStage.className = 'text-on-surface-variant font-mono';
-        tdStage.textContent = task.stage_dag || '';
-
-        const tdPri = document.createElement('td');
-        const priSpan = document.createElement('span');
-        priSpan.className = priClass;
-        priSpan.textContent = priority;
-        tdPri.appendChild(priSpan);
-
-        const tdStatus = document.createElement('td');
-        tdStatus.className = `${statusClass} font-mono`;
-        tdStatus.textContent = `${status}${task.duration_ms ? ` (${task.duration_ms}ms)` : ''}`;
-
-        tr.append(tdJob, tdClassAd, tdMatch, tdStage, tdPri, tdStatus);
-        tbody.appendChild(tr);
+        body: JSON.stringify({
+          peer_id: peerId,
+          language: f.language,
+          source: f.source,
+          stdin: f.stdin,
+          timeout: Number(f.timeout) || 10,
+        }),
       });
-    })
-    .catch(() => {});
+      if (res.error) {
+        showToast(res.error, 'warning');
+      } else {
+        showToast(`Container job ${res.job_id || ''} exited ${res.exit_code}`);
+      }
+      await syncBackend();
+      if (res.job_id) openTaskDetail(res.job_id);
+      else navigate('tasks');
+    } else {
+      const res = await apiFetchJson('/api/gpu/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          task_type: f.gpuTaskType || 'inference',
+          source_code: f.gpuSourceCode || '',
+          batches: Number(f.batches) || 10,
+        }),
+      });
+      if (res.status === 'rejected') {
+        showToast(res.diagnostic_message || res.error || 'GPU task rejected', 'warning');
+      } else {
+        showToast(`Dispatched GPU task ${res.job_id || ''} (${res.status || 'completed'})`);
+      }
+      await syncBackend();
+      if (res.job_id) openTaskDetail(res.job_id);
+      else navigate('tasks');
+    }
+  } catch (err) {
+    showToast('Task dispatch failed: ' + err.message, 'error');
+  }
 }
+
+function renderTaskDetail(container) {
+  const t = state.tasks.find(x => x.id === state.selectedTaskId) || state.tasks[0];
+  if (!t) { navigate('tasks'); return; }
+  container.innerHTML = `
+    <div class="space-y-5">
+      <div class="flex items-center gap-3">
+        <button type="button" data-action="nav" data-page="tasks" class="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600">
+          <i data-lucide="arrow-left" class="w-4 h-4"></i>
+        </button>
+        <div>
+          <div class="font-mono-code text-xs text-slate-500">${escapeHtml(t.id)} · ${escapeHtml(t.rawStatus || t.status)}</div>
+          <h2 class="text-base font-bold text-slate-900">${escapeHtml(t.title)}</h2>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-3 text-xs">
+        <h3 class="text-sm font-bold text-slate-900">Task Metadata</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="p-3 rounded-lg bg-slate-50"><span class="text-slate-500">Target Match:</span> <strong class="text-slate-900">${escapeHtml(t.worker)}</strong></div>
+          <div class="p-3 rounded-lg bg-slate-50"><span class="text-slate-500">Stage / DAG:</span> <strong class="text-slate-900 font-mono-code">${escapeHtml(t.kind)}</strong></div>
+          <div class="p-3 rounded-lg bg-slate-50"><span class="text-slate-500">Recorded At:</span> <strong class="text-slate-900 font-mono-code">${escapeHtml(t.timestamp || '-')}</strong></div>
+          <div class="p-3 rounded-lg bg-slate-50"><span class="text-slate-500">Duration:</span> <strong class="text-slate-900 font-mono-code">${t.durationMs != null ? `${t.durationMs} ms` : '-'}</strong></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// =========================================================================
+// PAGE 7: STORAGE & CAS BLOBS
+// =========================================================================
+function renderStorage(container) {
+  container.innerHTML = `
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500">CAS Blobs</div>
+          <div class="text-2xl font-bold text-slate-900 mt-1">${state.vaultDatasets.length}</div>
+          <div class="text-xs text-slate-500 mt-1">${formatBytes(state.hostMeta.storageUsedBytes)} / ${formatBytes(state.hostMeta.storageQuotaBytes)}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+          <div class="text-xs text-slate-500">Content Addressing</div>
+          <div class="text-lg font-bold text-slate-900 mt-1">SHA-256 Sharded CAS</div>
+          <div class="text-xs text-slate-500 mt-1">data/&lt;id[:2]&gt;/&lt;id[2:4]&gt;/&lt;id&gt;</div>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between">
+          <div>
+            <div class="text-xs text-slate-500">Integrity Scrub</div>
+            <div class="text-sm font-semibold text-emerald-700 mt-1">Verify All SHA-256</div>
+          </div>
+          <button type="button" data-action="scrub-storage" class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Run Scrub</button>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-bold text-slate-900">Stored Blobs</h2>
+          <button type="button" data-action="open-put-blob" class="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">+ Store Blob</button>
+        </div>
+        ${state.vaultDatasets.length ? `
+          <div class="divide-y divide-slate-100 text-xs">
+            ${state.vaultDatasets.map(ds => `
+              <div class="py-3 flex flex-wrap items-center justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="font-mono-code font-semibold text-slate-900 truncate">${escapeHtml(ds.id)}</div>
+                  <div class="text-slate-500 mt-0.5">${escapeHtml(ds.sizeLabel)}${ds.createdAt ? ` · ${escapeHtml(new Date(ds.createdAt).toLocaleString())}` : ''}</div>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <button type="button" data-action="view-blob" data-id="${escapeHtml(ds.id)}" class="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 font-semibold text-slate-700">View</button>
+                  <button type="button" data-action="delete-blob" data-id="${escapeHtml(ds.id)}" class="px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 font-semibold text-rose-700">Delete</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<div class="py-8 text-center text-xs text-slate-500">No blobs stored locally yet. Click "+ Store Blob" to compute a SHA-256 blob.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function openAddDatasetModal() {
+  openModal('Store Content-Addressed Blob', `
+    <form id="putBlobForm" class="space-y-3 text-xs">
+      <p class="text-slate-500">The backend computes the SHA-256 content hash as the immutable <code class="font-mono-code">blob_id</code>.</p>
+      <div>
+        <label class="block font-semibold text-slate-700 mb-1">Payload Content</label>
+        <textarea id="newDsData" rows="4" required class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code">hello unicompute</textarea>
+      </div>
+      <button type="submit" class="w-full py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Store in CAS Vault</button>
+    </form>
+  `);
+}
+
+async function submitNewDataset() {
+  const val = document.getElementById('newDsData').value;
+  try {
+    const res = await apiFetchJson('/api/storage/put', {
+      method: 'POST',
+      body: JSON.stringify({ content: val }),
+    });
+    closeModal();
+    showToast(`Stored blob ${res.blob_id} (${res.size_bytes ?? res.size ?? 0} bytes)`);
+    await syncBackend();
+  } catch (err) {
+    showToast('Failed to store blob: ' + err.message, 'error');
+  }
+}
+
+async function viewBlobAction(blobId) {
+  try {
+    const res = await apiFetchJson(`/api/storage/get?id=${encodeURIComponent(blobId)}`);
+    const isValid = Boolean(res.valid ?? res.verified);
+    openModal('CAS Blob Inspector', `
+      <div class="space-y-3 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span class="font-mono-code text-slate-700 break-all">${escapeHtml(res.blob_id || blobId)}</span>
+          <span class="px-2 py-0.5 rounded-full font-semibold ${isValid ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}">
+            ${isValid ? 'SHA-256 Valid' : 'Checksum Invalid'}
+          </span>
+        </div>
+        <div class="text-slate-500">Size: ${escapeHtml(res.size_bytes ?? res.size ?? 0)} bytes</div>
+        <pre class="p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono-code text-slate-800 max-h-72 overflow-auto whitespace-pre-wrap break-words">${escapeHtml(res.content || '')}</pre>
+      </div>
+    `);
+  } catch (err) {
+    showToast('Failed to read blob: ' + err.message, 'error');
+  }
+}
+
+async function deleteBlobAction(blobId) {
+  try {
+    await apiFetchJson('/api/storage/del', {
+      method: 'POST',
+      body: JSON.stringify({ blob_id: blobId }),
+    });
+    showToast(`Deleted blob ${blobId}`, 'info');
+    await syncBackend();
+  } catch (err) {
+    showToast('Failed to delete blob: ' + err.message, 'error');
+  }
+}
+
+async function repairAllShards() {
+  try {
+    const res = await apiFetchJson('/api/storage/scrub', { method: 'POST', body: JSON.stringify({}) });
+    const corruptCount = Array.isArray(res.corrupted) ? res.corrupted.length : 0;
+    showToast(`Storage scrub complete (corrupted: ${corruptCount})`, corruptCount > 0 ? 'warning' : 'success');
+  } catch (err) {
+    showToast('Scrub failed: ' + err.message, 'error');
+  }
+}
+
+// =========================================================================
+// PAGE 8: NODES
+// =========================================================================
+function getFilteredNodesRowsHtml() {
+  const filtered = state.nodes.filter(n => {
+    const q = state.nodeSearch.toLowerCase();
+    return (n.id + ' ' + n.lab + ' ' + n.gpuModel + ' ' + n.os + ' ' + n.transport).toLowerCase().includes(q);
+  });
+  if (!filtered.length) {
+    return '<tr><td colspan="6" class="py-8 text-center text-slate-500">No matching nodes.</td></tr>';
+  }
+  return filtered.map(n => `
+    <tr class="hover:bg-slate-50/70">
+      <td class="py-3 px-3 font-semibold text-slate-900 font-mono-code">${escapeHtml(n.id)}</td>
+      <td class="py-3 px-3 text-slate-600">${escapeHtml(n.transport)}</td>
+      <td class="py-3 px-3 text-slate-700">${escapeHtml(n.isLocal ? `${n.gpuModel} (${n.vramTotal} GB)` : (n.connectedP2P ? `${n.rttMs} ms` : '-'))}</td>
+      <td class="py-3 px-3">
+        <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${n.status === 'Online' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}">${escapeHtml(n.status)}</span>
+      </td>
+      <td class="py-3 px-3 text-right space-x-1.5">
+        ${!n.isLocal && !n.connectedP2P ? `<button type="button" data-action="peer-connect" data-id="${escapeHtml(n.id)}" class="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold">Connect</button>` : ''}
+        ${!n.isLocal && n.connectedP2P ? `<button type="button" data-action="peer-ping" data-id="${escapeHtml(n.id)}" class="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Ping</button>` : ''}
+        ${!n.isLocal && n.connectedP2P ? `<button type="button" data-action="peer-disconnect" data-id="${escapeHtml(n.id)}" class="px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700">Disconnect</button>` : ''}
+        <button type="button" data-action="inspect-node" data-id="${escapeHtml(n.id)}" class="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700">Inspect</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderFleetNodes(container) {
+  container.innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="relative flex-1 min-w-[180px] max-w-xs">
+          <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+          <input id="nodeSearchInput" type="text" value="${escapeHtml(state.nodeSearch)}" placeholder="Search nodes..." class="w-full pl-8 pr-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-slate-400" />
+        </div>
+        <button type="button" data-action="refresh-fleet" class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold">Refresh Fleet</button>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse min-w-[700px]">
+          <thead>
+            <tr class="border-b border-slate-200 text-xs font-semibold text-slate-500">
+              <th class="py-2.5 px-3">Node ID</th>
+              <th class="py-2.5 px-3">Transport</th>
+              <th class="py-2.5 px-3">Hardware / RTT</th>
+              <th class="py-2.5 px-3">Status</th>
+              <th class="py-2.5 px-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="nodeTableBody" class="divide-y divide-slate-100 text-xs">
+            ${getFilteredNodesRowsHtml()}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// =========================================================================
+// PAGE 9: LOGS
+// =========================================================================
+function getFilteredLogsRowsHtml() {
+  const shown = state.logs.filter(l => {
+    const matchCat = state.logTab === 'All' || l.cat === state.logTab;
+    const matchSev = state.logSeverity === 'All' || l.sev === state.logSeverity;
+    const matchQ = (l.src + ' ' + l.type + ' ' + l.msg).toLowerCase().includes(state.logSearch.toLowerCase());
+    return matchCat && matchSev && matchQ;
+  });
+  if (!shown.length) {
+    return '<tr><td colspan="5" class="py-8 text-center text-slate-500">No matching logs.</td></tr>';
+  }
+  return shown.map(l => `
+    <tr class="hover:bg-slate-50/70">
+      <td class="py-2.5 px-3 font-mono-code text-slate-500">${escapeHtml(l.ts)}</td>
+      <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${l.sev === 'Error' ? 'bg-rose-50 text-rose-700' : l.sev === 'Warning' ? 'bg-amber-50 text-amber-700' : 'bg-sky-50 text-sky-700'}">${escapeHtml(l.sev)}</span></td>
+      <td class="py-2.5 px-3 font-semibold text-slate-800">${escapeHtml(l.src)}</td>
+      <td class="py-2.5 px-3 text-slate-700">${escapeHtml(l.type)}</td>
+      <td class="py-2.5 px-3 text-slate-600 break-words">${escapeHtml(l.msg)}</td>
+    </tr>
+  `).join('');
+}
+
+function updateLogsTableOnly() {
+  const tbody = document.getElementById('logTableBody');
+  if (tbody) tbody.innerHTML = getFilteredLogsRowsHtml();
+}
+
+function renderLogs(container) {
+  const cats = ['All', 'Coordinator', 'Network', 'Storage', 'Tasks', 'Worker'];
+  container.innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap gap-1.5">
+          ${cats.map(c => `<button type="button" data-action="set-log-tab" data-tab="${c}" class="px-3 py-1.5 rounded-lg text-xs font-semibold ${state.logTab === c ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${c}</button>`).join('')}
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="relative w-52">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input id="logSearchInput" type="text" value="${escapeHtml(state.logSearch)}" placeholder="Filter logs..." class="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-slate-400" />
+          </div>
+          <button type="button" data-action="clear-logs" class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700">Clear</button>
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-slate-200 overflow-x-auto">
+        <table class="w-full text-left border-collapse min-w-[680px]">
+          <thead>
+            <tr class="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500">
+              <th class="py-2.5 px-3">Time</th>
+              <th class="py-2.5 px-3">Level</th>
+              <th class="py-2.5 px-3">Source</th>
+              <th class="py-2.5 px-3">Event</th>
+              <th class="py-2.5 px-3">Message</th>
+            </tr>
+          </thead>
+          <tbody id="logTableBody" class="divide-y divide-slate-100 text-xs">
+            ${getFilteredLogsRowsHtml()}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// =========================================================================
+// PAGE 10: SETTINGS (/api/coordinator/connect & /api/coordinator/settings)
+// =========================================================================
+function renderSettings(container) {
+  const d = state.settingsDraft;
+  const cs = state.coordStatus;
+
+  container.innerHTML = `
+    <div class="space-y-5 max-w-3xl">
+      <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-4 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-900">Coordinator Signaling &amp; Cluster Auth</h2>
+            <p class="text-slate-500 mt-0.5">Status: <strong class="font-mono-code">${escapeHtml(cs.status)}</strong> · Token Set: <strong class="font-mono-code">${cs.authTokenSet ? 'true' : 'false'}</strong></p>
+          </div>
+          <button type="button" data-action="connect-coordinator" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Connect / Switch Hub</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="sm:col-span-2">
+            <label class="block font-semibold text-slate-700 mb-1.5">Coordinator WebSocket URL (ws:// or wss://)</label>
+            <input id="setCoordUrl" value="${escapeHtml(d.coordinatorURL)}" placeholder="ws://127.0.0.1:8080/ws" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block font-semibold text-slate-700 mb-1.5">Cluster Auth Token (write-only; never echoed)</label>
+            <div class="flex gap-2">
+              <input id="setAuthToken" type="password" value="${escapeHtml(d.authToken)}" placeholder="${cs.authTokenSet ? 'Token configured (enter new token to replace)' : 'Enter UNICOMPUTE_AUTH_TOKEN...'}" class="flex-1 px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+              <button type="button" data-action="clear-auth-token" class="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold">Clear Token</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-4 text-xs">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-900">Relay &amp; Join Settings</h2>
+            <p class="text-slate-500 mt-0.5">Persisted on GUI server via <code class="font-mono-code">POST /api/coordinator/settings</code></p>
+          </div>
+          <button type="button" data-action="save-settings" class="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold">Save Settings</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Relay Threshold (0.5 – 5.0 s)</label>
+            <input id="setRelayThreshold" type="number" step="0.1" min="0.5" max="5.0" value="${d.relayThreshold}" class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1.5">Join Token</label>
+            <div class="flex gap-2">
+              <input id="setJoinToken" value="${escapeHtml(d.joinToken)}" class="flex-1 px-3 py-2 rounded-lg border border-slate-200 font-mono-code" />
+              <button type="button" data-action="rotate-join-token" class="px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 font-semibold text-slate-700">Rotate</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function connectCoordinatorAction() {
+  const url = (state.settingsDraft.coordinatorURL || '').trim();
+  if (!url) {
+    showToast('Coordinator URL is required', 'warning');
+    return;
+  }
+  const payload = { url };
+  if (state.settingsDraft.authToken && state.settingsDraft.authToken.trim() !== '') {
+    payload.auth_token = state.settingsDraft.authToken.trim();
+  }
+  try {
+    const res = await apiFetchJson('/api/coordinator/connect', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    state.settingsDraft.authToken = '';
+    if (res.reconnect_error) {
+      showToast(`Switch error: ${res.reconnect_error}`, 'warning');
+    } else {
+      showToast(`Connected coordinator: ${res.url}`);
+    }
+    await syncBackend();
+  } catch (err) {
+    showToast(`Coordinator connect failed: ${err.message}`, 'error');
+  }
+}
+
+async function saveSettings(extra = {}) {
+  const payload = {
+    relay_threshold: Number(state.settingsDraft.relayThreshold),
+    ...extra,
+  };
+  if (state.settingsDraft.joinToken && !extra.rotate_token) {
+    payload.join_token = state.settingsDraft.joinToken.trim();
+  }
+  if (state.settingsDraft.authToken && state.settingsDraft.authToken.trim() !== '' && !extra.clear_auth_token) {
+    payload.auth_token = state.settingsDraft.authToken.trim();
+  }
+  try {
+    const res = await apiFetchJson('/api/coordinator/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    state.settingsDraft.authToken = '';
+    if (res.join_token) state.settingsDraft.joinToken = res.join_token;
+    if (res.reconnect_error) {
+      showToast(`Settings saved; reconnect note: ${res.reconnect_error}`, 'warning');
+    } else {
+      showToast(`Settings saved (relay_threshold=${res.relay_threshold}s)`);
+    }
+    await syncBackend();
+  } catch (err) {
+    showToast(`Failed to save settings: ${err.message}`, 'error');
+  }
+}
+
+// =========================================================================
+// PAGE 11: ARCHITECTURE NOTES
+// =========================================================================
+function renderAttribution(container) {
+  container.innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-6 space-y-3 max-w-2xl text-xs text-slate-600">
+      <h2 class="text-sm font-bold text-slate-900">UniCompute Control Room Architecture</h2>
+      <p>Objective 1 provides Ed25519 challenge-response signaling, DTLS fingerprint binding, WebRTC DataChannel transport with disk-backed chunk streaming, and SHA-256 sharded CAS storage.</p>
+      <p>Objective 2 provides rootless Docker code execution (<code class="font-mono-code">/api/code/run</code>) and opt-in authenticated remote shell (<code class="font-mono-code">/api/shell/exec</code>) with peer allowlists (<code class="font-mono-code">/api/worker/settings</code>).</p>
+      <p>Objective 3 provides hardware GPU probing, activity watchdog governance, HIPIFY CUDA-to-HIP analysis/translation (<code class="font-mono-code">/api/gpu/hipify</code>), and sandboxed task execution (<code class="font-mono-code">/api/gpu/run</code>).</p>
+    </div>
+  `;
+}
+
+// =========================================================================
+// DELEGATED EVENT LISTENERS (ZERO INLINE HANDLERS)
+// =========================================================================
+document.addEventListener('click', (e) => {
+  const navBtn = e.target.closest('.nav-btn');
+  if (navBtn && navBtn.dataset.nav) {
+    navigate(navBtn.dataset.nav);
+    return;
+  }
+
+  const target = e.target.closest('[data-action]');
+  if (!target) return;
+
+  const action = target.dataset.action;
+  const id = target.dataset.id || '';
+
+  if (action === 'close-mobile-nav') toggleMobileNav(false);
+  else if (action === 'open-mobile-nav') toggleMobileNav(true);
+  else if (action === 'copy-join-code') copyText(state.coordStatus.joinToken || 'UC-LOCAL', `Join code ${state.coordStatus.joinToken || 'UC-LOCAL'} copied`);
+  else if (action === 'open-create-task') openCreateTask('Auto');
+  else if (action === 'goto-settings') navigate('settings');
+  else if (action === 'close-modal') {
+    if (e.target.id === 'modalBackdrop' || target.closest('button[data-action="close-modal"]')) closeModal();
+  } else if (action === 'nav' && target.dataset.page) navigate(target.dataset.page);
+  else if (action === 'open-task' && id) openTaskDetail(id);
+  else if (action === 'set-topo-view') { state.topoViewMode = target.dataset.mode || 'mesh'; renderCurrentPageOnly(); }
+  else if (action === 'select-topo-node' && id) { state.selectedTopoNodeId = id; renderCurrentPageOnly(); }
+  else if (action === 'view-node-logs' && id) { state.logSearch = id; state.logTab = 'All'; navigate('logs'); }
+  else if (action === 'assign-workload') openCreateTask(id || 'Auto');
+  else if (action === 'peer-connect' && id) connectPeerAction(id);
+  else if (action === 'peer-disconnect' && id) disconnectPeerAction(id);
+  else if (action === 'peer-ping' && id) pingPeerAction(id);
+  else if (action === 'run-sandbox-code') runSandboxCode();
+  else if (action === 'pick-cuda-file') document.getElementById('cudaFileInput')?.click();
+  else if (action === 'run-hipify') runHipify();
+  else if (action === 'download-hip') downloadHipFile();
+  else if (action === 'dispatch-gpu-task') dispatchGpuBatch(target.dataset.taskType || 'training');
+  else if (action === 'allowlist-wildcard') updateWorkerAllowlist(['*']);
+  else if (action === 'allowlist-deny-all') updateWorkerAllowlist([]);
+  else if (action === 'allowlist-remove' && id) {
+    updateWorkerAllowlist(state.workerSettings.codeAllowlist.filter(x => x !== id));
+  } else if (action === 'set-task-tab') {
+    state.taskFilterTab = target.dataset.tab || 'All';
+    renderCurrentPageOnly();
+  } else if (action === 'scrub-storage') repairAllShards();
+  else if (action === 'open-put-blob') openAddDatasetModal();
+  else if (action === 'view-blob' && id) viewBlobAction(id);
+  else if (action === 'delete-blob' && id) deleteBlobAction(id);
+  else if (action === 'refresh-fleet') { syncBackend().then(() => showToast('Fleet refreshed')); }
+  else if (action === 'inspect-node' && id) { state.selectedTopoNodeId = id; navigate('topology'); }
+  else if (action === 'set-log-tab') { state.logTab = target.dataset.tab || 'All'; renderCurrentPageOnly(); }
+  else if (action === 'clear-logs') { state.logs = []; updateLogsTableOnly(); }
+  else if (action === 'connect-coordinator') connectCoordinatorAction();
+  else if (action === 'save-settings') saveSettings();
+  else if (action === 'rotate-join-token') saveSettings({ rotate_token: true });
+  else if (action === 'clear-auth-token') saveSettings({ clear_auth_token: true });
+});
+
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (!el || !el.id) return;
+
+  if (el.id === 'cudaEditor') state.cudaSource = el.value;
+  else if (el.id === 'sbSourceEditor') state.sandbox.source = el.value;
+  else if (el.id === 'sbStdinEditor') state.sandbox.stdin = el.value;
+  else if (el.id === 'sbTimeoutSlider') {
+    state.sandbox.timeout = Number(el.value);
+    const lbl = document.getElementById('sbTimeoutLabel');
+    if (lbl) lbl.textContent = `${state.sandbox.timeout}s`;
+  } else if (el.id === 'shellCmdInput') state.sandbox.shellCommand = el.value;
+  else if (el.id === 'allowlistPeerInput') state.workerSettings.newPeerInput = el.value;
+  else if (el.id === 'taskSearchInput') {
+    state.taskSearch = el.value;
+    const box = document.getElementById('taskListContainer');
+    if (box) box.innerHTML = getFilteredTasksHtml();
+  } else if (el.id === 'nodeSearchInput') {
+    state.nodeSearch = el.value;
+    const tbody = document.getElementById('nodeTableBody');
+    if (tbody) tbody.innerHTML = getFilteredNodesRowsHtml();
+  } else if (el.id === 'logSearchInput') {
+    state.logSearch = el.value;
+    updateLogsTableOnly();
+  } else if (el.id === 'ctTitle') state.createForm.title = el.value;
+  else if (el.id === 'ctTimeout') state.createForm.timeout = Number(el.value);
+  else if (el.id === 'ctSource') state.createForm.source = el.value;
+  else if (el.id === 'ctStdin') state.createForm.stdin = el.value;
+  else if (el.id === 'ctBatches') state.createForm.batches = Number(el.value);
+  else if (el.id === 'ctGpuSource') state.createForm.gpuSourceCode = el.value;
+  else if (el.id === 'setCoordUrl') state.settingsDraft.coordinatorURL = el.value;
+  else if (el.id === 'setAuthToken') state.settingsDraft.authToken = el.value;
+  else if (el.id === 'setRelayThreshold') state.settingsDraft.relayThreshold = Number(el.value);
+  else if (el.id === 'setJoinToken') state.settingsDraft.joinToken = el.value;
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if (!el || !el.id) return;
+
+  if (el.id === 'cudaFileInput') {
+    const file = el.files && el.files[0];
+    if (!file) return;
+    state.gpuSelectedFile = file.name;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      state.cudaSource = ev.target.result;
+      runHipify();
+    };
+    reader.readAsText(file);
+  } else if (el.id === 'cudaSampleSelect') {
+    if (el.value === '') return;
+    const sample = state.cudaSamples[Number(el.value)];
+    if (!sample) return;
+    state.gpuSelectedFile = sample.name;
+    state.cudaSource = sample.content;
+    state.hipSource = '';
+    state.hipifyResult = null;
+    renderCurrentPageOnly();
+  } else if (el.id === 'sbSampleSelect') {
+    const codeSamples = state.allSamples.filter(s => s.language === 'python' || s.language === 'c' || s.language === 'cpp');
+    if (el.value === '') return;
+    const sample = codeSamples[Number(el.value)];
+    if (!sample) return;
+    state.sandbox.selectedSample = sample.name;
+    state.sandbox.language = sample.language;
+    state.sandbox.source = sample.content;
+    renderCurrentPageOnly();
+  } else if (el.id === 'sbLanguage') state.sandbox.language = el.value;
+  else if (el.id === 'sbTargetPeer') state.sandbox.targetPeer = el.value;
+  else if (el.id === 'shellTargetPeer') state.sandbox.shellPeer = el.value;
+  else if (el.id === 'ctTier') { state.createForm.tier = el.value; renderCurrentPageOnly(); }
+  else if (el.id === 'ctTargetNode') state.createForm.targetNode = el.value;
+  else if (el.id === 'ctLang') state.createForm.language = el.value;
+  else if (el.id === 'ctGpuType') state.createForm.gpuTaskType = el.value;
+});
+
+document.addEventListener('submit', (e) => {
+  const form = e.target;
+  if (!form || !form.id) return;
+  e.preventDefault();
+
+  if (form.id === 'shellExecForm') runShellExec();
+  else if (form.id === 'allowlistAddForm') {
+    const entry = state.workerSettings.newPeerInput.trim();
+    if (!entry) return;
+    const next = Array.from(new Set([...state.workerSettings.codeAllowlist, entry]));
+    updateWorkerAllowlist(next);
+  } else if (form.id === 'createTaskForm') submitCreatedTask();
+  else if (form.id === 'putBlobForm') submitNewDataset();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+});
+
+window.addEventListener('DOMContentLoaded', () => {
+  navigate('overview');
+  syncBackend();
+  loadSamplesFromBackend();
+  initWebSocket();
+  setInterval(syncBackend, 5000);
+});

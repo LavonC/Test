@@ -66,11 +66,10 @@ type ContributorRelay struct {
 }
 
 type relaySession struct {
-	token     string
-	creatorID string
-	creator   net.Conn
-	created   time.Time
-	readyCh   chan net.Conn
+	token   string
+	creator net.Conn
+	created time.Time
+	readyCh chan net.Conn
 }
 
 // NewContributorRelay starts a contributor relay server.

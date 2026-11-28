@@ -5,6 +5,9 @@
 #    so embedded or standalone UDP TURN relays cannot function here. UNICOMPUTE_TURN must remain "false";
 #    peers must establish direct P2P connections or configure an external TURN server (e.g., Coturn).
 
+# 3. Set UNICOMPUTE_AUTH_TOKEN as a secret environment variable in the Render dashboard so free-tier
+#    spin-downs do not generate ephemeral tokens and lock out connected worker nodes.
+
 services:
   - type: web
     name: unicompute-coordinator
@@ -19,3 +22,5 @@ services:
         value: "false"
       - key: UNICOMPUTE_REALM
         value: "unicompute.edu"
+      - key: UNICOMPUTE_AUTH_TOKEN
+        sync: false

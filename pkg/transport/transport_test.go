@@ -1400,10 +1400,18 @@ func TestPeerConnection_MultiFrameDiskStreamingAndEOFGuards(t *testing.T) {
 	mBPtr.Store(mB)
 
 	connBCh := make(chan *PeerConnection, 1)
+	fileDoneCh := make(chan struct{}, 1)
 	mB.SetOnNewConnection(func(pc *PeerConnection) {
 		pc.SetOnChunkFileReceived(func(chunkID string, filePath string, size int64) {
-			defer os.Remove(filePath)
+			defer func() {
+				_ = os.Remove(filePath)
+				select {
+				case fileDoneCh <- struct{}{}:
+				default:
+				}
+			}()
 			got, readErr := os.ReadFile(filePath)
+			_ = os.Remove(filePath)
 			if readErr != nil {
 				_ = pc.SendChunkError(chunkID, readErr.Error())
 				return
@@ -1434,6 +1442,11 @@ func TestPeerConnection_MultiFrameDiskStreamingAndEOFGuards(t *testing.T) {
 	largePayload := bytes.Repeat([]byte("0123456789abcdef"), 16*1024) // 256 KiB
 	if err := connA.SendChunk(ctx, "large-256k-chunk", bytes.NewReader(largePayload), int64(len(largePayload))); err != nil {
 		t.Fatalf("SendChunk 256 KiB failed: %v", err)
+	}
+	select {
+	case <-fileDoneCh:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receiver file cleanup")
 	}
 	// Verify no temp files leaked in chunkTmpB
 	entries, err := os.ReadDir(chunkTmpB)
@@ -1620,5 +1633,160 @@ func TestManager_EmbeddedTURNRelayWithCoordinatorCredentials(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for DataChannel message over EmbeddedTURN relay")
+	}
+}
+
+func TestPeerConnection_ConcurrentSameChunkIDSend(t *testing.T) {
+	hub, err := signaling.NewHub("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewHub failed: %v", err)
+	}
+	defer hub.Close()
+
+	var mAPtr, mBPtr atomic.Pointer[Manager]
+	sigA, _ := signaling.NewClient(hub.URL(), "conc-A", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mAPtr.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	defer sigA.Close()
+	sigB, _ := signaling.NewClient(hub.URL(), "conc-B", func(env protocol.Envelope) {
+		if env.Type != protocol.MsgRegisterAck {
+			if m := mBPtr.Load(); m != nil {
+				_ = m.HandleSignalingEnvelope(env)
+			}
+		}
+	})
+	defer sigB.Close()
+
+	mA, _ := NewManager(Config{NodeID: "conc-A"}, sigA, nil)
+	defer mA.Close()
+	mAPtr.Store(mA)
+	mB, _ := NewManager(Config{NodeID: "conc-B"}, sigB, nil)
+	defer mB.Close()
+	mBPtr.Store(mB)
+
+	// Receiver deliberately holds off ACK briefly so first SendChunk stays active in ackWaiters
+	holdAck := make(chan struct{})
+	mB.SetOnNewConnection(func(pc *PeerConnection) {
+		pc.SetOnChunkFileReceived(func(chunkID string, filePath string, size int64) {
+			defer os.Remove(filePath)
+			<-holdAck
+			_ = pc.SendChunkAck(chunkID)
+		})
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	connA, err := mA.ConnectPeer(ctx, "conc-B")
+	if err != nil {
+		t.Fatalf("ConnectPeer failed: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		payload := []byte("first-send-payload")
+		firstDone <- connA.SendChunk(ctx, "dup-send-chunk", bytes.NewReader(payload), int64(len(payload)))
+	}()
+
+	// Wait until ackWaiters["dup-send-chunk"] is registered
+	deadline := time.Now().Add(2 * time.Second)
+	registered := false
+	for time.Now().Before(deadline) {
+		connA.ackMu.Lock()
+		_, registered = connA.ackWaiters["dup-send-chunk"]
+		connA.ackMu.Unlock()
+		if registered {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !registered {
+		close(holdAck)
+		t.Fatalf("first SendChunk never registered ackWaiter")
+	}
+
+	payload2 := []byte("second-send-payload")
+	err2 := connA.SendChunk(ctx, "dup-send-chunk", bytes.NewReader(payload2), int64(len(payload2)))
+	if err2 == nil || !strings.Contains(err2.Error(), "concurrent SendChunk") {
+		close(holdAck)
+		t.Fatalf("expected concurrent SendChunk error for duplicate chunkID, got: %v", err2)
+	}
+
+	close(holdAck)
+	if err1 := <-firstDone; err1 != nil {
+		t.Fatalf("first SendChunk should succeed cleanly without being orphaned, got: %v", err1)
+	}
+}
+
+func TestPeerConnection_InFlightTTLEviction(t *testing.T) {
+	tmpDir := t.TempDir()
+	conn := newPeerConnection("sess-ttl", "local", "remote", nil, nil)
+	conn.chunkTempDir = tmpDir
+	defer conn.Close()
+
+	// Create two incomplete in-flight chunks
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagStart, 0, 1024, "stale-chunk", []byte("partial-stale")))
+	conn.handleChunkMessage(buildTestChunkFrame(protocol.FlagStart, 0, 2048, "fresh-chunk", []byte("partial-fresh")))
+
+	conn.inFlightMu.Lock()
+	staleEntry, okStale := conn.inFlight["stale-chunk"]
+	freshEntry, okFresh := conn.inFlight["fresh-chunk"]
+	if !okStale || !okFresh {
+		conn.inFlightMu.Unlock()
+		t.Fatalf("expected both in-flight chunks to exist, got stale=%v fresh=%v", okStale, okFresh)
+	}
+	stalePath := staleEntry.tmpPath
+	freshPath := freshEntry.tmpPath
+	// Age only stale-chunk past InFlightChunkTTL
+	now := time.Now()
+	staleEntry.lastActivity = now.Add(-(InFlightChunkTTL + time.Second))
+	freshEntry.lastActivity = now
+	conn.inFlightMu.Unlock()
+
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatalf("expected stale temp file %s to exist before eviction: %v", stalePath, err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("expected fresh temp file %s to exist before eviction: %v", freshPath, err)
+	}
+
+	conn.evictStaleInFlight(now)
+
+	// Stale chunk must be evicted and its temp file deleted on disk
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale temp file %s to be deleted after TTL eviction, stat err=%v", stalePath, err)
+	}
+	// Fresh chunk must remain active on disk and in map
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("expected fresh temp file %s to remain after TTL eviction: %v", freshPath, err)
+	}
+
+	conn.inFlightMu.Lock()
+	_, stillStale := conn.inFlight["stale-chunk"]
+	_, stillFresh := conn.inFlight["fresh-chunk"]
+	totalBytes := conn.totalInFlightBytes
+	conn.inFlightMu.Unlock()
+
+	if stillStale {
+		t.Fatalf("expected stale-chunk to be evicted from inFlight map")
+	}
+	if !stillFresh {
+		t.Fatalf("expected fresh-chunk to remain in inFlight map")
+	}
+	if totalBytes != 2048 {
+		t.Fatalf("expected totalInFlightBytes == 2048 after evicting 1024-byte stale chunk, got %d", totalBytes)
+	}
+
+	select {
+	case err := <-staleEntry.errCh:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("expected ErrTimeout on evicted entry errCh, got %v", err)
+		}
+	default:
+		t.Fatalf("expected ErrTimeout notification on evicted entry errCh")
 	}
 }
